@@ -580,7 +580,7 @@ def tela_conversas(df_conv, df_leads):
                 c1.markdown(f'<span class="badge-alerta">{a}</span>', unsafe_allow_html=True)
         
         c2.text(f"+{row['telefone']}")
-        c3.text((row['unidade'] or '-').title())
+        c3.text(str(row['unidade']).title() if pd.notna(row.get('unidade')) and row.get('unidade') else '-')
         
         papel_emoji = "👤" if row['ultimo_papel'] == 'user' else "💚"
         c4.text(f"{papel_emoji} {row['ultima_mensagem_preview']}")
