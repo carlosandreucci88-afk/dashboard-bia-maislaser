@@ -205,6 +205,40 @@ def carregar_leads():
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=10)
+def carregar_configuracoes():
+    """Carrega configurações do Supabase."""
+    sb = get_supabase()
+    try:
+        result = sb.table("configuracoes").select("*").eq("id", 1).execute()
+        if result.data:
+            return result.data[0]
+        return {}
+    except Exception as e:
+        st.error(f"Erro ao carregar configurações: {e}")
+        return {}
+
+
+def salvar_configuracoes(mogi_telefone, mogi_nome, suzano_telefone, suzano_nome, modo_manutencao):
+    """Salva configurações no Supabase."""
+    sb = get_supabase()
+    try:
+        sb.table("configuracoes").upsert({
+            "id": 1,
+            "mogi_telefone": mogi_telefone,
+            "mogi_nome": mogi_nome,
+            "suzano_telefone": suzano_telefone,
+            "suzano_nome": suzano_nome,
+            "modo_manutencao": modo_manutencao,
+            "atualizado_em": datetime.now(TZ_SP).isoformat(),
+        }).execute()
+        carregar_configuracoes.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao salvar: {e}")
+        return False
+
+
 @st.cache_data(ttl=30)
 def carregar_agendamentos():
     """Carrega agendamentos."""
@@ -773,73 +807,85 @@ def tela_metricas(df_conv, df_leads, df_agend):
 # ============================================================================
 
 def tela_configuracoes():
-    """Tela de configurações da Bia."""
+    """Tela de configurações da Bia — integrada com Supabase."""
     st.markdown("## ⚙️ Configurações")
-    
-    st.info("Estas configurações ainda não estão conectadas ao fluxo do n8n. Por enquanto, é só pra você guardar os números e visualizar — vamos integrar quando implementar a ramificação [TRANSFERIR_COORDENADORA].")
-    
+
+    # Carrega configs atuais do Supabase
+    cfg = carregar_configuracoes()
+
+    st.success("✅ Configurações integradas ao Supabase — ao salvar, o n8n vai buscar os números automaticamente.")
+
     st.markdown("### 📞 WhatsApp das coordenadoras de vendas")
     st.caption("Quando a Bia disparar [TRANSFERIR_COORDENADORA], ela vai mandar um aviso pra esses números.")
-    
+
     col_c1, col_c2 = st.columns(2)
     with col_c1:
         st.markdown("**Mogi das Cruzes**")
         coord_mogi = st.text_input(
             "Número (com DDD, só dígitos)",
-            value=st.session_state.get('coord_mogi', ''),
+            value=cfg.get('mogi_telefone', ''),
             key='input_coord_mogi',
             placeholder="11999999999"
         )
         nome_coord_mogi = st.text_input(
             "Nome da coordenadora",
-            value=st.session_state.get('nome_coord_mogi', ''),
+            value=cfg.get('mogi_nome', ''),
             key='input_nome_coord_mogi',
-            placeholder="Ex: Juliana"
+            placeholder="Ex: Beatriz"
         )
     with col_c2:
         st.markdown("**Suzano**")
         coord_suzano = st.text_input(
             "Número (com DDD, só dígitos)",
-            value=st.session_state.get('coord_suzano', ''),
+            value=cfg.get('suzano_telefone', ''),
             key='input_coord_suzano',
             placeholder="11999999999"
         )
         nome_coord_suzano = st.text_input(
             "Nome da coordenadora",
-            value=st.session_state.get('nome_coord_suzano', ''),
+            value=cfg.get('suzano_nome', ''),
             key='input_nome_coord_suzano',
-            placeholder="Ex: Renata"
+            placeholder="Ex: Rafaela"
         )
-    
-    if st.button("💾 Salvar (sessão local)", type="primary"):
-        st.session_state['coord_mogi'] = coord_mogi
-        st.session_state['nome_coord_mogi'] = nome_coord_mogi
-        st.session_state['coord_suzano'] = coord_suzano
-        st.session_state['nome_coord_suzano'] = nome_coord_suzano
-        st.success("✅ Salvo na sessão! (precisa integrar com o n8n pra valer de verdade)")
-    
+
     st.divider()
-    
+
     st.markdown("### 🛠️ Modo manutenção")
     manutencao = st.toggle(
         "Pausar a Bia (ela para de responder)",
-        value=st.session_state.get('manutencao', False),
-        help="Quando ligado, a Bia para de responder novas mensagens. Útil pra testes ou pra parar tudo em emergência."
+        value=cfg.get('modo_manutencao', False),
+        help="Quando ligado, o n8n vai checar essa flag e não processar novas mensagens."
     )
-    st.session_state['manutencao'] = manutencao
     if manutencao:
-        st.warning("⚠️ Modo manutenção ATIVO. Lembrando que essa configuração ainda não está ligada ao n8n — quando integrar, ela vai funcionar de verdade.")
-    
+        st.warning("⚠️ Modo manutenção ATIVO — a Bia vai parar de responder quando o n8n checar essa flag.")
+
     st.divider()
-    
+
+    if st.button("💾 Salvar no Supabase", type="primary"):
+        ok = salvar_configuracoes(
+            mogi_telefone=coord_mogi,
+            mogi_nome=nome_coord_mogi,
+            suzano_telefone=coord_suzano,
+            suzano_nome=nome_coord_suzano,
+            modo_manutencao=manutencao,
+        )
+        if ok:
+            st.success("✅ Salvo! O n8n vai usar esses dados na próxima transferência.")
+            st.balloons()
+
+    st.divider()
+
     st.markdown("### 📊 Informações do sistema")
     col_i1, col_i2 = st.columns(2)
     with col_i1:
-        st.metric("Versão do cérebro", "v3.2")
+        st.metric("Versão do cérebro", "v3.4")
         st.metric("Modelo Claude", "claude-haiku-4-5")
     with col_i2:
         st.metric("Webhook n8n", "✅ Online")
         st.caption("https://maislaser-robo.app.n8n.cloud/webhook/maislaser-whatsapp")
+
+    if cfg.get('atualizado_em'):
+        st.caption(f"Última atualização das configs: {cfg['atualizado_em'][:19].replace('T', ' ')}")
 
 
 # ============================================================================
