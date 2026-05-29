@@ -845,6 +845,207 @@ def tela_configuracoes():
 # ============================================================================
 # MAIN
 # ============================================================================
+# TELA: TRANSFERÊNCIAS PRA COORDENADORA
+# ============================================================================
+
+def tela_transferencias(df_leads, df_conv):
+    """Lista todas as transferências feitas pra coordenadoras."""
+    st.markdown("# 🔥 Transferências")
+    st.caption("Leads que a Bia encaminhou pras coordenadoras de venda")
+    
+    # Filtra apenas leads com transferência
+    if df_leads is None or df_leads.empty or 'transferido_em' not in df_leads.columns:
+        st.info("📭 Nenhuma transferência registrada ainda. Quando a Bia transferir o primeiro lead, ele aparecerá aqui.")
+        return
+    
+    df_transf = df_leads[df_leads['transferido_em'].notna()].copy()
+    
+    if df_transf.empty:
+        st.info("📭 Nenhuma transferência registrada ainda. Quando a Bia transferir o primeiro lead, ele aparecerá aqui.")
+        return
+    
+    # Converte timestamps pra fuso SP
+    df_transf['transferido_em'] = pd.to_datetime(df_transf['transferido_em'])
+    try:
+        df_transf['transferido_em_sp'] = df_transf['transferido_em'].dt.tz_convert(TZ_SP)
+    except Exception:
+        df_transf['transferido_em_sp'] = df_transf['transferido_em']
+    
+    df_transf = df_transf.sort_values('transferido_em', ascending=False)
+    
+    # ── BOTÕES SEGMENTADOS DE UNIDADE (estilo iOS) ──
+    st.markdown("")  # espaço
+    
+    # CSS pra deixar os botões iguais (segmented control)
+    st.markdown("""
+        <style>
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] button[kind="primary"] {
+            background-color: #22c55e !important;
+            color: white !important;
+            border-color: #22c55e !important;
+            font-weight: 600 !important;
+        }
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] button[kind="secondary"] {
+            background-color: #f3f4f6 !important;
+            color: #374151 !important;
+            border-color: #e5e7eb !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    # Estado da seleção da unidade
+    if 'transf_unidade_btn' not in st.session_state:
+        st.session_state['transf_unidade_btn'] = "Todas"
+    
+    # Calcula contagens por unidade pra mostrar no botão
+    cnt_todas = len(df_transf)
+    cnt_mogi = len(df_transf[df_transf['unidade'] == 'Mogi das Cruzes'])
+    cnt_suzano = len(df_transf[df_transf['unidade'] == 'Suzano'])
+    
+    btn_col1, btn_col2, btn_col3, _ = st.columns([1.2, 1.6, 1.2, 4])
+    
+    with btn_col1:
+        is_todas = st.session_state['transf_unidade_btn'] == "Todas"
+        if st.button(f"🏢 Todas ({cnt_todas})", 
+                     type="primary" if is_todas else "secondary",
+                     use_container_width=True,
+                     key="btn_unid_todas"):
+            st.session_state['transf_unidade_btn'] = "Todas"
+            st.rerun()
+    
+    with btn_col2:
+        is_mogi = st.session_state['transf_unidade_btn'] == "Mogi das Cruzes"
+        if st.button(f"📍 Mogi das Cruzes ({cnt_mogi})", 
+                     type="primary" if is_mogi else "secondary",
+                     use_container_width=True,
+                     key="btn_unid_mogi"):
+            st.session_state['transf_unidade_btn'] = "Mogi das Cruzes"
+            st.rerun()
+    
+    with btn_col3:
+        is_suzano = st.session_state['transf_unidade_btn'] == "Suzano"
+        if st.button(f"📍 Suzano ({cnt_suzano})", 
+                     type="primary" if is_suzano else "secondary",
+                     use_container_width=True,
+                     key="btn_unid_suzano"):
+            st.session_state['transf_unidade_btn'] = "Suzano"
+            st.rerun()
+    
+    unidade_filtro = st.session_state['transf_unidade_btn']
+    
+    st.markdown("")  # espaço
+    
+    # ── FILTROS MENORES (período e coordenadora) ──
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        periodo = st.selectbox(
+            "Período",
+            ["Últimas 24h", "Últimos 7 dias", "Últimos 30 dias", "Tudo"],
+            index=1,
+            key="transf_periodo"
+        )
+    
+    with col2:
+        coordenadoras = ["Todas"] + sorted(df_transf['transferido_para'].dropna().unique().tolist())
+        coordenadora_filtro = st.selectbox("Coordenadora", coordenadoras, key="transf_coord")
+    
+    # Aplica filtros
+    agora = datetime.now(TZ_SP)
+    if periodo == "Últimas 24h":
+        cutoff = agora - timedelta(hours=24)
+    elif periodo == "Últimos 7 dias":
+        cutoff = agora - timedelta(days=7)
+    elif periodo == "Últimos 30 dias":
+        cutoff = agora - timedelta(days=30)
+    else:
+        cutoff = None
+    
+    df_filtrado = df_transf.copy()
+    if cutoff is not None:
+        df_filtrado = df_filtrado[df_filtrado['transferido_em_sp'] >= cutoff]
+    
+    if coordenadora_filtro != "Todas":
+        df_filtrado = df_filtrado[df_filtrado['transferido_para'] == coordenadora_filtro]
+    
+    if unidade_filtro != "Todas":
+        df_filtrado = df_filtrado[df_filtrado['unidade'] == unidade_filtro]
+    
+    # ── CARDS DE RESUMO ──
+    st.divider()
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Total no período", len(df_filtrado))
+    
+    with col2:
+        if 'transferido_para' in df_filtrado.columns:
+            top_coord = df_filtrado['transferido_para'].value_counts()
+            top_nome = top_coord.index[0] if len(top_coord) > 0 else "—"
+            top_qtd = top_coord.iloc[0] if len(top_coord) > 0 else 0
+            st.metric(f"Top: {top_nome}", f"{top_qtd} leads")
+    
+    with col3:
+        avisados = df_filtrado['cliente_avisado'].sum() if 'cliente_avisado' in df_filtrado.columns else 0
+        st.metric("Cliente avisado ✅", int(avisados))
+    
+    with col4:
+        nao_avisados = len(df_filtrado) - (df_filtrado['cliente_avisado'].sum() if 'cliente_avisado' in df_filtrado.columns else 0)
+        st.metric("Pendente aviso ⚠️", int(nao_avisados))
+    
+    # ── LISTA ──
+    st.divider()
+    st.markdown(f"### 📋 Lista — {len(df_filtrado)} transferência(s)")
+    
+    if df_filtrado.empty:
+        st.info("Nenhuma transferência no período/filtros selecionados.")
+        return
+    
+    # Cabeçalho
+    h_col1, h_col2, h_col3, h_col4, h_col5, h_col6 = st.columns([1.5, 1.5, 1.2, 1.2, 3, 1])
+    h_col1.markdown("**Cliente**")
+    h_col2.markdown("**Telefone**")
+    h_col3.markdown("**Unidade**")
+    h_col4.markdown("**Coordenadora**")
+    h_col5.markdown("**Sinal de compra**")
+    h_col6.markdown("**Quando**")
+    st.divider()
+    
+    # Linhas
+    for _, lead in df_filtrado.iterrows():
+        col1, col2, col3, col4, col5, col6 = st.columns([1.5, 1.5, 1.2, 1.2, 3, 1])
+        
+        nome = lead.get('nome') or "Sem nome"
+        telefone = lead.get('telefone', '—')
+        unidade = lead.get('unidade') or '—'
+        coord = lead.get('transferido_para') or '—'
+        sinal = lead.get('ultimo_sinal_compra') or '—'
+        if isinstance(sinal, str) and len(sinal) > 60:
+            sinal = sinal[:60] + "..."
+        
+        try:
+            quando = lead['transferido_em_sp'].strftime('%d/%m %H:%M')
+        except Exception:
+            quando = '—'
+        
+        avisado_emoji = " ✅" if lead.get('cliente_avisado') else " ⚠️"
+        
+        col1.write(f"{nome}{avisado_emoji}")
+        col2.write(f"+{telefone}" if not telefone.startswith('+') else telefone)
+        col3.write(unidade)
+        col4.write(coord)
+        col5.write(f"💬 _{sinal}_" if sinal != '—' else '—')
+        col6.write(quando)
+        
+        # Botão pra ver conversa
+        if st.button("Ver conversa", key=f"ver_transf_{telefone}_{lead.name}"):
+            st.session_state['conversa_selecionada'] = telefone
+            st.rerun()
+        
+        st.markdown("---")
+
+
+# ============================================================================
 
 def main():
     if not check_password():
@@ -863,7 +1064,7 @@ def main():
         auto_refresh = st.checkbox("Auto-refresh a cada 30s", value=False)
         
         st.divider()
-        st.caption("**Versão Cérebro:** v3.2")
+        st.caption("**Versão Cérebro:** v3.3")
         st.caption("**Modelo:** claude-haiku-4-5")
         
         st.divider()
@@ -885,15 +1086,18 @@ def main():
         renderizar_conversa(st.session_state['conversa_selecionada'], df_conv, df_leads)
     else:
         # Abas principais
-        tab1, tab2, tab3 = st.tabs(["💬 Conversas", "📈 Métricas", "⚙️ Configurações"])
+        tab1, tab2, tab3, tab4 = st.tabs(["💬 Conversas", "🔥 Transferências", "📈 Métricas", "⚙️ Configurações"])
         
         with tab1:
             tela_conversas(df_conv, df_leads)
         
         with tab2:
-            tela_metricas(df_conv, df_leads, df_agend)
+            tela_transferencias(df_leads, df_conv)
         
         with tab3:
+            tela_metricas(df_conv, df_leads, df_agend)
+        
+        with tab4:
             tela_configuracoes()
     
     # Auto refresh
