@@ -645,10 +645,10 @@ def tela_metricas(df_conv, df_leads, df_agend):
     # ─── Cards de topo ──────────────────────────────────────────────
     st.markdown("### Resumo do período")
     
-    conversas_unicas = df_conv_p['telefone'].nunique() if not df_conv_p.empty else 0
+    conversas_unicas = df_conv_p['telefone'].nunique() if not df_conv_p.empty and 'telefone' in df_conv_p.columns else 0
     total_msgs = len(df_conv_p)
-    msgs_bia = len(df_conv_p[df_conv_p['papel'] == 'assistant'])
-    tokens_total = int(df_conv_p['tokens'].sum()) if not df_conv_p.empty else 0
+    msgs_bia = len(df_conv_p[df_conv_p['papel'] == 'assistant']) if not df_conv_p.empty and 'papel' in df_conv_p.columns else 0
+    tokens_total = int(df_conv_p['tokens'].sum()) if not df_conv_p.empty and 'tokens' in df_conv_p.columns else 0
     custo_usd = (tokens_total / 1_000_000) * CUSTO_USD_POR_MTOK
     custo_brl = custo_usd * 5.50
     
@@ -670,20 +670,24 @@ def tela_metricas(df_conv, df_leads, df_agend):
         iniciaram = conversas_unicas
         
         # Engajaram = conversas com 3+ mensagens
-        msgs_por_tel = df_conv_p.groupby('telefone').size()
-        engajaram = (msgs_por_tel >= 3).sum()
+        if not df_conv_p.empty and 'telefone' in df_conv_p.columns:
+            msgs_por_tel = df_conv_p.groupby('telefone').size()
+            engajaram = (msgs_por_tel >= 3).sum()
+        else:
+            engajaram = 0
         
         # Transferiram = conversas com tag de transferência
-        df_conv_bia = df_conv_p[df_conv_p['papel'] == 'assistant']
         transferiram = 0
         agendaram = 0
-        for tel in df_conv_p['telefone'].unique():
-            msgs_tel = df_conv_bia[df_conv_bia['telefone'] == tel]['mensagem'].str.lower().fillna('')
-            todas = ' '.join(msgs_tel.tolist())
-            if 'transferir_coordenadora' in todas or 'transferir_humano' in todas:
-                transferiram += 1
-            if 'agendar|' in todas or '[agendar' in todas:
-                agendaram += 1
+        if not df_conv_p.empty and 'papel' in df_conv_p.columns:
+            df_conv_bia = df_conv_p[df_conv_p['papel'] == 'assistant']
+            for tel in df_conv_p['telefone'].unique():
+                msgs_tel = df_conv_bia[df_conv_bia['telefone'] == tel]['mensagem'].str.lower().fillna('')
+                todas = ' '.join(msgs_tel.tolist())
+                if 'transferir_coordenadora' in todas or 'transferir_humano' in todas:
+                    transferiram += 1
+                if 'agendar|' in todas or '[agendar' in todas:
+                    agendaram += 1
         
         fig = go.Figure(go.Funnel(
             y=["Iniciaram conversa", "Engajaram (3+ msgs)", "Transferiram", "Agendaram"],
@@ -701,7 +705,7 @@ def tela_metricas(df_conv, df_leads, df_agend):
     
     with col_g1:
         st.markdown("### 📅 Conversas por hora do dia")
-        if not df_conv_p.empty:
+        if not df_conv_p.empty and 'papel' in df_conv_p.columns:
             df_user = df_conv_p[df_conv_p['papel'] == 'user'].copy()
             if not df_user.empty:
                 df_user['hora'] = df_user['criado_em'].dt.tz_convert(TZ_SP).dt.hour
@@ -754,7 +758,7 @@ def tela_metricas(df_conv, df_leads, df_agend):
     
     # ─── Top motivos de transferência ──────────────────────────────
     st.markdown("### 🔄 Motivos de transferência / encerramento")
-    if not df_conv_p.empty:
+    if not df_conv_p.empty and 'papel' in df_conv_p.columns:
         df_bia = df_conv_p[df_conv_p['papel'] == 'assistant']
         motivos = {
             "🤝 Coordenadora": 0,
