@@ -520,8 +520,9 @@ def tela_conversas(df_conv, df_leads):
     else:
         dt_inicio = agora - timedelta(days=30)
     
-    df_conv = df_conv[df_conv['criado_em'] >= dt_inicio]
-    
+    if not df_conv.empty and 'criado_em' in df_conv.columns:
+        df_conv = df_conv[df_conv['criado_em'] >= dt_inicio]
+
     # Agrupa por telefone
     df_agrupado = agrupar_conversas(df_conv, df_leads)
     
@@ -636,7 +637,10 @@ def tela_metricas(df_conv, df_leads, df_agend):
         dt_inicio = agora - timedelta(days=30)
         dias = 30
     
-    df_conv_p = df_conv[df_conv['criado_em'] >= dt_inicio]
+    if not df_conv.empty and 'criado_em' in df_conv.columns:
+        df_conv_p = df_conv[df_conv['criado_em'] >= dt_inicio]
+    else:
+        df_conv_p = df_conv
     
     # ─── Cards de topo ──────────────────────────────────────────────
     st.markdown("### Resumo do período")
@@ -713,7 +717,7 @@ def tela_metricas(df_conv, df_leads, df_agend):
     
     with col_g2:
         st.markdown("### 🏢 Comparativo unidades")
-        if not df_leads.empty:
+        if not df_leads.empty and 'criado_em' in df_leads.columns:
             df_leads_p = df_leads[df_leads['criado_em'] >= dt_inicio]
             if not df_leads_p.empty:
                 unidade_count = df_leads_p['unidade'].fillna('desconhecido').value_counts().reset_index()
