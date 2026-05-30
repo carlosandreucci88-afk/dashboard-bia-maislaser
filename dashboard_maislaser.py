@@ -298,11 +298,17 @@ def carregar_configuracoes():
         return {}
 
 
-def salvar_configuracoes(mogi_telefone, mogi_nome, suzano_telefone, suzano_nome, modo_manutencao):
-    """Salva configurações no Supabase."""
+def salvar_configuracoes(mogi_telefone, mogi_nome, suzano_telefone, suzano_nome, modo_manutencao,
+                          recepcao_mogi_telefone=None, recepcao_mogi_nome=None,
+                          recepcao_suzano_telefone=None, recepcao_suzano_nome=None):
+    """Salva configurações no Supabase.
+    
+    Os parâmetros recepcao_* são opcionais pra manter compatibilidade.
+    Quando todos forem fornecidos, os 4 campos da recepção também são gravados.
+    """
     sb = get_supabase()
     try:
-        sb.table("configuracoes").upsert({
+        dados = {
             "id": 1,
             "mogi_telefone": mogi_telefone,
             "mogi_nome": mogi_nome,
@@ -310,7 +316,18 @@ def salvar_configuracoes(mogi_telefone, mogi_nome, suzano_telefone, suzano_nome,
             "suzano_nome": suzano_nome,
             "modo_manutencao": modo_manutencao,
             "atualizado_em": datetime.now(TZ_SP).isoformat(),
-        }).execute()
+        }
+        # Adiciona campos de recepção só se fornecidos (evita sobrescrever com None)
+        if recepcao_mogi_telefone is not None:
+            dados["recepcao_mogi_telefone"] = recepcao_mogi_telefone
+        if recepcao_mogi_nome is not None:
+            dados["recepcao_mogi_nome"] = recepcao_mogi_nome
+        if recepcao_suzano_telefone is not None:
+            dados["recepcao_suzano_telefone"] = recepcao_suzano_telefone
+        if recepcao_suzano_nome is not None:
+            dados["recepcao_suzano_nome"] = recepcao_suzano_nome
+        
+        sb.table("configuracoes").upsert(dados).execute()
         carregar_configuracoes.clear()
         return True
     except Exception as e:
@@ -965,6 +982,42 @@ def tela_configuracoes():
 
     st.divider()
 
+    # ── NOVO (Fase 6): WhatsApp das recepções ──
+    st.markdown("### 🙋 WhatsApp das recepções")
+    st.caption("Quando a Bia disparar [TRANSFERIR_HUMANO] (reagendamento, cliente confuso, restrição médica), o aviso vai pra esses números.")
+
+    col_r1, col_r2 = st.columns(2)
+    with col_r1:
+        st.markdown("**Mogi das Cruzes**")
+        recep_mogi = st.text_input(
+            "Número (com DDD, só dígitos)",
+            value=cfg.get('recepcao_mogi_telefone', ''),
+            key='input_recep_mogi',
+            placeholder="11999999999"
+        )
+        nome_recep_mogi = st.text_input(
+            "Nome da recepção",
+            value=cfg.get('recepcao_mogi_nome', ''),
+            key='input_nome_recep_mogi',
+            placeholder="Ex: Recepção Mogi"
+        )
+    with col_r2:
+        st.markdown("**Suzano**")
+        recep_suzano = st.text_input(
+            "Número (com DDD, só dígitos)",
+            value=cfg.get('recepcao_suzano_telefone', ''),
+            key='input_recep_suzano',
+            placeholder="11999999999"
+        )
+        nome_recep_suzano = st.text_input(
+            "Nome da recepção",
+            value=cfg.get('recepcao_suzano_nome', ''),
+            key='input_nome_recep_suzano',
+            placeholder="Ex: Recepção Suzano"
+        )
+
+    st.divider()
+
     st.markdown("### 🛠️ Modo manutenção")
     manutencao = st.toggle(
         "Pausar a Bia (ela para de responder)",
@@ -983,6 +1036,10 @@ def tela_configuracoes():
             suzano_telefone=coord_suzano,
             suzano_nome=nome_coord_suzano,
             modo_manutencao=manutencao,
+            recepcao_mogi_telefone=recep_mogi,
+            recepcao_mogi_nome=nome_recep_mogi,
+            recepcao_suzano_telefone=recep_suzano,
+            recepcao_suzano_nome=nome_recep_suzano,
         )
         if ok:
             st.success("✅ Salvo! O n8n vai usar esses dados na próxima transferência.")
@@ -993,7 +1050,7 @@ def tela_configuracoes():
     st.markdown("### 📊 Informações do sistema")
     col_i1, col_i2 = st.columns(2)
     with col_i1:
-        st.metric("Versão do cérebro", "v3.7")
+        st.metric("Versão do cérebro", "v3.8")
         st.metric("Modelo Claude", "claude-haiku-4-5")
     with col_i2:
         st.metric("Webhook n8n", "✅ Online")
@@ -1453,7 +1510,7 @@ def main():
         auto_refresh = st.checkbox("Auto-refresh a cada 30s", value=False)
         
         st.divider()
-        st.caption("**Versão Cérebro:** v3.7")
+        st.caption("**Versão Cérebro:** v3.8")
         st.caption("**Modelo:** claude-haiku-4-5")
         
         st.divider()
