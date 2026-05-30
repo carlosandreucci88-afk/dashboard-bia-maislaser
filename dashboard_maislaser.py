@@ -993,7 +993,7 @@ def tela_configuracoes():
     st.markdown("### 📊 Informações do sistema")
     col_i1, col_i2 = st.columns(2)
     with col_i1:
-        st.metric("Versão do cérebro", "v3.6")
+        st.metric("Versão do cérebro", "v3.7")
         st.metric("Modelo Claude", "claude-haiku-4-5")
     with col_i2:
         st.metric("Webhook n8n", "✅ Online")
@@ -1453,7 +1453,7 @@ def main():
         auto_refresh = st.checkbox("Auto-refresh a cada 30s", value=False)
         
         st.divider()
-        st.caption("**Versão Cérebro:** v3.6")
+        st.caption("**Versão Cérebro:** v3.7")
         st.caption("**Modelo:** claude-haiku-4-5")
         
         st.divider()
