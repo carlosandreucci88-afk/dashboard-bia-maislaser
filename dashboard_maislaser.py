@@ -1050,7 +1050,7 @@ def tela_configuracoes():
     st.markdown("### 📊 Informações do sistema")
     col_i1, col_i2 = st.columns(2)
     with col_i1:
-        st.metric("Versão do cérebro", "v3.8")
+        st.metric("Versão do cérebro", "v3.10")
         st.metric("Modelo Claude", "claude-haiku-4-5")
     with col_i2:
         st.metric("Webhook n8n", "✅ Online")
@@ -1153,8 +1153,8 @@ def tela_transferencias(df_leads, df_conv):
     
     st.markdown("")  # espaço
     
-    # ── FILTROS MENORES (período e coordenadora) ──
-    col1, col2 = st.columns(2)
+    # ── FILTROS MENORES (período, tipo e coordenadora) ──
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         periodo = st.selectbox(
@@ -1165,8 +1165,15 @@ def tela_transferencias(df_leads, df_conv):
         )
     
     with col2:
+        tipo_transf = st.selectbox(
+            "Tipo de transferência",
+            ["Todos", "Coordenadora (vendas)", "Recepção (humano)"],
+            key="transf_tipo"
+        )
+    
+    with col3:
         coordenadoras = ["Todas"] + sorted(df_transf['transferido_para'].dropna().unique().tolist())
-        coordenadora_filtro = st.selectbox("Coordenadora", coordenadoras, key="transf_coord")
+        coordenadora_filtro = st.selectbox("Destino", coordenadoras, key="transf_coord")
     
     # Aplica filtros
     agora = datetime.now(TZ_SP)
@@ -1183,6 +1190,12 @@ def tela_transferencias(df_leads, df_conv):
     if cutoff is not None:
         df_filtrado = df_filtrado[df_filtrado['transferido_em_sp'] >= cutoff]
     
+    # Filtro de tipo: identifica recepção pelo prefixo "Recepção" em transferido_para
+    if tipo_transf == "Recepção (humano)":
+        df_filtrado = df_filtrado[df_filtrado['transferido_para'].fillna('').str.startswith('Recepção')]
+    elif tipo_transf == "Coordenadora (vendas)":
+        df_filtrado = df_filtrado[~df_filtrado['transferido_para'].fillna('').str.startswith('Recepção')]
+    
     if coordenadora_filtro != "Todas":
         df_filtrado = df_filtrado[df_filtrado['transferido_para'] == coordenadora_filtro]
     
@@ -1197,19 +1210,21 @@ def tela_transferencias(df_leads, df_conv):
         st.metric("Total no período", len(df_filtrado))
     
     with col2:
+        # Conta por tipo
         if 'transferido_para' in df_filtrado.columns:
-            top_coord = df_filtrado['transferido_para'].value_counts()
-            top_nome = top_coord.index[0] if len(top_coord) > 0 else "—"
-            top_qtd = top_coord.iloc[0] if len(top_coord) > 0 else 0
-            st.metric(f"Top: {top_nome}", f"{top_qtd} leads")
+            mask_recep = df_filtrado['transferido_para'].fillna('').str.startswith('Recepção')
+            qtd_coord = int((~mask_recep).sum())
+            qtd_recep = int(mask_recep.sum())
+            st.metric("💼 Coordenadora", qtd_coord, help="Transferências pra vendas")
     
     with col3:
-        avisados = df_filtrado['cliente_avisado'].sum() if 'cliente_avisado' in df_filtrado.columns else 0
-        st.metric("Cliente avisado ✅", int(avisados))
+        if 'transferido_para' in df_filtrado.columns:
+            st.metric("🙋 Recepção", qtd_recep, help="Transferências pra atendimento humano")
     
     with col4:
-        nao_avisados = len(df_filtrado) - (df_filtrado['cliente_avisado'].sum() if 'cliente_avisado' in df_filtrado.columns else 0)
-        st.metric("Pendente aviso ⚠️", int(nao_avisados))
+        avisados = df_filtrado['cliente_avisado'].sum() if 'cliente_avisado' in df_filtrado.columns else 0
+        nao_avisados = len(df_filtrado) - int(avisados)
+        st.metric("⚠️ Pendente aviso", int(nao_avisados))
     
     # ── LISTA ──
     st.divider()
@@ -1220,23 +1235,30 @@ def tela_transferencias(df_leads, df_conv):
         return
     
     # Cabeçalho
-    h_col1, h_col2, h_col3, h_col4, h_col5, h_col6 = st.columns([1.5, 1.5, 1.2, 1.2, 3, 1])
+    h_col1, h_col2, h_col3, h_col4, h_col5, h_col6 = st.columns([1.5, 1.5, 1.2, 1.4, 3, 1])
     h_col1.markdown("**Cliente**")
     h_col2.markdown("**Telefone**")
     h_col3.markdown("**Unidade**")
-    h_col4.markdown("**Coordenadora**")
-    h_col5.markdown("**Sinal de compra**")
+    h_col4.markdown("**Destino**")
+    h_col5.markdown("**Motivo / Sinal**")
     h_col6.markdown("**Quando**")
     st.divider()
     
     # Linhas
     for _, lead in df_filtrado.iterrows():
-        col1, col2, col3, col4, col5, col6 = st.columns([1.5, 1.5, 1.2, 1.2, 3, 1])
+        col1, col2, col3, col4, col5, col6 = st.columns([1.5, 1.5, 1.2, 1.4, 3, 1])
         
         nome = lead.get('nome') or "Sem nome"
         telefone = lead.get('telefone', '—')
         unidade = lead.get('unidade') or '—'
         coord = lead.get('transferido_para') or '—'
+        # Emoji visual: 🙋 pra recepção, 💼 pra coordenadora
+        if isinstance(coord, str) and coord.startswith('Recepção'):
+            coord_display = f"🙋 {coord}"
+        elif coord != '—':
+            coord_display = f"💼 {coord}"
+        else:
+            coord_display = '—'
         sinal = lead.get('ultimo_sinal_compra') or '—'
         if isinstance(sinal, str) and len(sinal) > 60:
             sinal = sinal[:60] + "..."
@@ -1251,7 +1273,7 @@ def tela_transferencias(df_leads, df_conv):
         col1.write(f"{nome}{avisado_emoji}")
         col2.write(f"+{telefone}" if not telefone.startswith('+') else telefone)
         col3.write(unidade)
-        col4.write(coord)
+        col4.write(coord_display)
         col5.write(f"💬 _{sinal}_" if sinal != '—' else '—')
         col6.write(quando)
         
@@ -1510,7 +1532,7 @@ def main():
         auto_refresh = st.checkbox("Auto-refresh a cada 30s", value=False)
         
         st.divider()
-        st.caption("**Versão Cérebro:** v3.8")
+        st.caption("**Versão Cérebro:** v3.10")
         st.caption("**Modelo:** claude-haiku-4-5")
         
         st.divider()
