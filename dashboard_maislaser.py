@@ -26,6 +26,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
 import time
+import hashlib
 
 # ============================================================================
 # CONFIGURAÇÃO INICIAL
@@ -128,33 +129,111 @@ st.markdown("""
 # AUTENTICAÇÃO SIMPLES
 # ============================================================================
 
+def _expected_login_token():
+    """Token determinístico baseado na senha + sal fixo.
+    Não revela a senha mesmo se vazar (é hash truncado)."""
+    pw = st.secrets.get("DASHBOARD_PASSWORD", "maislaser")
+    salt = "bia_maislaser_v6_persistencia"
+    return hashlib.sha256((pw + salt).encode()).hexdigest()[:32]
+
+
 def check_password():
-    """Tela de login simples por senha."""
+    """Tela de login centralizada com 'Lembrar de mim' (persistente via URL).
     
-    def password_entered():
-        if st.session_state["password"] == st.secrets.get("DASHBOARD_PASSWORD", "maislaser"):
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]
-        else:
-            st.session_state["password_correct"] = False
+    Como funciona o 'Lembrar de mim':
+    - Ao logar com a opção marcada, um token (hash da senha) é colocado
+      na URL como ?t=...
+    - Em acessos futuros (mesma URL/bookmark), o dashboard reconhece o
+      token e loga automaticamente, mesmo após dias.
+    - Ao clicar Sair, o token é removido da URL.
+    """
+    
+    # 1) Tenta auto-login via query string
+    qp = st.query_params
+    if "t" in qp and qp.get("t") == _expected_login_token():
+        st.session_state["password_correct"] = True
     
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
     
-    if not st.session_state["password_correct"]:
-        st.markdown("# 💚 Dashboard Bia — MaisLaser")
-        st.markdown("### Entre com a senha pra acessar")
-        st.text_input(
-            "Senha",
-            type="password",
-            on_change=password_entered,
-            key="password",
-            placeholder="Digite a senha e tecle Enter"
-        )
-        if "password" in st.session_state and not st.session_state["password_correct"]:
-            st.error("❌ Senha incorreta")
-        return False
-    return True
+    if st.session_state["password_correct"]:
+        return True
+    
+    # 2) CSS — esconde chrome do Streamlit e centraliza a caixa de login
+    st.markdown("""
+        <style>
+            header[data-testid="stHeader"] {visibility: hidden;}
+            section[data-testid="stSidebar"] {display: none;}
+            section.main > div.block-container {
+                padding-top: 2rem !important;
+                max-width: 100% !important;
+            }
+            .bia-login-box {
+                background: white;
+                padding: 44px 40px;
+                border-radius: 20px;
+                box-shadow: 0 12px 40px rgba(34, 197, 94, 0.15);
+                max-width: 440px;
+                margin: 4vh auto 0 auto;
+                text-align: center;
+                border: 1px solid #e5e7eb;
+            }
+            .bia-login-title {
+                font-size: 40px;
+                font-weight: 700;
+                color: #166534;
+                margin-bottom: 2px;
+                line-height: 1.1;
+            }
+            .bia-login-subtitle {
+                color: #6b7280;
+                margin-bottom: 28px;
+                font-size: 15px;
+            }
+            .bia-login-box div[data-testid="stTextInput"] label {
+                display: none;
+            }
+            .bia-login-box .stCheckbox {
+                margin-top: 6px;
+                margin-bottom: 14px;
+                text-align: left;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    # 3) Layout centralizado
+    _, col_meio, _ = st.columns([1, 2, 1])
+    with col_meio:
+        st.markdown('<div class="bia-login-box">', unsafe_allow_html=True)
+        st.markdown('<div class="bia-login-title">💚 Bia</div>', unsafe_allow_html=True)
+        st.markdown('<div class="bia-login-subtitle">Dashboard MaisLaser</div>', unsafe_allow_html=True)
+        
+        # Form com Enter pra submeter
+        with st.form("login_form", clear_on_submit=False):
+            senha = st.text_input(
+                "Senha",
+                type="password",
+                placeholder="Digite a senha",
+            )
+            lembrar = st.checkbox(
+                "Lembrar de mim neste dispositivo",
+                value=True,
+                help="Se ativo, você fica logado mesmo depois de fechar o navegador (token salvo na URL desta aba).",
+            )
+            submit = st.form_submit_button("Entrar", type="primary", use_container_width=True)
+        
+        if submit:
+            if senha == st.secrets.get("DASHBOARD_PASSWORD", "maislaser"):
+                st.session_state["password_correct"] = True
+                if lembrar:
+                    st.query_params["t"] = _expected_login_token()
+                st.rerun()
+            else:
+                st.error("❌ Senha incorreta")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    return False
 
 
 # ============================================================================
@@ -259,7 +338,7 @@ def carregar_agendamentos():
 # AGRUPAMENTO DE CONVERSAS POR TELEFONE
 # ============================================================================
 
-def agrupar_conversas(df_conv, df_leads):
+def agrupar_conversas(df_conv, df_leads, df_agend=None):
     """Agrupa mensagens por telefone, retornando uma linha por conversa."""
     if df_conv.empty:
         return pd.DataFrame()
@@ -281,10 +360,13 @@ def agrupar_conversas(df_conv, df_leads):
         lambda x: (x[:80] + '...') if isinstance(x, str) and len(x) > 80 else x
     )
     
-    # Junta com leads pra pegar nome/unidade/status
+    # Junta com leads pra pegar nome/unidade/status (+ transferido_em pra detecção)
     if not df_leads.empty:
+        cols_lead = ['telefone', 'nome', 'unidade', 'status', 'tipo_cliente', 'genero']
+        if 'transferido_em' in df_leads.columns:
+            cols_lead.append('transferido_em')
         grouped = grouped.merge(
-            df_leads[['telefone', 'nome', 'unidade', 'status', 'tipo_cliente', 'genero']],
+            df_leads[cols_lead],
             on='telefone',
             how='left'
         )
@@ -295,61 +377,86 @@ def agrupar_conversas(df_conv, df_leads):
         grouped['tipo_cliente'] = None
         grouped['genero'] = None
     
-    # Marca alertas
-    grouped['alertas'] = grouped.apply(lambda row: detectar_alertas(row, df_conv), axis=1)
+    # Marca alertas — passa df_agend e df_leads como FONTE DA VERDADE
+    grouped['alertas'] = grouped.apply(
+        lambda row: detectar_alertas(row, df_conv, df_agend, df_leads),
+        axis=1
+    )
     
     return grouped.sort_values('ultima_atualizacao', ascending=False)
 
 
-def detectar_alertas(row, df_conv):
-    """Detecta possíveis problemas em uma conversa."""
+def detectar_alertas(row, df_conv, df_agend=None, df_leads_full=None):
+    """Detecta possíveis problemas em uma conversa.
+    
+    v6 (correção crítica): usa as tabelas `agendamentos` e `leads.transferido_em`
+    como FONTE DA VERDADE pra detectar desfechos — antes procurava as palavras
+    'agendar' / 'transferir_...' no texto da Bia, mas o processa_resposta
+    LIMPA as tags antes de salvar, então a busca falhava (ex: a Bia escrevia
+    "Tá agendado", mas a regex procurava 'agendar' — palavras diferentes).
+    """
     alertas = []
     
     telefone = row['telefone']
-    msgs_dessa_conv = df_conv[df_conv['telefone'] == telefone].sort_values('criado_em')
+    msgs_dessa_conv = df_conv[df_conv['telefone'] == telefone].sort_values('criado_em').reset_index(drop=True)
     
     if msgs_dessa_conv.empty:
         return alertas
     
-    # Concatena todas as mensagens da Bia
+    # Concatena mensagens da Bia e do usuário (já em minúsculas)
     msgs_bia = msgs_dessa_conv[msgs_dessa_conv['papel'] == 'assistant']['mensagem'].str.lower().fillna('')
     msgs_user = msgs_dessa_conv[msgs_dessa_conv['papel'] == 'user']['mensagem'].str.lower().fillna('')
-    
     todas_bia = ' '.join(msgs_bia.tolist())
     todas_user = ' '.join(msgs_user.tolist())
     
-    # ALERTA 1: cliente disse "já sou cliente" mas Bia depois falou em "presente"
+    # ── FONTE DA VERDADE: tabelas reais ───────────────────────────────
+    # Agendamento confirmado? olha tabela `agendamentos`
+    tem_agendamento = False
+    if df_agend is not None and not df_agend.empty and 'telefone' in df_agend.columns:
+        tem_agendamento = (df_agend['telefone'].astype(str) == str(telefone)).any()
+    
+    # Transferência feita? olha tabela `leads`.transferido_em
+    tem_transferencia = False
+    if df_leads_full is not None and not df_leads_full.empty and 'transferido_em' in df_leads_full.columns:
+        match = df_leads_full[df_leads_full['telefone'].astype(str) == str(telefone)]
+        if not match.empty:
+            tem_transferencia = pd.notna(match.iloc[0]['transferido_em'])
+    
+    # ── ALERTA 1: falou de presente pra cliente existente ─────────────
     sinais_cliente_existente = ['já sou cliente', 'ja sou cliente', 'já faço aí', 'perdi a sessão', 
-                                  'perdi minha sessão', 'quero reagendar', 'quero remarcar', 'já fiz aí']
+                                'perdi minha sessão', 'quero reagendar', 'quero remarcar', 'já fiz aí']
     cliente_se_identificou = any(s in todas_user for s in sinais_cliente_existente)
     
     if cliente_se_identificou:
-        # Verifica se DEPOIS da identificação a Bia falou de presente
-        idx_identificacao = None
-        for idx, msg in msgs_dessa_conv.iterrows():
+        # Acha o timestamp da primeira mensagem onde o cliente se identificou
+        ts_identificacao = None
+        for _, msg in msgs_dessa_conv.iterrows():
             if msg['papel'] == 'user' and any(s in str(msg['mensagem']).lower() for s in sinais_cliente_existente):
-                idx_identificacao = idx
+                ts_identificacao = msg['criado_em']
                 break
         
-        if idx_identificacao is not None:
+        # Compara por TIMESTAMP (não por índice do pandas, que é instável)
+        if ts_identificacao is not None:
             msgs_bia_depois = msgs_dessa_conv[
-                (msgs_dessa_conv.index > idx_identificacao) & 
+                (msgs_dessa_conv['criado_em'] > ts_identificacao) & 
                 (msgs_dessa_conv['papel'] == 'assistant')
             ]['mensagem'].str.lower().fillna('').tolist()
             
             if any('presente' in m or 'ganhou' in m or '5 sessões' in m or 'cortesia' in m for m in msgs_bia_depois):
                 alertas.append('🔴 Falou de presente pra cliente existente')
     
-    # ALERTA 2: conversa longa sem desfecho (>8 msgs sem tag)
-    if row['total_mensagens'] > 8:
-        if not any(tag in todas_bia for tag in ['transferir_coordenadora', 'transferir_humano', 'agendar', 'encerrar']):
+    # ── ALERTA 2: conversa longa SEM DESFECHO REAL ────────────────────
+    # Antes: procurava palavras no texto → falhava porque as tags são removidas
+    # Agora: confere agendamentos/transferências como fonte da verdade
+    if row['total_mensagens'] > 8 and not tem_agendamento and not tem_transferencia:
+        # Fallback: respeita [ENCERRAR] caso ainda esteja no texto
+        if 'encerrar' not in todas_bia:
             alertas.append('🟡 Conversa longa sem desfecho')
     
-    # ALERTA 3: cliente perguntou preço e Bia não transferiu
+    # ── ALERTA 3: cliente perguntou preço e Bia não transferiu ────────
     if any(p in todas_user for p in ['quanto custa', 'qual o preço', 'qual o valor', 'parcelamento', 'desconto']):
-        msgs_bia_recentes = msgs_bia.tolist()[-3:] if len(msgs_bia) >= 3 else msgs_bia.tolist()
-        recentes_txt = ' '.join(msgs_bia_recentes)
-        if 'transferir_coordenadora' not in recentes_txt and 'coordenadora' not in recentes_txt:
+        # Se já tem transferência confirmada, ok. Se não, alerta.
+        if not tem_transferencia and 'coordenadora' not in todas_bia:
             alertas.append('🟠 Preço sem transferência')
     
     return alertas
@@ -483,7 +590,7 @@ def renderizar_conversa(telefone, df_conv, df_leads):
 # TELA 1 — LISTA DE CONVERSAS
 # ============================================================================
 
-def tela_conversas(df_conv, df_leads):
+def tela_conversas(df_conv, df_leads, df_agend):
     """Lista de conversas com filtros e busca."""
     st.markdown("## 💬 Conversas")
     
@@ -523,8 +630,8 @@ def tela_conversas(df_conv, df_leads):
     if not df_conv.empty and 'criado_em' in df_conv.columns:
         df_conv = df_conv[df_conv['criado_em'] >= dt_inicio]
 
-    # Agrupa por telefone
-    df_agrupado = agrupar_conversas(df_conv, df_leads)
+    # Agrupa por telefone (passa df_agend pra detecção correta de desfechos)
+    df_agrupado = agrupar_conversas(df_conv, df_leads, df_agend)
     
     if df_agrupado.empty:
         st.info("Nenhuma conversa no período selecionado.")
@@ -793,7 +900,7 @@ def tela_metricas(df_conv, df_leads, df_agend):
     
     # ─── Conversas problemáticas ───────────────────────────────────
     st.markdown("### ⚠️ Conversas que precisam de atenção")
-    df_agrupado_p = agrupar_conversas(df_conv_p, df_leads)
+    df_agrupado_p = agrupar_conversas(df_conv_p, df_leads, df_agend)
     if not df_agrupado_p.empty:
         problematicas = df_agrupado_p[df_agrupado_p['alertas'].apply(lambda x: len(x) > 0)]
         if not problematicas.empty:
@@ -886,7 +993,7 @@ def tela_configuracoes():
     st.markdown("### 📊 Informações do sistema")
     col_i1, col_i2 = st.columns(2)
     with col_i1:
-        st.metric("Versão do cérebro", "v3.4")
+        st.metric("Versão do cérebro", "v3.6")
         st.metric("Modelo Claude", "claude-haiku-4-5")
     with col_i2:
         st.metric("Webhook n8n", "✅ Online")
@@ -1100,6 +1207,234 @@ def tela_transferencias(df_leads, df_conv):
 
 
 # ============================================================================
+# TELA: AGENDAMENTOS (sessões de cortesia agendadas via Google Calendar)
+# ============================================================================
+
+def tela_agendamentos(df_agend, df_leads, df_conv):
+    """Lista todos os agendamentos criados pela Bia."""
+    st.markdown("# 📅 Agendamentos")
+    st.caption("Sessões de cortesia agendadas pela Bia via Google Calendar")
+    
+    if df_agend is None or df_agend.empty:
+        st.info("📭 Nenhum agendamento registrado ainda. Quando a Bia agendar a primeira cortesia, ela aparecerá aqui.")
+        return
+    
+    df = df_agend.copy()
+    
+    # Normaliza timestamps pro fuso SP
+    try:
+        df['data_hora_sp'] = df['data_hora'].dt.tz_convert(TZ_SP)
+    except Exception:
+        df['data_hora_sp'] = df['data_hora']
+    
+    # Normaliza unidade (banco pode ter 'Mogi', 'Mogi das Cruzes', 'mogi', etc)
+    def _norm_unidade(u):
+        if not isinstance(u, str):
+            return 'desconhecida'
+        ul = u.lower().strip()
+        if 'mogi' in ul or 'monte' in ul:
+            return 'Mogi'
+        elif 'suzano' in ul:
+            return 'Suzano'
+        return u
+    
+    df['unidade_norm'] = df['unidade'].apply(_norm_unidade)
+    
+    # ── BOTÕES SEGMENTADOS DE UNIDADE (mesmo estilo da aba Transferências) ──
+    # CSS dos botões (reaproveita o estilo já injetado na tela de transferências
+    # mas garante caso o usuário entre direto aqui)
+    st.markdown("""
+        <style>
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] button[kind="primary"] {
+            background-color: #22c55e !important;
+            color: white !important;
+            border-color: #22c55e !important;
+            font-weight: 600 !important;
+        }
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] button[kind="secondary"] {
+            background-color: #f3f4f6 !important;
+            color: #374151 !important;
+            border-color: #e5e7eb !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    if 'agend_unidade_btn' not in st.session_state:
+        st.session_state['agend_unidade_btn'] = "Todas"
+    
+    cnt_todas = len(df)
+    cnt_mogi = int((df['unidade_norm'] == 'Mogi').sum())
+    cnt_suzano = int((df['unidade_norm'] == 'Suzano').sum())
+    
+    btn_col1, btn_col2, btn_col3, _ = st.columns([1.2, 1.4, 1.2, 4])
+    
+    with btn_col1:
+        is_todas = st.session_state['agend_unidade_btn'] == "Todas"
+        if st.button(f"🏢 Todas ({cnt_todas})",
+                     type="primary" if is_todas else "secondary",
+                     use_container_width=True,
+                     key="btn_agend_todas"):
+            st.session_state['agend_unidade_btn'] = "Todas"
+            st.rerun()
+    
+    with btn_col2:
+        is_mogi = st.session_state['agend_unidade_btn'] == "Mogi"
+        if st.button(f"📍 Mogi ({cnt_mogi})",
+                     type="primary" if is_mogi else "secondary",
+                     use_container_width=True,
+                     key="btn_agend_mogi"):
+            st.session_state['agend_unidade_btn'] = "Mogi"
+            st.rerun()
+    
+    with btn_col3:
+        is_suzano = st.session_state['agend_unidade_btn'] == "Suzano"
+        if st.button(f"📍 Suzano ({cnt_suzano})",
+                     type="primary" if is_suzano else "secondary",
+                     use_container_width=True,
+                     key="btn_agend_suzano"):
+            st.session_state['agend_unidade_btn'] = "Suzano"
+            st.rerun()
+    
+    unidade_filtro = st.session_state['agend_unidade_btn']
+    
+    st.markdown("")  # espaço
+    
+    # ── FILTROS DE PERÍODO E STATUS ──
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        periodo = st.selectbox(
+            "Período",
+            ["Próximos (hoje em diante)", "Hoje", "Próximos 7 dias", "Últimos 30 dias", "Tudo"],
+            index=0,
+            key="agend_periodo"
+        )
+    with col_f2:
+        if 'status' in df.columns:
+            status_opcoes = ["Todos"] + sorted(df['status'].dropna().unique().tolist())
+        else:
+            status_opcoes = ["Todos"]
+        status_filtro = st.selectbox("Status", status_opcoes, key="agend_status")
+    
+    # Aplica filtros
+    agora = datetime.now(TZ_SP)
+    hoje_inicio = agora.replace(hour=0, minute=0, second=0, microsecond=0)
+    df_filt = df.copy()
+    
+    if periodo == "Próximos (hoje em diante)":
+        df_filt = df_filt[df_filt['data_hora_sp'] >= hoje_inicio]
+    elif periodo == "Hoje":
+        hoje_fim = hoje_inicio + timedelta(days=1)
+        df_filt = df_filt[(df_filt['data_hora_sp'] >= hoje_inicio) & (df_filt['data_hora_sp'] < hoje_fim)]
+    elif periodo == "Próximos 7 dias":
+        df_filt = df_filt[(df_filt['data_hora_sp'] >= hoje_inicio) & (df_filt['data_hora_sp'] <= agora + timedelta(days=7))]
+    elif periodo == "Últimos 30 dias":
+        df_filt = df_filt[(df_filt['data_hora_sp'] >= agora - timedelta(days=30)) & (df_filt['data_hora_sp'] <= agora)]
+    # "Tudo" → sem filtro de período
+    
+    if status_filtro != "Todos" and 'status' in df_filt.columns:
+        df_filt = df_filt[df_filt['status'] == status_filtro]
+    
+    if unidade_filtro != "Todas":
+        df_filt = df_filt[df_filt['unidade_norm'] == unidade_filtro]
+    
+    # Ordena: futuros mais próximos primeiro; passados, mais recentes primeiro
+    if periodo in ["Próximos (hoje em diante)", "Hoje", "Próximos 7 dias"]:
+        df_filt = df_filt.sort_values('data_hora', ascending=True)
+    else:
+        df_filt = df_filt.sort_values('data_hora', ascending=False)
+    
+    # ── CARDS DE RESUMO ──
+    st.divider()
+    col1, col2, col3, col4 = st.columns(4)
+    
+    col1.metric("Total no filtro", len(df_filt))
+    
+    if 'status' in df_filt.columns and not df_filt.empty:
+        status_lower = df_filt['status'].astype(str).str.lower()
+        confirmados = int((status_lower == 'confirmado').sum())
+        pendentes = int((status_lower == 'agendado').sum())
+        col2.metric("Confirmados ✅", confirmados)
+        col3.metric("Pendente confirmar ⏳", pendentes)
+    else:
+        col2.metric("Confirmados", "—")
+        col3.metric("Pendentes", "—")
+    
+    try:
+        proximos_7 = int(((df_filt['data_hora_sp'] >= hoje_inicio) & 
+                          (df_filt['data_hora_sp'] <= agora + timedelta(days=7))).sum())
+    except Exception:
+        proximos_7 = 0
+    col4.metric("Próximos 7 dias", proximos_7)
+    
+    # ── LISTA ──
+    st.divider()
+    st.markdown(f"### 📋 Lista — {len(df_filt)} agendamento(s)")
+    
+    if df_filt.empty:
+        st.info("Nenhum agendamento com esses filtros.")
+        return
+    
+    # Cabeçalho
+    h1, h2, h3, h4, h5, h6, h7 = st.columns([1.6, 1.4, 0.9, 1.2, 1.4, 1.1, 0.9])
+    h1.markdown("**Cliente**")
+    h2.markdown("**Telefone**")
+    h3.markdown("**Unidade**")
+    h4.markdown("**Área**")
+    h5.markdown("**Quando**")
+    h6.markdown("**Status**")
+    h7.markdown("**Ação**")
+    st.divider()
+    
+    status_emoji_map = {
+        'agendado': '📅 Agendado',
+        'confirmado': '✅ Confirmado',
+        'cancelado': '❌ Cancelado',
+        'realizado': '🎉 Realizado',
+        'faltou': '😶 Faltou',
+        'no_show': '😶 Faltou',
+    }
+    
+    for _, ag in df_filt.iterrows():
+        c1, c2, c3, c4, c5, c6, c7 = st.columns([1.6, 1.4, 0.9, 1.2, 1.4, 1.1, 0.9])
+        
+        nome = ag.get('nome') or '—'
+        telefone = str(ag.get('telefone', '—'))
+        unidade = ag.get('unidade_norm') or '—'
+        area = ag.get('area') or '—'
+        fazer = bool(ag.get('fazer_na_hora', False))
+        status = str(ag.get('status') or 'agendado').lower()
+        
+        try:
+            quando = ag['data_hora_sp'].strftime('%d/%m %H:%M')
+        except Exception:
+            quando = '—'
+        
+        # Destaca agendamentos futuros com ⏭️
+        is_futuro = False
+        try:
+            is_futuro = ag['data_hora_sp'] >= agora
+        except Exception:
+            pass
+        prefixo = "⏭️ " if is_futuro else ""
+        
+        c1.write(f"{prefixo}{nome}")
+        c2.write(f"+{telefone}" if not telefone.startswith('+') else telefone)
+        c3.write(unidade)
+        area_str = f"{area}" + (" ⚡" if fazer else "")  # ⚡ = quer fazer na hora
+        c4.write(area_str)
+        c5.write(quando)
+        c6.write(status_emoji_map.get(status, status))
+        
+        if c7.button("Ver", key=f"ver_agend_{telefone}_{ag.name}"):
+            st.session_state['conversa_selecionada'] = telefone
+            st.rerun()
+        
+        st.markdown("---")
+    
+    st.caption("⚡ = cliente quer fazer a sessão na hora (vir com a área depilada na lâmina)  ·  ⏭️ = agendamento futuro")
+
+
+# ============================================================================
 
 def main():
     if not check_password():
@@ -1118,12 +1453,15 @@ def main():
         auto_refresh = st.checkbox("Auto-refresh a cada 30s", value=False)
         
         st.divider()
-        st.caption("**Versão Cérebro:** v3.3")
+        st.caption("**Versão Cérebro:** v3.6")
         st.caption("**Modelo:** claude-haiku-4-5")
         
         st.divider()
         if st.button("🚪 Sair", use_container_width=True):
             st.session_state["password_correct"] = False
+            # Limpa token persistente da URL (forçando login na próxima vez)
+            if "t" in st.query_params:
+                del st.query_params["t"]
             st.rerun()
     
     # Carrega dados
@@ -1139,19 +1477,28 @@ def main():
             st.rerun()
         renderizar_conversa(st.session_state['conversa_selecionada'], df_conv, df_leads)
     else:
-        # Abas principais
-        tab1, tab2, tab3, tab4 = st.tabs(["💬 Conversas", "🔥 Transferências", "📈 Métricas", "⚙️ Configurações"])
+        # Abas principais — agora com Agendamentos entre Transferências e Métricas
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "💬 Conversas",
+            "🔥 Transferências",
+            "📅 Agendamentos",
+            "📈 Métricas",
+            "⚙️ Configurações",
+        ])
         
         with tab1:
-            tela_conversas(df_conv, df_leads)
+            tela_conversas(df_conv, df_leads, df_agend)
         
         with tab2:
             tela_transferencias(df_leads, df_conv)
         
         with tab3:
-            tela_metricas(df_conv, df_leads, df_agend)
+            tela_agendamentos(df_agend, df_leads, df_conv)
         
         with tab4:
+            tela_metricas(df_conv, df_leads, df_agend)
+        
+        with tab5:
             tela_configuracoes()
     
     # Auto refresh
