@@ -669,3 +669,22 @@ def render_aba_base_clientes(supabase):
         _render_importar(supabase)
     with sub_navegar:
         _render_visualizar_clientes(supabase)
+
+    # ═══════════════════════════════════════════════════════════
+    # 📋 LEGENDA DOS TIPOS DE CLIENTE — rodapé da aba Base de Clientes
+    # ═══════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown(
+        """
+        <div style="color: #8a8a8a; font-size: 0.78rem; line-height: 1.6; margin-top: 1.5rem; padding: 0.8rem 1rem; background: rgba(128,128,128,0.05); border-radius: 6px; border-left: 3px solid #d0d0d0;">
+        <strong style="color: #6a6a6a;">📋 LEGENDA — Os 6 tipos da base oficial Maislaser</strong><br><br>
+        <strong style="color: #5cb85c;">Tipo 1 — Pacote Ativa 🟢</strong> &nbsp;·&nbsp; Cliente em tratamento agora, comprou pacote e está fazendo as sessões. <em>Status comercial: RELACIONAMENTO</em><br><br>
+        <strong style="color: #f0ad4e;">Tipo 2 — Pacote Dormente 🟡</strong> &nbsp;·&nbsp; Terminou pacote, não voltou pra mais. <em>Status comercial: RECONQUISTA</em><br><br>
+        <strong style="color: #9b59b6;">Tipo 3A — Voucher Válido ✨</strong> &nbsp;·&nbsp; Ganhou cortesia (5 sessões grátis) e ainda NÃO usou — voucher ativo. <em>Status comercial: ATIVAÇÃO</em><br><br>
+        <strong style="color: #e74c3c;">Tipo 3B — Voucher Expirado 💔</strong> &nbsp;·&nbsp; Ganhou cortesia mas o voucher expirou sem ser usado. <em>Status comercial: RECUPERAÇÃO</em><br><br>
+        <strong style="color: #d9534f;">Tipo 4 — Pagou Não Veio / Encerrado / Cancelado 💸</strong> &nbsp;·&nbsp; Comprou algo mas não compareceu, contrato encerrado, ou cancelado. <em>Status comercial: RESOLUÇÃO DE PENDÊNCIA</em><br><br>
+        <strong style="color: #95a5a6;">Tipo 5 — Nunca Veio ⚪</strong> &nbsp;·&nbsp; Cadastrado mas sem histórico de visita (lead frio importado). <em>Status comercial: CAPTAÇÃO</em>
+        </div>
+         """,
+         unsafe_allow_html=True
+    )
