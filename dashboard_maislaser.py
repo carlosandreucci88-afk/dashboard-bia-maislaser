@@ -48,6 +48,8 @@ from supabase import create_client, Client
 import time
 import hashlib
 
+# Módulos das abas novas (Fase 7+)
+from aba_base_clientes import render_aba_base_clientes
 
 # ============================================================================
 # 2) CONFIG INICIAL
@@ -1592,7 +1594,7 @@ def main():
         df_agend = carregar_agendamentos()
     
     # Se tem conversa selecionada, mostra detalhe
-    if 'conversa_selecionada' in st.session_state and st.session_state['conversa_selecionada']:
+   if 'conversa_selecionada' in st.session_state and st.session_state['conversa_selecionada']:
         if st.button("← Voltar pra lista"):
             del st.session_state['conversa_selecionada']
             st.rerun()
@@ -1601,10 +1603,7 @@ def main():
         # ═══════════════════════════════════════════════════════════════════
         # 🎯 ABAS DO DASHBOARD
         # ═══════════════════════════════════════════════════════════════════
-        # 👉 NOVA ABA (passo 2a): adicione o nome na lista abaixo
-        # 👉 NOVA ABA (passo 2b): adicione a variável tab_X na desestruturação
-        # ═══════════════════════════════════════════════════════════════════
-    tab1, tab2, tab3, tab_base, tab4, tab5 = st.tabs([
+        tab1, tab2, tab3, tab_base, tab4, tab5 = st.tabs([
             "💬 Conversas",
             "🔥 Transferências",
             "📅 Agendamentos",
@@ -1612,25 +1611,24 @@ def main():
             "📈 Métricas",
             "⚙️ Configurações",
         ])
-        
+
         with tab1:
             tela_conversas(df_conv, df_leads, df_agend)
-        
+
         with tab2:
             tela_transferencias(df_leads, df_conv)
-        
-      with tab3:
+
+        with tab3:
             tela_agendamentos(df_agend, df_leads, df_conv)
-        
+
         with tab_base:
             render_aba_base_clientes(get_supabase())
-        
+
         with tab4:
             tela_metricas(df_conv, df_leads, df_agend)
-        
+
         with tab5:
-            tela_configuracoes()
-    
+            tela_configuracoes()               
     # Auto refresh
     if auto_refresh:
         time.sleep(30)
