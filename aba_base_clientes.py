@@ -685,6 +685,6 @@ def render_aba_base_clientes(supabase):
         <strong style="color: #d9534f;">Tipo 4 — Pagou Não Veio / Encerrado / Cancelado 💸</strong> &nbsp;·&nbsp; Comprou algo mas não compareceu, contrato encerrado, ou cancelado. <em>Status comercial: RESOLUÇÃO DE PENDÊNCIA</em><br><br>
         <strong style="color: #95a5a6;">Tipo 5 — Nunca Veio ⚪</strong> &nbsp;·&nbsp; Cadastrado mas sem histórico de visita (lead frio importado). <em>Status comercial: CAPTAÇÃO</em>
         </div>
-         """,
-         unsafe_allow_html=True
+        """,
+        unsafe_allow_html=True
     )
