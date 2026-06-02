@@ -16,8 +16,28 @@ Para deploy:
 - Subir no Streamlit Cloud (gratuito): https://streamlit.io/cloud
 - Conectar com este arquivo no GitHub
 - Configurar os secrets no painel do Streamlit Cloud
+
+==============================================================================
+🗺️  GUIA DE NAVEGAÇÃO DESTE ARQUIVO
+==============================================================================
+  1) IMPORTS
+  2) CONFIG INICIAL          (page_config, constantes globais)
+  3) CSS                     (visual polido tipo WhatsApp)
+  4) AUTENTICAÇÃO            (login com lembrar-de-mim)
+  5) CONEXÃO SUPABASE        (get_supabase cacheado)
+  6) CARREGAMENTO DE DADOS   (carregar_conversas, _leads, _agendamentos, etc)
+  7) HELPERS                 (agrupar, alertas, formatar, detectar tags)
+  8) RENDER DETALHE          (renderizar_conversa — tela de uma conversa)
+  9) TELAS DAS ABAS          (tela_conversas, _transferencias, _agendamentos,
+                              _metricas, _configuracoes)
+ 10) 🆕 ZONA DE EXPANSÃO     (cole AQUI módulos novos — Fase 7+)
+ 11) MAIN                    (sidebar + roteamento das abas)
 ==============================================================================
 """
+
+# ============================================================================
+# 1) IMPORTS
+# ============================================================================
 
 import streamlit as st
 import pandas as pd
@@ -28,8 +48,9 @@ from supabase import create_client, Client
 import time
 import hashlib
 
+
 # ============================================================================
-# CONFIGURAÇÃO INICIAL
+# 2) CONFIG INICIAL
 # ============================================================================
 
 st.set_page_config(
@@ -51,7 +72,7 @@ CUSTO_USD_POR_MTOK = 3.0  # média entre input ($1) e output ($5)
 
 
 # ============================================================================
-# CSS — visual polido tipo WhatsApp
+# 3) CSS — visual polido tipo WhatsApp
 # ============================================================================
 
 st.markdown("""
@@ -126,7 +147,7 @@ st.markdown("""
 
 
 # ============================================================================
-# AUTENTICAÇÃO SIMPLES
+# 4) AUTENTICAÇÃO SIMPLES
 # ============================================================================
 
 def _expected_login_token():
@@ -237,7 +258,7 @@ def check_password():
 
 
 # ============================================================================
-# CONEXÃO SUPABASE
+# 5) CONEXÃO SUPABASE
 # ============================================================================
 
 @st.cache_resource
@@ -249,7 +270,7 @@ def get_supabase() -> Client:
 
 
 # ============================================================================
-# CARREGAMENTO DE DADOS
+# 6) CARREGAMENTO DE DADOS
 # ============================================================================
 
 @st.cache_data(ttl=20)  # cache de 20 segundos pra não martelar o Supabase
@@ -352,7 +373,7 @@ def carregar_agendamentos():
 
 
 # ============================================================================
-# AGRUPAMENTO DE CONVERSAS POR TELEFONE
+# 7) HELPERS — agrupamento, alertas, formatação, detecção de tags
 # ============================================================================
 
 def agrupar_conversas(df_conv, df_leads, df_agend=None):
@@ -479,10 +500,6 @@ def detectar_alertas(row, df_conv, df_agend=None, df_leads_full=None):
     return alertas
 
 
-# ============================================================================
-# FORMATAÇÃO DA CONVERSA PRA COPIAR
-# ============================================================================
-
 def formatar_conversa_para_copiar(msgs_df, nome_cliente="Cliente"):
     """Formata a conversa no estilo WhatsApp pra copiar e colar."""
     linhas = []
@@ -499,10 +516,6 @@ def formatar_conversa_para_copiar(msgs_df, nome_cliente="Cliente"):
     
     return '\n'.join(linhas)
 
-
-# ============================================================================
-# DETECÇÃO DE TAGS NA RESPOSTA DA BIA
-# ============================================================================
 
 def detectar_tags(mensagem):
     """Detecta tags do sistema em uma mensagem da Bia."""
@@ -522,7 +535,7 @@ def detectar_tags(mensagem):
 
 
 # ============================================================================
-# RENDERIZAÇÃO DE UMA CONVERSA (DETALHE)
+# 8) RENDER DETALHE — tela de UMA conversa (clicou em "Ver detalhes")
 # ============================================================================
 
 def renderizar_conversa(telefone, df_conv, df_leads):
@@ -604,8 +617,16 @@ def renderizar_conversa(telefone, df_conv, df_leads):
 
 
 # ============================================================================
-# TELA 1 — LISTA DE CONVERSAS
+# 9) TELAS DAS ABAS
 # ============================================================================
+# Cada função abaixo corresponde a UMA aba do dashboard.
+# Ordem na lista de tabs do main() (linha ~XXX, busca por "🎯 ABAS"):
+#   tela_conversas  →  tela_transferencias  →  tela_agendamentos
+#                   →  tela_metricas        →  tela_configuracoes
+# ============================================================================
+
+
+# ─────────── ABA 1: 💬 CONVERSAS ───────────
 
 def tela_conversas(df_conv, df_leads, df_agend):
     """Lista de conversas com filtros e busca."""
@@ -734,337 +755,7 @@ def tela_conversas(df_conv, df_leads, df_agend):
         st.caption(f"Mostrando 50 de {len(df_agrupado)} conversas. Use os filtros pra refinar.")
 
 
-# ============================================================================
-# TELA 2 — MÉTRICAS
-# ============================================================================
-
-def tela_metricas(df_conv, df_leads, df_agend):
-    """Tela de métricas e gráficos."""
-    st.markdown("## 📈 Métricas")
-    
-    # Filtro de período
-    periodo = st.selectbox(
-        "Período de análise",
-        ["Hoje", "Últimos 7 dias", "Últimos 30 dias"],
-        index=1,
-        key="met_periodo"
-    )
-    
-    agora = datetime.now(TZ_SP)
-    if periodo == "Hoje":
-        dt_inicio = agora.replace(hour=0, minute=0, second=0, microsecond=0)
-        dias = 1
-    elif periodo == "Últimos 7 dias":
-        dt_inicio = agora - timedelta(days=7)
-        dias = 7
-    else:
-        dt_inicio = agora - timedelta(days=30)
-        dias = 30
-    
-    if not df_conv.empty and 'criado_em' in df_conv.columns:
-        df_conv_p = df_conv[df_conv['criado_em'] >= dt_inicio]
-    else:
-        df_conv_p = df_conv
-    
-    # ─── Cards de topo ──────────────────────────────────────────────
-    st.markdown("### Resumo do período")
-    
-    conversas_unicas = df_conv_p['telefone'].nunique() if not df_conv_p.empty and 'telefone' in df_conv_p.columns else 0
-    total_msgs = len(df_conv_p)
-    msgs_bia = len(df_conv_p[df_conv_p['papel'] == 'assistant']) if not df_conv_p.empty and 'papel' in df_conv_p.columns else 0
-    tokens_total = int(df_conv_p['tokens'].sum()) if not df_conv_p.empty and 'tokens' in df_conv_p.columns else 0
-    custo_usd = (tokens_total / 1_000_000) * CUSTO_USD_POR_MTOK
-    custo_brl = custo_usd * 5.50
-    
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Conversas únicas", conversas_unicas)
-    c2.metric("Mensagens totais", total_msgs)
-    c3.metric("Respostas Bia", msgs_bia)
-    c4.metric("Custo IA", f"R$ {custo_brl:.2f}", help=f"US$ {custo_usd:.4f} · {tokens_total:,} tokens")
-    
-    st.divider()
-    
-    # ─── Funil de conversão ─────────────────────────────────────────
-    st.markdown("### 🎯 Funil de conversão")
-    
-    if df_conv_p.empty:
-        st.info("Sem dados no período.")
-    else:
-        # Iniciaram conversa = telefones únicos
-        iniciaram = conversas_unicas
-        
-        # Engajaram = conversas com 3+ mensagens
-        if not df_conv_p.empty and 'telefone' in df_conv_p.columns:
-            msgs_por_tel = df_conv_p.groupby('telefone').size()
-            engajaram = (msgs_por_tel >= 3).sum()
-        else:
-            engajaram = 0
-        
-        # Transferiram = conversas com tag de transferência
-        transferiram = 0
-        agendaram = 0
-        if not df_conv_p.empty and 'papel' in df_conv_p.columns:
-            df_conv_bia = df_conv_p[df_conv_p['papel'] == 'assistant']
-            for tel in df_conv_p['telefone'].unique():
-                msgs_tel = df_conv_bia[df_conv_bia['telefone'] == tel]['mensagem'].str.lower().fillna('')
-                todas = ' '.join(msgs_tel.tolist())
-                if 'transferir_coordenadora' in todas or 'transferir_humano' in todas:
-                    transferiram += 1
-                if 'agendar|' in todas or '[agendar' in todas:
-                    agendaram += 1
-        
-        fig = go.Figure(go.Funnel(
-            y=["Iniciaram conversa", "Engajaram (3+ msgs)", "Transferiram", "Agendaram"],
-            x=[iniciaram, engajaram, transferiram, agendaram],
-            textinfo="value+percent initial",
-            marker={"color": [COR_PRIMARIA, "#16a34a", "#15803d", "#14532d"]}
-        ))
-        fig.update_layout(height=350, margin=dict(t=20, b=20, l=20, r=20))
-        st.plotly_chart(fig, use_container_width=True)
-    
-    st.divider()
-    
-    # ─── Gráficos lado a lado ────────────────────────────────────────
-    col_g1, col_g2 = st.columns(2)
-    
-    with col_g1:
-        st.markdown("### 📅 Conversas por hora do dia")
-        if not df_conv_p.empty and 'papel' in df_conv_p.columns:
-            df_user = df_conv_p[df_conv_p['papel'] == 'user'].copy()
-            if not df_user.empty:
-                df_user['hora'] = df_user['criado_em'].dt.tz_convert(TZ_SP).dt.hour
-                hora_count = df_user.groupby('hora').size().reindex(range(24), fill_value=0).reset_index()
-                hora_count.columns = ['Hora', 'Mensagens']
-                fig = px.bar(hora_count, x='Hora', y='Mensagens', color_discrete_sequence=[COR_PRIMARIA])
-                fig.update_layout(height=300, margin=dict(t=10, b=10, l=10, r=10))
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("Sem dados.")
-        else:
-            st.info("Sem dados.")
-    
-    with col_g2:
-        st.markdown("### 🏢 Comparativo unidades")
-        if not df_leads.empty and 'criado_em' in df_leads.columns:
-            df_leads_p = df_leads[df_leads['criado_em'] >= dt_inicio]
-            if not df_leads_p.empty:
-                unidade_count = df_leads_p['unidade'].fillna('desconhecido').value_counts().reset_index()
-                unidade_count.columns = ['Unidade', 'Leads']
-                fig = px.pie(unidade_count, values='Leads', names='Unidade',
-                             color_discrete_sequence=[COR_PRIMARIA, "#3b82f6", "#a3a3a3"])
-                fig.update_layout(height=300, margin=dict(t=10, b=10, l=10, r=10))
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("Sem leads no período.")
-        else:
-            st.info("Sem leads cadastrados.")
-    
-    st.divider()
-    
-    # ─── Custo IA por dia ───────────────────────────────────────────
-    st.markdown("### 💰 Custo IA por dia")
-    if not df_conv_p.empty:
-        df_copia = df_conv_p.copy()
-        df_copia['dia'] = df_copia['criado_em'].dt.tz_convert(TZ_SP).dt.date
-        custo_dia = df_copia.groupby('dia')['tokens'].sum().reset_index()
-        custo_dia['Custo USD'] = (custo_dia['tokens'] / 1_000_000) * CUSTO_USD_POR_MTOK
-        custo_dia['Custo BRL'] = custo_dia['Custo USD'] * 5.50
-        custo_dia.columns = ['Dia', 'Tokens', 'Custo USD', 'Custo BRL']
-        fig = px.line(custo_dia, x='Dia', y='Custo BRL', markers=True,
-                      color_discrete_sequence=[COR_PRIMARIA])
-        fig.update_layout(height=300, margin=dict(t=10, b=10, l=10, r=10),
-                          yaxis_title="Custo (R$)")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Sem dados.")
-    
-    st.divider()
-    
-    # ─── Top motivos de transferência ──────────────────────────────
-    st.markdown("### 🔄 Motivos de transferência / encerramento")
-    if not df_conv_p.empty and 'papel' in df_conv_p.columns:
-        df_bia = df_conv_p[df_conv_p['papel'] == 'assistant']
-        motivos = {
-            "🤝 Coordenadora": 0,
-            "👤 Recepção (humano)": 0,
-            "📅 Agendou": 0,
-            "✋ Encerrou": 0,
-            "Sem desfecho": 0,
-        }
-        for tel in df_conv_p['telefone'].unique():
-            msgs_tel = df_bia[df_bia['telefone'] == tel]['mensagem'].str.lower().fillna('')
-            todas = ' '.join(msgs_tel.tolist())
-            if 'transferir_coordenadora' in todas:
-                motivos["🤝 Coordenadora"] += 1
-            elif 'transferir_humano' in todas:
-                motivos["👤 Recepção (humano)"] += 1
-            elif 'agendar|' in todas or '[agendar' in todas:
-                motivos["📅 Agendou"] += 1
-            elif '[encerrar]' in todas:
-                motivos["✋ Encerrou"] += 1
-            else:
-                motivos["Sem desfecho"] += 1
-        
-        df_motivos = pd.DataFrame(list(motivos.items()), columns=['Motivo', 'Conversas'])
-        fig = px.bar(df_motivos, x='Conversas', y='Motivo', orientation='h',
-                     color_discrete_sequence=[COR_PRIMARIA])
-        fig.update_layout(height=280, margin=dict(t=10, b=10, l=10, r=10))
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Sem dados.")
-    
-    st.divider()
-    
-    # ─── Conversas problemáticas ───────────────────────────────────
-    st.markdown("### ⚠️ Conversas que precisam de atenção")
-    df_agrupado_p = agrupar_conversas(df_conv_p, df_leads, df_agend)
-    if not df_agrupado_p.empty:
-        problematicas = df_agrupado_p[df_agrupado_p['alertas'].apply(lambda x: len(x) > 0)]
-        if not problematicas.empty:
-            st.caption(f"{len(problematicas)} conversa(s) com sinais de problema — ideal pra revisar e melhorar o cérebro")
-            for _, row in problematicas.head(10).iterrows():
-                with st.expander(f"📱 +{row['telefone']} · {row.get('nome', 'Sem nome')} · {row['total_mensagens']} msgs"):
-                    for a in row['alertas']:
-                        st.markdown(f"- {a}")
-                    st.caption(f"Última: {row['ultima_mensagem_preview']}")
-                    if st.button("Ver conversa completa", key=f"prob_{row['telefone']}"):
-                        st.session_state['conversa_selecionada'] = row['telefone']
-                        st.rerun()
-        else:
-            st.success("🎉 Nenhuma conversa problemática detectada no período!")
-
-
-# ============================================================================
-# TELA 3 — CONFIGURAÇÕES
-# ============================================================================
-
-def tela_configuracoes():
-    """Tela de configurações da Bia — integrada com Supabase."""
-    st.markdown("## ⚙️ Configurações")
-
-    # Carrega configs atuais do Supabase
-    cfg = carregar_configuracoes()
-
-    st.success("✅ Configurações integradas ao Supabase — ao salvar, o n8n vai buscar os números automaticamente.")
-
-    st.markdown("### 📞 WhatsApp das coordenadoras de vendas")
-    st.caption("Quando a Bia disparar [TRANSFERIR_COORDENADORA], ela vai mandar um aviso pra esses números.")
-
-    col_c1, col_c2 = st.columns(2)
-    with col_c1:
-        st.markdown("**Mogi das Cruzes**")
-        coord_mogi = st.text_input(
-            "Número (com DDD, só dígitos)",
-            value=cfg.get('mogi_telefone', ''),
-            key='input_coord_mogi',
-            placeholder="11999999999"
-        )
-        nome_coord_mogi = st.text_input(
-            "Nome da coordenadora",
-            value=cfg.get('mogi_nome', ''),
-            key='input_nome_coord_mogi',
-            placeholder="Ex: Beatriz"
-        )
-    with col_c2:
-        st.markdown("**Suzano**")
-        coord_suzano = st.text_input(
-            "Número (com DDD, só dígitos)",
-            value=cfg.get('suzano_telefone', ''),
-            key='input_coord_suzano',
-            placeholder="11999999999"
-        )
-        nome_coord_suzano = st.text_input(
-            "Nome da coordenadora",
-            value=cfg.get('suzano_nome', ''),
-            key='input_nome_coord_suzano',
-            placeholder="Ex: Rafaela"
-        )
-
-    st.divider()
-
-    # ── NOVO (Fase 6): WhatsApp das recepções ──
-    st.markdown("### 🙋 WhatsApp das recepções")
-    st.caption("Quando a Bia disparar [TRANSFERIR_HUMANO] (reagendamento, cliente confuso, restrição médica), o aviso vai pra esses números.")
-
-    col_r1, col_r2 = st.columns(2)
-    with col_r1:
-        st.markdown("**Mogi das Cruzes**")
-        recep_mogi = st.text_input(
-            "Número (com DDD, só dígitos)",
-            value=cfg.get('recepcao_mogi_telefone', ''),
-            key='input_recep_mogi',
-            placeholder="11999999999"
-        )
-        nome_recep_mogi = st.text_input(
-            "Nome da recepção",
-            value=cfg.get('recepcao_mogi_nome', ''),
-            key='input_nome_recep_mogi',
-            placeholder="Ex: Recepção Mogi"
-        )
-    with col_r2:
-        st.markdown("**Suzano**")
-        recep_suzano = st.text_input(
-            "Número (com DDD, só dígitos)",
-            value=cfg.get('recepcao_suzano_telefone', ''),
-            key='input_recep_suzano',
-            placeholder="11999999999"
-        )
-        nome_recep_suzano = st.text_input(
-            "Nome da recepção",
-            value=cfg.get('recepcao_suzano_nome', ''),
-            key='input_nome_recep_suzano',
-            placeholder="Ex: Recepção Suzano"
-        )
-
-    st.divider()
-
-    st.markdown("### 🛠️ Modo manutenção")
-    manutencao = st.toggle(
-        "Pausar a Bia (ela para de responder)",
-        value=cfg.get('modo_manutencao', False),
-        help="Quando ligado, o n8n vai checar essa flag e não processar novas mensagens."
-    )
-    if manutencao:
-        st.warning("⚠️ Modo manutenção ATIVO — a Bia vai parar de responder quando o n8n checar essa flag.")
-
-    st.divider()
-
-    if st.button("💾 Salvar no Supabase", type="primary"):
-        ok = salvar_configuracoes(
-            mogi_telefone=coord_mogi,
-            mogi_nome=nome_coord_mogi,
-            suzano_telefone=coord_suzano,
-            suzano_nome=nome_coord_suzano,
-            modo_manutencao=manutencao,
-            recepcao_mogi_telefone=recep_mogi,
-            recepcao_mogi_nome=nome_recep_mogi,
-            recepcao_suzano_telefone=recep_suzano,
-            recepcao_suzano_nome=nome_recep_suzano,
-        )
-        if ok:
-            st.success("✅ Salvo! O n8n vai usar esses dados na próxima transferência.")
-            st.balloons()
-
-    st.divider()
-
-    st.markdown("### 📊 Informações do sistema")
-    col_i1, col_i2 = st.columns(2)
-    with col_i1:
-        st.metric("Versão do cérebro", "v3.10")
-        st.metric("Modelo Claude", "claude-haiku-4-5")
-    with col_i2:
-        st.metric("Webhook n8n", "✅ Online")
-        st.caption("https://maislaser-robo.app.n8n.cloud/webhook/maislaser-whatsapp")
-
-    if cfg.get('atualizado_em'):
-        st.caption(f"Última atualização das configs: {cfg['atualizado_em'][:19].replace('T', ' ')}")
-
-
-# ============================================================================
-# MAIN
-# ============================================================================
-# TELA: TRANSFERÊNCIAS PRA COORDENADORA
-# ============================================================================
+# ─────────── ABA 2: 🔥 TRANSFERÊNCIAS ───────────
 
 def tela_transferencias(df_leads, df_conv):
     """Lista todas as transferências feitas pra coordenadoras."""
@@ -1285,9 +976,7 @@ def tela_transferencias(df_leads, df_conv):
         st.markdown("---")
 
 
-# ============================================================================
-# TELA: AGENDAMENTOS (sessões de cortesia agendadas via Google Calendar)
-# ============================================================================
+# ─────────── ABA 3: 📅 AGENDAMENTOS ───────────
 
 def tela_agendamentos(df_agend, df_leads, df_conv):
     """Lista todos os agendamentos criados pela Bia."""
@@ -1513,6 +1202,359 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
     st.caption("⚡ = cliente quer fazer a sessão na hora (vir com a área depilada na lâmina)  ·  ⏭️ = agendamento futuro")
 
 
+# ─────────── ABA 4: 📈 MÉTRICAS ───────────
+
+def tela_metricas(df_conv, df_leads, df_agend):
+    """Tela de métricas e gráficos."""
+    st.markdown("## 📈 Métricas")
+    
+    # Filtro de período
+    periodo = st.selectbox(
+        "Período de análise",
+        ["Hoje", "Últimos 7 dias", "Últimos 30 dias"],
+        index=1,
+        key="met_periodo"
+    )
+    
+    agora = datetime.now(TZ_SP)
+    if periodo == "Hoje":
+        dt_inicio = agora.replace(hour=0, minute=0, second=0, microsecond=0)
+        dias = 1
+    elif periodo == "Últimos 7 dias":
+        dt_inicio = agora - timedelta(days=7)
+        dias = 7
+    else:
+        dt_inicio = agora - timedelta(days=30)
+        dias = 30
+    
+    if not df_conv.empty and 'criado_em' in df_conv.columns:
+        df_conv_p = df_conv[df_conv['criado_em'] >= dt_inicio]
+    else:
+        df_conv_p = df_conv
+    
+    # ─── Cards de topo ──────────────────────────────────────────────
+    st.markdown("### Resumo do período")
+    
+    conversas_unicas = df_conv_p['telefone'].nunique() if not df_conv_p.empty and 'telefone' in df_conv_p.columns else 0
+    total_msgs = len(df_conv_p)
+    msgs_bia = len(df_conv_p[df_conv_p['papel'] == 'assistant']) if not df_conv_p.empty and 'papel' in df_conv_p.columns else 0
+    tokens_total = int(df_conv_p['tokens'].sum()) if not df_conv_p.empty and 'tokens' in df_conv_p.columns else 0
+    custo_usd = (tokens_total / 1_000_000) * CUSTO_USD_POR_MTOK
+    custo_brl = custo_usd * 5.50
+    
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Conversas únicas", conversas_unicas)
+    c2.metric("Mensagens totais", total_msgs)
+    c3.metric("Respostas Bia", msgs_bia)
+    c4.metric("Custo IA", f"R$ {custo_brl:.2f}", help=f"US$ {custo_usd:.4f} · {tokens_total:,} tokens")
+    
+    st.divider()
+    
+    # ─── Funil de conversão ─────────────────────────────────────────
+    st.markdown("### 🎯 Funil de conversão")
+    
+    if df_conv_p.empty:
+        st.info("Sem dados no período.")
+    else:
+        # Iniciaram conversa = telefones únicos
+        iniciaram = conversas_unicas
+        
+        # Engajaram = conversas com 3+ mensagens
+        if not df_conv_p.empty and 'telefone' in df_conv_p.columns:
+            msgs_por_tel = df_conv_p.groupby('telefone').size()
+            engajaram = (msgs_por_tel >= 3).sum()
+        else:
+            engajaram = 0
+        
+        # Transferiram = conversas com tag de transferência
+        transferiram = 0
+        agendaram = 0
+        if not df_conv_p.empty and 'papel' in df_conv_p.columns:
+            df_conv_bia = df_conv_p[df_conv_p['papel'] == 'assistant']
+            for tel in df_conv_p['telefone'].unique():
+                msgs_tel = df_conv_bia[df_conv_bia['telefone'] == tel]['mensagem'].str.lower().fillna('')
+                todas = ' '.join(msgs_tel.tolist())
+                if 'transferir_coordenadora' in todas or 'transferir_humano' in todas:
+                    transferiram += 1
+                if 'agendar|' in todas or '[agendar' in todas:
+                    agendaram += 1
+        
+        fig = go.Figure(go.Funnel(
+            y=["Iniciaram conversa", "Engajaram (3+ msgs)", "Transferiram", "Agendaram"],
+            x=[iniciaram, engajaram, transferiram, agendaram],
+            textinfo="value+percent initial",
+            marker={"color": [COR_PRIMARIA, "#16a34a", "#15803d", "#14532d"]}
+        ))
+        fig.update_layout(height=350, margin=dict(t=20, b=20, l=20, r=20))
+        st.plotly_chart(fig, use_container_width=True)
+    
+    st.divider()
+    
+    # ─── Gráficos lado a lado ────────────────────────────────────────
+    col_g1, col_g2 = st.columns(2)
+    
+    with col_g1:
+        st.markdown("### 📅 Conversas por hora do dia")
+        if not df_conv_p.empty and 'papel' in df_conv_p.columns:
+            df_user = df_conv_p[df_conv_p['papel'] == 'user'].copy()
+            if not df_user.empty:
+                df_user['hora'] = df_user['criado_em'].dt.tz_convert(TZ_SP).dt.hour
+                hora_count = df_user.groupby('hora').size().reindex(range(24), fill_value=0).reset_index()
+                hora_count.columns = ['Hora', 'Mensagens']
+                fig = px.bar(hora_count, x='Hora', y='Mensagens', color_discrete_sequence=[COR_PRIMARIA])
+                fig.update_layout(height=300, margin=dict(t=10, b=10, l=10, r=10))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Sem dados.")
+        else:
+            st.info("Sem dados.")
+    
+    with col_g2:
+        st.markdown("### 🏢 Comparativo unidades")
+        if not df_leads.empty and 'criado_em' in df_leads.columns:
+            df_leads_p = df_leads[df_leads['criado_em'] >= dt_inicio]
+            if not df_leads_p.empty:
+                unidade_count = df_leads_p['unidade'].fillna('desconhecido').value_counts().reset_index()
+                unidade_count.columns = ['Unidade', 'Leads']
+                fig = px.pie(unidade_count, values='Leads', names='Unidade',
+                             color_discrete_sequence=[COR_PRIMARIA, "#3b82f6", "#a3a3a3"])
+                fig.update_layout(height=300, margin=dict(t=10, b=10, l=10, r=10))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Sem leads no período.")
+        else:
+            st.info("Sem leads cadastrados.")
+    
+    st.divider()
+    
+    # ─── Custo IA por dia ───────────────────────────────────────────
+    st.markdown("### 💰 Custo IA por dia")
+    if not df_conv_p.empty:
+        df_copia = df_conv_p.copy()
+        df_copia['dia'] = df_copia['criado_em'].dt.tz_convert(TZ_SP).dt.date
+        custo_dia = df_copia.groupby('dia')['tokens'].sum().reset_index()
+        custo_dia['Custo USD'] = (custo_dia['tokens'] / 1_000_000) * CUSTO_USD_POR_MTOK
+        custo_dia['Custo BRL'] = custo_dia['Custo USD'] * 5.50
+        custo_dia.columns = ['Dia', 'Tokens', 'Custo USD', 'Custo BRL']
+        fig = px.line(custo_dia, x='Dia', y='Custo BRL', markers=True,
+                      color_discrete_sequence=[COR_PRIMARIA])
+        fig.update_layout(height=300, margin=dict(t=10, b=10, l=10, r=10),
+                          yaxis_title="Custo (R$)")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Sem dados.")
+    
+    st.divider()
+    
+    # ─── Top motivos de transferência ──────────────────────────────
+    st.markdown("### 🔄 Motivos de transferência / encerramento")
+    if not df_conv_p.empty and 'papel' in df_conv_p.columns:
+        df_bia = df_conv_p[df_conv_p['papel'] == 'assistant']
+        motivos = {
+            "🤝 Coordenadora": 0,
+            "👤 Recepção (humano)": 0,
+            "📅 Agendou": 0,
+            "✋ Encerrou": 0,
+            "Sem desfecho": 0,
+        }
+        for tel in df_conv_p['telefone'].unique():
+            msgs_tel = df_bia[df_bia['telefone'] == tel]['mensagem'].str.lower().fillna('')
+            todas = ' '.join(msgs_tel.tolist())
+            if 'transferir_coordenadora' in todas:
+                motivos["🤝 Coordenadora"] += 1
+            elif 'transferir_humano' in todas:
+                motivos["👤 Recepção (humano)"] += 1
+            elif 'agendar|' in todas or '[agendar' in todas:
+                motivos["📅 Agendou"] += 1
+            elif '[encerrar]' in todas:
+                motivos["✋ Encerrou"] += 1
+            else:
+                motivos["Sem desfecho"] += 1
+        
+        df_motivos = pd.DataFrame(list(motivos.items()), columns=['Motivo', 'Conversas'])
+        fig = px.bar(df_motivos, x='Conversas', y='Motivo', orientation='h',
+                     color_discrete_sequence=[COR_PRIMARIA])
+        fig.update_layout(height=280, margin=dict(t=10, b=10, l=10, r=10))
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Sem dados.")
+    
+    st.divider()
+    
+    # ─── Conversas problemáticas ───────────────────────────────────
+    st.markdown("### ⚠️ Conversas que precisam de atenção")
+    df_agrupado_p = agrupar_conversas(df_conv_p, df_leads, df_agend)
+    if not df_agrupado_p.empty:
+        problematicas = df_agrupado_p[df_agrupado_p['alertas'].apply(lambda x: len(x) > 0)]
+        if not problematicas.empty:
+            st.caption(f"{len(problematicas)} conversa(s) com sinais de problema — ideal pra revisar e melhorar o cérebro")
+            for _, row in problematicas.head(10).iterrows():
+                with st.expander(f"📱 +{row['telefone']} · {row.get('nome', 'Sem nome')} · {row['total_mensagens']} msgs"):
+                    for a in row['alertas']:
+                        st.markdown(f"- {a}")
+                    st.caption(f"Última: {row['ultima_mensagem_preview']}")
+                    if st.button("Ver conversa completa", key=f"prob_{row['telefone']}"):
+                        st.session_state['conversa_selecionada'] = row['telefone']
+                        st.rerun()
+        else:
+            st.success("🎉 Nenhuma conversa problemática detectada no período!")
+
+
+# ─────────── ABA 5: ⚙️ CONFIGURAÇÕES ───────────
+
+def tela_configuracoes():
+    """Tela de configurações da Bia — integrada com Supabase."""
+    st.markdown("## ⚙️ Configurações")
+
+    # Carrega configs atuais do Supabase
+    cfg = carregar_configuracoes()
+
+    st.success("✅ Configurações integradas ao Supabase — ao salvar, o n8n vai buscar os números automaticamente.")
+
+    st.markdown("### 📞 WhatsApp das coordenadoras de vendas")
+    st.caption("Quando a Bia disparar [TRANSFERIR_COORDENADORA], ela vai mandar um aviso pra esses números.")
+
+    col_c1, col_c2 = st.columns(2)
+    with col_c1:
+        st.markdown("**Mogi das Cruzes**")
+        coord_mogi = st.text_input(
+            "Número (com DDD, só dígitos)",
+            value=cfg.get('mogi_telefone', ''),
+            key='input_coord_mogi',
+            placeholder="11999999999"
+        )
+        nome_coord_mogi = st.text_input(
+            "Nome da coordenadora",
+            value=cfg.get('mogi_nome', ''),
+            key='input_nome_coord_mogi',
+            placeholder="Ex: Beatriz"
+        )
+    with col_c2:
+        st.markdown("**Suzano**")
+        coord_suzano = st.text_input(
+            "Número (com DDD, só dígitos)",
+            value=cfg.get('suzano_telefone', ''),
+            key='input_coord_suzano',
+            placeholder="11999999999"
+        )
+        nome_coord_suzano = st.text_input(
+            "Nome da coordenadora",
+            value=cfg.get('suzano_nome', ''),
+            key='input_nome_coord_suzano',
+            placeholder="Ex: Rafaela"
+        )
+
+    st.divider()
+
+    # ── NOVO (Fase 6): WhatsApp das recepções ──
+    st.markdown("### 🙋 WhatsApp das recepções")
+    st.caption("Quando a Bia disparar [TRANSFERIR_HUMANO] (reagendamento, cliente confuso, restrição médica), o aviso vai pra esses números.")
+
+    col_r1, col_r2 = st.columns(2)
+    with col_r1:
+        st.markdown("**Mogi das Cruzes**")
+        recep_mogi = st.text_input(
+            "Número (com DDD, só dígitos)",
+            value=cfg.get('recepcao_mogi_telefone', ''),
+            key='input_recep_mogi',
+            placeholder="11999999999"
+        )
+        nome_recep_mogi = st.text_input(
+            "Nome da recepção",
+            value=cfg.get('recepcao_mogi_nome', ''),
+            key='input_nome_recep_mogi',
+            placeholder="Ex: Recepção Mogi"
+        )
+    with col_r2:
+        st.markdown("**Suzano**")
+        recep_suzano = st.text_input(
+            "Número (com DDD, só dígitos)",
+            value=cfg.get('recepcao_suzano_telefone', ''),
+            key='input_recep_suzano',
+            placeholder="11999999999"
+        )
+        nome_recep_suzano = st.text_input(
+            "Nome da recepção",
+            value=cfg.get('recepcao_suzano_nome', ''),
+            key='input_nome_recep_suzano',
+            placeholder="Ex: Recepção Suzano"
+        )
+
+    st.divider()
+
+    st.markdown("### 🛠️ Modo manutenção")
+    manutencao = st.toggle(
+        "Pausar a Bia (ela para de responder)",
+        value=cfg.get('modo_manutencao', False),
+        help="Quando ligado, o n8n vai checar essa flag e não processar novas mensagens."
+    )
+    if manutencao:
+        st.warning("⚠️ Modo manutenção ATIVO — a Bia vai parar de responder quando o n8n checar essa flag.")
+
+    st.divider()
+
+    if st.button("💾 Salvar no Supabase", type="primary"):
+        ok = salvar_configuracoes(
+            mogi_telefone=coord_mogi,
+            mogi_nome=nome_coord_mogi,
+            suzano_telefone=coord_suzano,
+            suzano_nome=nome_coord_suzano,
+            modo_manutencao=manutencao,
+            recepcao_mogi_telefone=recep_mogi,
+            recepcao_mogi_nome=nome_recep_mogi,
+            recepcao_suzano_telefone=recep_suzano,
+            recepcao_suzano_nome=nome_recep_suzano,
+        )
+        if ok:
+            st.success("✅ Salvo! O n8n vai usar esses dados na próxima transferência.")
+            st.balloons()
+
+    st.divider()
+
+    st.markdown("### 📊 Informações do sistema")
+    col_i1, col_i2 = st.columns(2)
+    with col_i1:
+        st.metric("Versão do cérebro", "v3.10")
+        st.metric("Modelo Claude", "claude-haiku-4-5")
+    with col_i2:
+        st.metric("Webhook n8n", "✅ Online")
+        st.caption("https://maislaser-robo.app.n8n.cloud/webhook/maislaser-whatsapp")
+
+    if cfg.get('atualizado_em'):
+        st.caption(f"Última atualização das configs: {cfg['atualizado_em'][:19].replace('T', ' ')}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 10) 🆕 ZONA DE EXPANSÃO — NOVAS ABAS (FASE 7+)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+#  👉 INSTRUÇÕES PRA ADICIONAR UMA NOVA ABA:
+#
+#  PASSO 1: Cole o módulo da nova aba ABAIXO desta caixa (entre os
+#           marcadores ▼ INÍCIO MÓDULOS NOVOS e ▲ FIM MÓDULOS NOVOS).
+#           Cada módulo deve expor uma função `render_aba_XXX(supabase)`.
+#
+#  PASSO 2: Lá no main() (busca por "🎯 ABAS DO DASHBOARD"):
+#           a) Adicione o emoji+nome na lista do `st.tabs([...])`
+#           b) Adicione a variável correspondente na desestruturação
+#           c) Adicione um `with tab_XXX:` chamando a função render_*
+#
+#  Cada um desses 3 pontos no main() está marcado com "👉 NOVA ABA:"
+#  pra facilitar achar.
+#
+# ═══════════════════════════════════════════════════════════════════════════
+# ▼ INÍCIO MÓDULOS NOVOS ▼
+# ═══════════════════════════════════════════════════════════════════════════
+
+# (vazio por enquanto — cole aqui o conteúdo de aba_base_clientes.py)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ▲ FIM MÓDULOS NOVOS ▲
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+# ============================================================================
+# 11) MAIN
 # ============================================================================
 
 def main():
@@ -1556,11 +1598,17 @@ def main():
             st.rerun()
         renderizar_conversa(st.session_state['conversa_selecionada'], df_conv, df_leads)
     else:
-        # Abas principais — agora com Agendamentos entre Transferências e Métricas
+        # ═══════════════════════════════════════════════════════════════════
+        # 🎯 ABAS DO DASHBOARD
+        # ═══════════════════════════════════════════════════════════════════
+        # 👉 NOVA ABA (passo 2a): adicione o nome na lista abaixo
+        # 👉 NOVA ABA (passo 2b): adicione a variável tab_X na desestruturação
+        # ═══════════════════════════════════════════════════════════════════
         tab1, tab2, tab3, tab4, tab5 = st.tabs([
             "💬 Conversas",
             "🔥 Transferências",
             "📅 Agendamentos",
+            # 👉 NOVA ABA: adicione AQUI o nome (ex: "📊 Base de Clientes")
             "📈 Métricas",
             "⚙️ Configurações",
         ])
@@ -1573,6 +1621,11 @@ def main():
         
         with tab3:
             tela_agendamentos(df_agend, df_leads, df_conv)
+        
+        # 👉 NOVA ABA (passo 2c): adicione AQUI o bloco `with tab_X:`
+        #    Exemplo:
+        #        with tab_base:
+        #            render_aba_base_clientes(get_supabase())
         
         with tab4:
             tela_metricas(df_conv, df_leads, df_agend)
