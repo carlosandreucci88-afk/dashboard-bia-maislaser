@@ -1604,11 +1604,11 @@ def main():
         # 👉 NOVA ABA (passo 2a): adicione o nome na lista abaixo
         # 👉 NOVA ABA (passo 2b): adicione a variável tab_X na desestruturação
         # ═══════════════════════════════════════════════════════════════════
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab_base, tab4, tab5 = st.tabs([
             "💬 Conversas",
             "🔥 Transferências",
             "📅 Agendamentos",
-            # 👉 NOVA ABA: adicione AQUI o nome (ex: "📊 Base de Clientes")
+            "📊 Base de Clientes",
             "📈 Métricas",
             "⚙️ Configurações",
         ])
@@ -1619,13 +1619,11 @@ def main():
         with tab2:
             tela_transferencias(df_leads, df_conv)
         
-        with tab3:
+      with tab3:
             tela_agendamentos(df_agend, df_leads, df_conv)
         
-        # 👉 NOVA ABA (passo 2c): adicione AQUI o bloco `with tab_X:`
-        #    Exemplo:
-        #        with tab_base:
-        #            render_aba_base_clientes(get_supabase())
+        with tab_base:
+            render_aba_base_clientes(get_supabase())
         
         with tab4:
             tela_metricas(df_conv, df_leads, df_agend)
