@@ -1265,14 +1265,21 @@ def tela_metricas(df_conv, df_leads, df_agend):
     custo_brl = custo_usd * 5.50
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Conversas únicas", conversas_unicas)
-    c2.metric("Mensagens totais", total_msgs)
-    c3.metric("Respostas Bia", msgs_bia)
-    c4.metric("Custo IA", f"R$ {custo_brl:.2f}", help=f"US$ {custo_usd:.4f} · {tokens_total:,} tokens")
+    with c1:
+        st.markdown(render_metric_card("💬", conversas_unicas, "Conversas únicas", "primary"), unsafe_allow_html=True)
+    with c2:
+        st.markdown(render_metric_card("📨", total_msgs, "Mensagens totais", "blue"), unsafe_allow_html=True)
+    with c3:
+        st.markdown(render_metric_card("💚", msgs_bia, "Respostas Bia", "green"), unsafe_allow_html=True)
+    with c4:
+        tokens_fmt = f"{tokens_total:,}".replace(',', '.')
+        st.markdown(render_metric_card("💰", f"R$ {custo_brl:.2f}", "Custo IA", "amber",
+                                       sub=f"{tokens_fmt} tokens · US$ {custo_usd:.4f}"), unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
 
     st.divider()
     st.markdown("### 🎯 Funil de conversão")
-    st.caption("⚠️ Funil ainda usa detecção por texto — fix de cruzamento com tabela agendamentos vem na próxima entrega.")
+    st.caption("Cruza conversas do período com as tabelas reais de agendamentos e transferências.")
 
     if df_conv_p.empty:
         st.info("Sem dados no período.")
@@ -1280,21 +1287,32 @@ def tela_metricas(df_conv, df_leads, df_agend):
         iniciaram = conversas_unicas
         if not df_conv_p.empty and 'telefone' in df_conv_p.columns:
             msgs_por_tel = df_conv_p.groupby('telefone').size()
-            engajaram = (msgs_por_tel >= 3).sum()
+            engajaram = int((msgs_por_tel >= 3).sum())
         else:
             engajaram = 0
 
-        transferiram = 0
-        agendaram = 0
-        if not df_conv_p.empty and 'papel' in df_conv_p.columns:
-            df_conv_bia = df_conv_p[df_conv_p['papel'] == 'assistant']
-            for tel in df_conv_p['telefone'].unique():
-                msgs_tel = df_conv_bia[df_conv_bia['telefone'] == tel]['mensagem'].str.lower().fillna('')
-                todas = ' '.join(msgs_tel.tolist())
-                if 'transferir_coordenadora' in todas or 'transferir_humano' in todas:
-                    transferiram += 1
-                if 'agendar|' in todas or '[agendar' in todas:
-                    agendaram += 1
+        # ─── Lookup REAL: telefones que estão no df de conversas DO PERÍODO ───
+        telefones_no_periodo = set(df_conv_p['telefone'].astype(str).unique()) if not df_conv_p.empty else set()
+
+        # Agendaram: cruzamento com tabela agendamentos (criados no período)
+        telefones_agendaram = set()
+        if df_agend is not None and not df_agend.empty and 'telefone' in df_agend.columns:
+            if 'criado_em' in df_agend.columns:
+                df_ag_per = df_agend[df_agend['criado_em'] >= dt_inicio]
+            else:
+                df_ag_per = df_agend
+            telefones_agendaram = set(df_ag_per['telefone'].astype(str)) & telefones_no_periodo
+        agendaram = len(telefones_agendaram)
+
+        # Transferiram: cruzamento com leads.transferido_em (no período)
+        telefones_transferiram = set()
+        if not df_leads.empty and 'transferido_em' in df_leads.columns:
+            df_t = df_leads[df_leads['transferido_em'].notna()].copy()
+            if not df_t.empty:
+                df_t['transferido_em'] = pd.to_datetime(df_t['transferido_em'], errors='coerce')
+                df_t = df_t[df_t['transferido_em'] >= dt_inicio]
+                telefones_transferiram = set(df_t['telefone'].astype(str)) & telefones_no_periodo
+        transferiram = len(telefones_transferiram)
 
         fig = go.Figure(go.Funnel(
             y=["Iniciaram conversa", "Engajaram (3+ msgs)", "Transferiram", "Agendaram"],
@@ -1327,9 +1345,35 @@ def tela_metricas(df_conv, df_leads, df_agend):
     with col_g2:
         st.markdown("### 🏢 Comparativo unidades")
         if not df_leads.empty and 'criado_em' in df_leads.columns:
-            df_leads_p = df_leads[df_leads['criado_em'] >= dt_inicio]
+            df_leads_p = df_leads[df_leads['criado_em'] >= dt_inicio].copy()
             if not df_leads_p.empty:
-                unidade_count = df_leads_p['unidade'].fillna('desconhecido').value_counts().reset_index()
+                # Fallback de unidade: slot_unidade > unidade > agendamentos.unidade
+                if 'slot_unidade' in df_leads_p.columns:
+                    df_leads_p['_unidade_resolvida'] = df_leads_p['slot_unidade'].fillna(df_leads_p['unidade'])
+                else:
+                    df_leads_p['_unidade_resolvida'] = df_leads_p['unidade']
+
+                if df_agend is not None and not df_agend.empty and 'unidade' in df_agend.columns:
+                    unid_ag = (df_agend[['telefone', 'unidade']]
+                               .dropna(subset=['unidade'])
+                               .drop_duplicates('telefone', keep='first')
+                               .rename(columns={'unidade': '_unid_ag'}))
+                    df_leads_p = df_leads_p.merge(unid_ag, on='telefone', how='left')
+                    df_leads_p['_unidade_resolvida'] = df_leads_p['_unidade_resolvida'].fillna(df_leads_p['_unid_ag'])
+
+                # Normalizar pra Mogi das Cruzes / Suzano / Desconhecido
+                def _norm_unidade(u):
+                    if not isinstance(u, str) or not u.strip():
+                        return 'Desconhecida'
+                    ul = u.lower().strip()
+                    if 'mogi' in ul or 'monte' in ul:
+                        return 'Mogi das Cruzes'
+                    elif 'suzano' in ul:
+                        return 'Suzano'
+                    return u.title()
+
+                df_leads_p['_unidade_norm'] = df_leads_p['_unidade_resolvida'].apply(_norm_unidade)
+                unidade_count = df_leads_p['_unidade_norm'].value_counts().reset_index()
                 unidade_count.columns = ['Unidade', 'Leads']
                 fig = px.pie(unidade_count, values='Leads', names='Unidade',
                              color_discrete_sequence=[COR_PRIMARIA, "#3b82f6", "#a3a3a3"])
@@ -1349,38 +1393,76 @@ def tela_metricas(df_conv, df_leads, df_agend):
         custo_dia['Custo USD'] = (custo_dia['tokens'] / 1_000_000) * CUSTO_USD_POR_MTOK
         custo_dia['Custo BRL'] = custo_dia['Custo USD'] * 5.50
         custo_dia.columns = ['Dia', 'Tokens', 'Custo USD', 'Custo BRL']
-        fig = px.line(custo_dia, x='Dia', y='Custo BRL', markers=True,
-                      color_discrete_sequence=[COR_PRIMARIA])
-        fig.update_layout(height=300, margin=dict(t=10, b=10, l=10, r=10), yaxis_title="Custo (R$)")
+        # Formatar 'Dia' como string DD/MM pra evitar eixo X com timestamps esquisitos
+        custo_dia['Dia'] = pd.to_datetime(custo_dia['Dia']).dt.strftime('%d/%m')
+        # 1 ponto → bar chart fica melhor; vários → linha com marcadores
+        if len(custo_dia) == 1:
+            fig = px.bar(custo_dia, x='Dia', y='Custo BRL', color_discrete_sequence=[COR_PRIMARIA],
+                         text='Custo BRL')
+            fig.update_traces(texttemplate='R$ %{text:.2f}', textposition='outside')
+        else:
+            fig = px.line(custo_dia, x='Dia', y='Custo BRL', markers=True,
+                          color_discrete_sequence=[COR_PRIMARIA])
+        fig.update_layout(height=300, margin=dict(t=10, b=10, l=10, r=10), yaxis_title="Custo (R$)", xaxis_type='category')
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Sem dados.")
 
     st.divider()
     st.markdown("### 🔄 Motivos de transferência / encerramento")
-    if not df_conv_p.empty and 'papel' in df_conv_p.columns:
-        df_bia = df_conv_p[df_conv_p['papel'] == 'assistant']
+    if not df_conv_p.empty and 'telefone' in df_conv_p.columns:
         motivos = {
             "🤝 Coordenadora": 0, "👤 Recepção (humano)": 0, "📅 Agendou": 0,
             "✋ Encerrou": 0, "Sem desfecho": 0,
         }
-        for tel in df_conv_p['telefone'].unique():
-            msgs_tel = df_bia[df_bia['telefone'] == tel]['mensagem'].str.lower().fillna('')
-            todas = ' '.join(msgs_tel.tolist())
-            if 'transferir_coordenadora' in todas:
-                motivos["🤝 Coordenadora"] += 1
-            elif 'transferir_humano' in todas:
-                motivos["👤 Recepção (humano)"] += 1
-            elif 'agendar|' in todas or '[agendar' in todas:
+
+        # Sets de lookup rápido — telefones que tiveram cada tipo de desfecho no período
+        tel_agendou = set()
+        if df_agend is not None and not df_agend.empty and 'telefone' in df_agend.columns:
+            df_ag_per = df_agend[df_agend['criado_em'] >= dt_inicio] if 'criado_em' in df_agend.columns else df_agend
+            tel_agendou = set(df_ag_per['telefone'].astype(str))
+
+        tel_transf_coord = set()
+        tel_transf_humano = set()
+        if not df_leads.empty and 'transferido_em' in df_leads.columns:
+            df_t = df_leads[df_leads['transferido_em'].notna()].copy()
+            if not df_t.empty:
+                df_t['transferido_em'] = pd.to_datetime(df_t['transferido_em'], errors='coerce')
+                df_t = df_t[df_t['transferido_em'] >= dt_inicio]
+                if 'transferido_para' in df_t.columns:
+                    mask_humano = df_t['transferido_para'].fillna('').str.startswith('Recepção')
+                    tel_transf_humano = set(df_t[mask_humano]['telefone'].astype(str))
+                    tel_transf_coord = set(df_t[~mask_humano]['telefone'].astype(str))
+                else:
+                    tel_transf_coord = set(df_t['telefone'].astype(str))
+
+        # Encerramentos ainda via texto (tag [ENCERRAR] não tem tabela; rara mas captura)
+        df_bia = df_conv_p[df_conv_p['papel'] == 'assistant'] if 'papel' in df_conv_p.columns else pd.DataFrame()
+        tel_encerrou = set()
+        if not df_bia.empty:
+            for tel in df_conv_p['telefone'].unique():
+                msgs_tel = df_bia[df_bia['telefone'] == tel]['mensagem'].str.lower().fillna('')
+                todas = ' '.join(msgs_tel.tolist())
+                if '[encerrar]' in todas or 'transferir_humano|encerrar' in todas:
+                    tel_encerrou.add(str(tel))
+
+        # Classificação (prioridade: agendou > coordenadora > humano > encerrou > sem desfecho)
+        for tel in df_conv_p['telefone'].astype(str).unique():
+            if tel in tel_agendou:
                 motivos["📅 Agendou"] += 1
-            elif '[encerrar]' in todas:
+            elif tel in tel_transf_coord:
+                motivos["🤝 Coordenadora"] += 1
+            elif tel in tel_transf_humano:
+                motivos["👤 Recepção (humano)"] += 1
+            elif tel in tel_encerrou:
                 motivos["✋ Encerrou"] += 1
             else:
                 motivos["Sem desfecho"] += 1
 
         df_motivos = pd.DataFrame(list(motivos.items()), columns=['Motivo', 'Conversas'])
         fig = px.bar(df_motivos, x='Conversas', y='Motivo', orientation='h',
-                     color_discrete_sequence=[COR_PRIMARIA])
+                     color_discrete_sequence=[COR_PRIMARIA], text='Conversas')
+        fig.update_traces(textposition='outside')
         fig.update_layout(height=280, margin=dict(t=10, b=10, l=10, r=10))
         st.plotly_chart(fig, use_container_width=True)
     else:
