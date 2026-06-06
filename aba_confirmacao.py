@@ -385,7 +385,7 @@ def tela_confirmacao_historico():
         tipos = ["Todos"] + sorted(df_f['Tipo de Mensagem'].dropna().unique().tolist()) if 'Tipo de Mensagem' in df_f.columns else ["Todos"]
         tipo_filtro = st.selectbox("Tipo de mensagem", tipos, key="hist_tipo")
     with col_f2:
-        busca = st.text_input("🔎 Buscar (nome, telefone ou observação)", key="hist_busca")
+        busca = st.text_input("🔎 Buscar (nome, telefone, conteúdo ou observação)", key="hist_busca")
 
     if tipo_filtro != "Todos" and 'Tipo de Mensagem' in df_f.columns:
         df_f = df_f[df_f['Tipo de Mensagem'] == tipo_filtro]
@@ -394,7 +394,8 @@ def tela_confirmacao_historico():
         df_f = df_f[
             df_f['Nome'].astype(str).str.lower().str.contains(bl, na=False) |
             df_f['Telefone'].astype(str).str.contains(busca, na=False) |
-            df_f['Observação'].astype(str).str.lower().str.contains(bl, na=False)
+            df_f['Observação'].astype(str).str.lower().str.contains(bl, na=False) |
+            df_f['Conteúdo Exato'].astype(str).str.lower().str.contains(bl, na=False)
         ]
 
     st.markdown(f"### {len(df_f)} registro(s)")
@@ -402,18 +403,19 @@ def tela_confirmacao_historico():
         st.info("Nada encontrado com esses filtros.")
         return
 
-    # Cabeçalho COM coluna Unidade
-    h1, h2, h3, h4, h5, h6 = st.columns([1.0, 1.5, 0.8, 1.1, 1.0, 2.6])
+    # Cabeçalho COM coluna Unidade + Conteúdo
+    h1, h2, h3, h4, h5, h6, h7 = st.columns([0.9, 1.4, 0.7, 0.9, 1.0, 1.5, 1.6])
     h1.markdown("**Quando**")
     h2.markdown("**Cliente**")
     h3.markdown("**Unidade**")
     h4.markdown("**Tipo**")
     h5.markdown("**Status**")
-    h6.markdown("**Observação**")
+    h6.markdown("**Conteúdo**")
+    h7.markdown("**Observação**")
     st.markdown('<hr style="margin: 4px 0 8px 0;">', unsafe_allow_html=True)
 
     for _, row in df_f.head(200).iterrows():
-        c1, c2, c3, c4, c5, c6 = st.columns([1.0, 1.5, 0.8, 1.1, 1.0, 2.6])
+        c1, c2, c3, c4, c5, c6, c7 = st.columns([0.9, 1.4, 0.7, 0.9, 1.0, 1.5, 1.6])
         try:
             quando = row['Data/Hora_sp'].strftime('%d/%m %H:%M')
         except Exception:
@@ -427,9 +429,22 @@ def tela_confirmacao_historico():
             unid = unid_raw.replace('Mogi das Cruzes', 'Mogi')
         tipo = str(row.get('Tipo de Mensagem', '—') or '—')
         st_depois = str(row.get('Status Depois', '—') or '—')
+
+        # Conteúdo exato do que o cliente respondeu (limpa "-" e None, trunca)
+        conteudo_raw = str(row.get('Conteúdo Exato', '') or '')
+        if conteudo_raw in ("-", "None", ""):
+            conteudo = "—"
+        else:
+            # remove quebras de linha pra não quebrar layout
+            conteudo = conteudo_raw.replace('\n', ' ').replace('\r', ' ')
+            if len(conteudo) > 50:
+                conteudo = conteudo[:50] + "…"
+            # escape simples pra HTML não quebrar
+            conteudo = conteudo.replace('<', '&lt;').replace('>', '&gt;')
+
         obs = str(row.get('Observação', '') or '')
-        if len(obs) > 70:
-            obs = obs[:70] + "…"
+        if len(obs) > 60:
+            obs = obs[:60] + "…"
 
         c1.markdown(f"<div style='font-size: 12px; color: #6B7280;'>{quando}</div>", unsafe_allow_html=True)
         c2.markdown(f"<div style='font-weight: 600; font-size: 13px;'>{nome}</div>"
@@ -437,7 +452,8 @@ def tela_confirmacao_historico():
         c3.markdown(f"<div style='font-size: 12px;'>{unid}</div>", unsafe_allow_html=True)
         c4.markdown(f"<div style='font-size: 12px;'>{tipo}</div>", unsafe_allow_html=True)
         c5.markdown(f"<div style='font-size: 12px;'>{STATUS_EMOJI.get(st_depois, st_depois)}</div>", unsafe_allow_html=True)
-        c6.markdown(f"<div style='font-size: 12px; color: #4B5563;'>{obs}</div>", unsafe_allow_html=True)
+        c6.markdown(f"<div style='font-size: 12px; color: #1F2937; font-style: italic;'>{conteudo}</div>", unsafe_allow_html=True)
+        c7.markdown(f"<div style='font-size: 12px; color: #4B5563;'>{obs}</div>", unsafe_allow_html=True)
 
     if len(df_f) > 200:
         st.caption(f"Mostrando 200 de {len(df_f)} registros. Use a busca pra refinar.")
