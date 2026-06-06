@@ -148,12 +148,17 @@ def _log_to_df(data):
 # ============================================================================
 # Renderiza:
 #   - 4 botões de período: Hoje / Últimas 24h / Últimos 3 dias / Tudo
+#   - (opcional) 5º botão "📅 Personalizado" com 2 date pickers (de/até)
 #   - 3 botões de unidade: Todas / Mogi / Suzano
 # Aplica os filtros no df e retorna o df filtrado.
 # Mostra contagens dinâmicas nos botões (refletem o df ANTES de filtrar).
+#
+# 🆕 v3 (06/06/2026) — Parâmetro permite_personalizado:
+#   Quando True, mostra 5º botão "📅 Personalizado" que abre 2 date inputs.
+#   Usado SÓ na aba Indicações pra análise mensal.
 # ============================================================================
 
-def _filtros_periodo_unidade(df, col_data, col_unidade, key_prefix, default_periodo="Hoje"):
+def _filtros_periodo_unidade(df, col_data, col_unidade, key_prefix, default_periodo="Hoje", permite_personalizado=False):
     """
     Renderiza UI de filtros e retorna df filtrado.
 
@@ -163,6 +168,7 @@ def _filtros_periodo_unidade(df, col_data, col_unidade, key_prefix, default_peri
         col_unidade: nome da coluna com texto da unidade
         key_prefix: prefixo único para session_state/button keys
         default_periodo: período inicial selecionado ("Hoje", "24h", "3dias", "Tudo")
+        permite_personalizado: se True, mostra 5º botão "📅 Personalizado" + date pickers
     """
     state_per  = f"{key_prefix}_periodo"
     state_unid = f"{key_prefix}_unidade"
@@ -184,7 +190,13 @@ def _filtros_periodo_unidade(df, col_data, col_unidade, key_prefix, default_peri
         cnt_tudo = len(df)
 
     # ── Linha 1: botões de PERÍODO ──
-    col_p1, col_p2, col_p3, col_p4 = st.columns([1.1, 1.4, 1.5, 1.0])
+    if permite_personalizado:
+        # 🆕 v3: 5 botões em linha (com Personalizado)
+        col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns([1.1, 1.4, 1.5, 1.0, 1.6])
+    else:
+        # Layout original: 4 botões
+        col_p1, col_p2, col_p3, col_p4 = st.columns([1.1, 1.4, 1.5, 1.0])
+
     with col_p1:
         ativo = st.session_state[state_per] == "Hoje"
         if st.button(f"📆 Hoje ({cnt_hoje})", type="primary" if ativo else "secondary",
@@ -206,6 +218,41 @@ def _filtros_periodo_unidade(df, col_data, col_unidade, key_prefix, default_peri
                      use_container_width=True, key=f"{key_prefix}_btn_p_tudo"):
             st.session_state[state_per] = "Tudo"; st.rerun()
 
+    if permite_personalizado:
+        with col_p5:
+            ativo = st.session_state[state_per] == "Personalizado"
+            if st.button("📅 Personalizado", type="primary" if ativo else "secondary",
+                         use_container_width=True, key=f"{key_prefix}_btn_p_pers"):
+                st.session_state[state_per] = "Personalizado"; st.rerun()
+
+    # 🆕 v3: Se "Personalizado" ativo, mostra date pickers
+    data_de = data_ate = None
+    if permite_personalizado and st.session_state[state_per] == "Personalizado":
+        state_de  = f"{key_prefix}_data_de"
+        state_ate = f"{key_prefix}_data_ate"
+        # Defaults: primeiro dia do mês atual até hoje
+        if state_de not in st.session_state:
+            st.session_state[state_de] = agora.date().replace(day=1)
+        if state_ate not in st.session_state:
+            st.session_state[state_ate] = agora.date()
+
+        col_d1, col_d2, _esp = st.columns([1.5, 1.5, 3.6])
+        with col_d1:
+            data_de = st.date_input(
+                "De:", value=st.session_state[state_de],
+                key=f"{key_prefix}_dpicker_de", format="DD/MM/YYYY"
+            )
+            st.session_state[state_de] = data_de
+        with col_d2:
+            data_ate = st.date_input(
+                "Até:", value=st.session_state[state_ate],
+                key=f"{key_prefix}_dpicker_ate", format="DD/MM/YYYY"
+            )
+            st.session_state[state_ate] = data_ate
+
+        if data_de and data_ate and data_de > data_ate:
+            st.warning("⚠️ Data inicial é depois da final. Inverta as datas.")
+
     # ── Aplica filtro de PERÍODO ──
     df_f = df.copy()
     if col_data in df_f.columns and not df_f.empty:
@@ -216,6 +263,11 @@ def _filtros_periodo_unidade(df, col_data, col_unidade, key_prefix, default_peri
             df_f = df_f[df_f[col_data] >= agora - timedelta(hours=24)]
         elif per == "3dias":
             df_f = df_f[df_f[col_data] >= agora - timedelta(days=3)]
+        elif per == "Personalizado" and data_de and data_ate and data_de <= data_ate:
+            # 🆕 v3: range personalizado
+            dt_de  = datetime.combine(data_de,  datetime.min.time()).replace(tzinfo=TZ_SP)
+            dt_ate = datetime.combine(data_ate, datetime.max.time()).replace(tzinfo=TZ_SP)
+            df_f = df_f[(df_f[col_data] >= dt_de) & (df_f[col_data] <= dt_ate)]
         # "Tudo" → sem filtro
 
     # Contagens para botões de UNIDADE (baseadas no df já filtrado por período)
@@ -530,7 +582,7 @@ def tela_confirmacao_indicacoes():
         return
 
     # Filtros de período + unidade (default Tudo pra ver o histórico completo)
-    df_f = _filtros_periodo_unidade(df_ind, "timestamp_sp", "unidade", "indic", default_periodo="Tudo")
+    df_f = _filtros_periodo_unidade(df_ind, "timestamp_sp", "unidade", "indic", default_periodo="Tudo", permite_personalizado=True)
 
     if df_f.empty:
         st.info("Nenhum convite nos filtros selecionados.")
