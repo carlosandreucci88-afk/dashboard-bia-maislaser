@@ -21,6 +21,12 @@ import os
 
 # Módulos das abas novas (Fase 7+)
 from aba_base_clientes import render_aba_base_clientes
+from aba_confirmacao import (
+    tela_confirmacao_disparos_dia,
+    tela_confirmacao_historico,
+    tela_confirmacao_indicacoes,
+    tela_confirmacao_metricas,
+)
 
 
 # ============================================================================
@@ -1722,8 +1728,8 @@ def main():
 
     elif robo == 'confirmacao':
         # ─── Tabs do Robô Confirmação Agenda ────────────────────
-        # Fase A: estrutura visual + placeholders. Sem mexer no
-        # Apps Script que tá rodando hoje. Disparar fica primeira.
+        # Fase C: 4 abas conectadas aos endpoints read-only do Apps Script.
+        # Disparar agenda continua placeholder até a Fase D (porta o app.py).
         tab_disp, tab_dia, tab_hist, tab_indic, tab_metr = st.tabs([
             "🚀 Disparar agenda",
             "📅 Disparos do dia",
@@ -1742,37 +1748,16 @@ def main():
             )
 
         with tab_dia:
-            placeholder_aba(
-                "📅 Disparos do dia",
-                "Lista todos clientes que receberam template hoje com seu status atual "
-                "(confirmado, aguardando, reagendado, cancelado, recepção, etc). Vai puxar "
-                "da aba Contexto da planilha 'Maislaser Contexto' via Apps Script.",
-                "Fase C"
-            )
+            tela_confirmacao_disparos_dia()
 
         with tab_hist:
-            placeholder_aba(
-                "💬 Histórico de respostas",
-                "Log completo de interações filtrado, com busca por nome ou telefone. "
-                "Vai puxar da aba 'Log de Interações' via Apps Script.",
-                "Fase C"
-            )
+            tela_confirmacao_historico()
 
         with tab_indic:
-            placeholder_aba(
-                "🎁 Programa de indicações",
-                "Status do programa de indicações (pendente, aceita, recusada, sem resposta) "
-                "e taxa de conversão. Mesma fonte do Disparos do dia.",
-                "Fase C"
-            )
+            tela_confirmacao_indicacoes()
 
         with tab_metr:
-            placeholder_aba(
-                "📊 Métricas confirmação",
-                "Taxa de confirmação, % cancelado por não responder, melhor horário pra "
-                "disparar, % de indicação aceita.",
-                "Fase C"
-            )
+            tela_confirmacao_metricas()
 
     if auto_refresh:
         time.sleep(30)
