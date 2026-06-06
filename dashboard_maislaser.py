@@ -246,6 +246,9 @@ button[data-baseweb="button"][kind="primary"]:hover {
 .badge-alerta { background: #fee2e2; color: #991b1b; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; }
 .badge-ok { background: #dcfce7; color: #166534; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; }
 .badge-info { background: var(--primary-bg); color: var(--primary-dark); padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.badge-amber { background: #fef3c7; color: #92400e; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.badge-purple { background: #ede9fe; color: #5b21b6; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.badge-neutral { background: #f3f4f6; color: #4b5563; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; }
 
 /* ===== DIVISORES ===== */
 hr { border-color: var(--border-light) !important; margin: 1.5rem 0 !important; }
@@ -978,26 +981,31 @@ def tela_transferencias(df_leads, df_conv):
     if unidade_filtro != "Todas":
         df_filtrado = df_filtrado[df_filtrado['unidade'] == unidade_filtro]
 
-    st.divider()
+    if 'transferido_para' in df_filtrado.columns:
+        mask_recep = df_filtrado['transferido_para'].fillna('').str.startswith('Recepção')
+        qtd_coord = int((~mask_recep).sum())
+        qtd_recep = int(mask_recep.sum())
+    else:
+        qtd_coord = 0
+        qtd_recep = 0
+
+    avisados = int(df_filtrado['cliente_avisado'].sum()) if 'cliente_avisado' in df_filtrado.columns else 0
+    nao_avisados = len(df_filtrado) - avisados
+
     col1, col2, col3, col4 = st.columns(4)
-
     with col1:
-        st.metric("Total no período", len(df_filtrado))
+        st.markdown(render_metric_card("🔥", len(df_filtrado), "Total no período", "primary"), unsafe_allow_html=True)
     with col2:
-        if 'transferido_para' in df_filtrado.columns:
-            mask_recep = df_filtrado['transferido_para'].fillna('').str.startswith('Recepção')
-            qtd_coord = int((~mask_recep).sum())
-            qtd_recep = int(mask_recep.sum())
-            st.metric("💼 Coordenadora", qtd_coord, help="Transferências pra vendas")
+        st.markdown(render_metric_card("💼", qtd_coord, "Coordenadora", "green",
+                                       sub="Transferências pra vendas"), unsafe_allow_html=True)
     with col3:
-        if 'transferido_para' in df_filtrado.columns:
-            st.metric("🙋 Recepção", qtd_recep, help="Transferências pra atendimento humano")
+        st.markdown(render_metric_card("🙋", qtd_recep, "Recepção", "blue",
+                                       sub="Atendimento humano"), unsafe_allow_html=True)
     with col4:
-        avisados = df_filtrado['cliente_avisado'].sum() if 'cliente_avisado' in df_filtrado.columns else 0
-        nao_avisados = len(df_filtrado) - int(avisados)
-        st.metric("⚠️ Pendente aviso", int(nao_avisados))
+        cor_aviso = "red" if nao_avisados > 0 else "green"
+        st.markdown(render_metric_card("⚠️", nao_avisados, "Pendente aviso", cor_aviso), unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    st.divider()
     st.markdown(f"### 📋 Lista — {len(df_filtrado)} transferência(s)")
 
     if df_filtrado.empty:
@@ -1011,7 +1019,7 @@ def tela_transferencias(df_leads, df_conv):
     h_col4.markdown("**Destino**")
     h_col5.markdown("**Motivo / Sinal**")
     h_col6.markdown("**Quando**")
-    st.divider()
+    st.markdown('<hr style="margin: 4px 0 8px 0;">', unsafe_allow_html=True)
 
     for _, lead in df_filtrado.iterrows():
         col1, col2, col3, col4, col5, col6 = st.columns([1.5, 1.5, 1.2, 1.4, 3, 1])
@@ -1020,12 +1028,14 @@ def tela_transferencias(df_leads, df_conv):
         telefone = lead.get('telefone', '—')
         unidade = lead.get('unidade') or '—'
         coord = lead.get('transferido_para') or '—'
+        # Badge de destino
         if isinstance(coord, str) and coord.startswith('Recepção'):
-            coord_display = f"🙋 {coord}"
+            destino_badge = f"<span class='badge-amber'>🙋 {coord}</span>"
         elif coord != '—':
-            coord_display = f"💼 {coord}"
+            destino_badge = f"<span class='badge-info'>💼 {coord}</span>"
         else:
-            coord_display = '—'
+            destino_badge = '<span class="badge-neutral">—</span>'
+
         sinal = lead.get('ultimo_sinal_compra') or '—'
         if isinstance(sinal, str) and len(sinal) > 60:
             sinal = sinal[:60] + "..."
@@ -1035,12 +1045,16 @@ def tela_transferencias(df_leads, df_conv):
         except Exception:
             quando = '—'
 
-        avisado_emoji = " ✅" if lead.get('cliente_avisado') else " ⚠️"
+        # Badge de status de aviso
+        if lead.get('cliente_avisado'):
+            aviso_badge = "<span class='badge-ok'>✅ Avisado</span>"
+        else:
+            aviso_badge = "<span class='badge-amber'>⚠️ Pendente</span>"
 
-        col1.write(f"{nome}{avisado_emoji}")
+        col1.markdown(f"**{nome}** {aviso_badge}", unsafe_allow_html=True)
         col2.write(f"+{telefone}" if not telefone.startswith('+') else telefone)
         col3.write(unidade)
-        col4.write(coord_display)
+        col4.markdown(destino_badge, unsafe_allow_html=True)
         col5.write(f"💬 _{sinal}_" if sinal != '—' else '—')
         col6.write(quando)
 
@@ -1152,27 +1166,31 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
         df_filt = df_filt.sort_values('data_hora', ascending=False)
 
     st.divider()
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total no filtro", len(df_filt))
-
     if 'status' in df_filt.columns and not df_filt.empty:
         status_lower = df_filt['status'].astype(str).str.lower()
         confirmados = int((status_lower == 'confirmado').sum())
         pendentes = int((status_lower == 'agendado').sum())
-        col2.metric("Confirmados ✅", confirmados)
-        col3.metric("Pendente confirmar ⏳", pendentes)
     else:
-        col2.metric("Confirmados", "—")
-        col3.metric("Pendentes", "—")
+        confirmados = 0
+        pendentes = 0
 
     try:
         proximos_7 = int(((df_filt['data_hora_sp'] >= hoje_inicio) &
                           (df_filt['data_hora_sp'] <= agora + timedelta(days=7))).sum())
     except Exception:
         proximos_7 = 0
-    col4.metric("Próximos 7 dias", proximos_7)
 
-    st.divider()
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.markdown(render_metric_card("📅", len(df_filt), "Total no filtro", "primary"), unsafe_allow_html=True)
+    with col2:
+        st.markdown(render_metric_card("✅", confirmados, "Confirmados", "green"), unsafe_allow_html=True)
+    with col3:
+        st.markdown(render_metric_card("⏳", pendentes, "Pendente confirmar", "amber"), unsafe_allow_html=True)
+    with col4:
+        st.markdown(render_metric_card("⏭️", proximos_7, "Próximos 7 dias", "blue"), unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+
     st.markdown(f"### 📋 Lista — {len(df_filt)} agendamento(s)")
 
     if df_filt.empty:
@@ -1189,9 +1207,14 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
     h7.markdown("**Ação**")
     st.divider()
 
-    status_emoji_map = {
-        'agendado': '📅 Agendado', 'confirmado': '✅ Confirmado', 'cancelado': '❌ Cancelado',
-        'realizado': '🎉 Realizado', 'faltou': '😶 Faltou', 'no_show': '😶 Faltou',
+    # Mapeamento status → (texto, classe CSS badge)
+    status_badge_map = {
+        'agendado':   ('📅 Agendado',   'badge-info'),
+        'confirmado': ('✅ Confirmado', 'badge-ok'),
+        'cancelado':  ('❌ Cancelado',  'badge-alerta'),
+        'realizado':  ('🎉 Realizado',  'badge-ok'),
+        'faltou':     ('😶 Faltou',     'badge-amber'),
+        'no_show':    ('😶 Faltou',     'badge-amber'),
     }
 
     for _, ag in df_filt.iterrows():
@@ -1219,10 +1242,15 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
         c1.write(f"{prefixo}{nome}")
         c2.write(f"+{telefone}" if not telefone.startswith('+') else telefone)
         c3.write(unidade)
-        area_str = f"{area}" + (" ⚡" if fazer else "")
-        c4.write(area_str)
+        # Área com badge "na hora" caso aplicável
+        if fazer:
+            c4.markdown(f"{area} <span class='badge-amber'>⚡ na hora</span>", unsafe_allow_html=True)
+        else:
+            c4.write(area)
         c5.write(quando)
-        c6.write(status_emoji_map.get(status, status))
+        # Status como badge colorido
+        texto_status, classe_status = status_badge_map.get(status, (status, 'badge-neutral'))
+        c6.markdown(f"<span class='{classe_status}'>{texto_status}</span>", unsafe_allow_html=True)
 
         if c7.button("Ver", key=f"ver_agend_{telefone}_{ag.name}"):
             st.session_state['conversa_selecionada'] = telefone
@@ -1230,7 +1258,7 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
 
         st.markdown("---")
 
-    st.caption("⚡ = cliente quer fazer a sessão na hora  ·  ⏭️ = agendamento futuro")
+    st.caption("⏭️ = agendamento futuro  ·  badges coloridos indicam o status")
 
 
 # ─────────── ABA 4: 📈 MÉTRICAS (mantida, fix de funil vem na Entrega 2) ───────────
@@ -1556,13 +1584,17 @@ def tela_configuracoes():
     st.divider()
 
     st.markdown("### 📊 Informações do sistema")
-    col_i1, col_i2 = st.columns(2)
+    col_i1, col_i2, col_i3, col_i4 = st.columns(4)
     with col_i1:
-        st.metric("Versão do cérebro", VERSAO_CEREBRO)
-        st.metric("Modelo Claude", MODELO_CLAUDE_DEFAULT)
+        st.markdown(render_metric_card("🧠", VERSAO_CEREBRO, "Cérebro", "primary"), unsafe_allow_html=True)
     with col_i2:
-        st.metric("Webhook n8n", "✅ Online")
-        st.caption("https://maislaser-robo.app.n8n.cloud/webhook/maislaser-whatsapp")
+        st.markdown(render_metric_card("🤖", MODELO_CLAUDE_DEFAULT, "Modelo Claude", "purple"), unsafe_allow_html=True)
+    with col_i3:
+        st.markdown(render_metric_card("📊", VERSAO_DASHBOARD, "Dashboard", "blue"), unsafe_allow_html=True)
+    with col_i4:
+        st.markdown(render_metric_card("🟢", "Online", "Webhook n8n", "green"), unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.caption("Webhook: https://maislaser-robo.app.n8n.cloud/webhook/maislaser-whatsapp")
 
     if cfg.get('atualizado_em'):
         st.caption(f"Última atualização das configs: {cfg['atualizado_em'][:19].replace('T', ' ')}")
