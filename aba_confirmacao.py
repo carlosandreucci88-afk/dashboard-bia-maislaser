@@ -3,11 +3,17 @@
 ABA CONFIRMAÇÃO AGENDA — Robô Confirmação (Google Apps Script v6.6+)
 ==============================================================================
 Conecta o dashboard aos endpoints read-only do Apps Script:
-  - /?endpoint=stats     → KPIs e agregados
   - /?endpoint=contexto  → todas as linhas da planilha Contexto
   - /?endpoint=log       → últimas N linhas do Log de Interações
 
 NÃO faz nenhuma escrita — só leitura. O Apps Script segue dono da verdade.
+
+v2 (Fase C.1):
+  • Filtros consistentes em todas as 4 telas:
+    - Período: Hoje / Últimas 24h / Últimos 3 dias / Tudo
+    - Unidade: Todas / Mogi / Suzano
+  • Histórico ganhou coluna Unidade
+  • Métricas calculadas localmente a partir do contexto (responsivas aos filtros)
 ==============================================================================
 """
 
@@ -32,19 +38,7 @@ STATUS_EMOJI = {
     "indicacao_aceita":        "🎁 Indic. aceita",
     "indicacao_recusada":      "⚫ Indic. recusada",
     "indicacao_sem_resposta":  "⚪ Indic. sem resp",
-}
-
-STATUS_COR = {
-    "aguardando":              "amber",
-    "confirmado":              "green",
-    "reagendado":              "blue",
-    "cancelado_sem_resposta":  "red",
-    "aguardando_recepção":     "purple",
-    "redirecionado_recepção":  "purple",
-    "indicacao_pendente":      "amber",
-    "indicacao_aceita":        "green",
-    "indicacao_recusada":      "neutral",
-    "indicacao_sem_resposta":  "neutral",
+    "sem_contexto":            "❓ Sem contexto",
 }
 
 
@@ -116,13 +110,12 @@ def _render_metric_card_local(icon, value, label, color="primary", sub=None):
 # ============================================================================
 
 def _ctx_to_df(data):
-    """Converte resposta do endpoint contexto em DataFrame."""
+    """Converte resposta do endpoint contexto em DataFrame com timestamp_sp."""
     if not isinstance(data, dict) or "linhas" not in data:
         return pd.DataFrame()
     df = pd.DataFrame(data["linhas"])
     if df.empty:
         return df
-    # timestamp vem como ISO string
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
         try:
@@ -151,6 +144,116 @@ def _log_to_df(data):
 
 
 # ============================================================================
+# 🆕 v2 — FILTROS REUSÁVEIS DE PERÍODO + UNIDADE
+# ============================================================================
+# Renderiza:
+#   - 4 botões de período: Hoje / Últimas 24h / Últimos 3 dias / Tudo
+#   - 3 botões de unidade: Todas / Mogi / Suzano
+# Aplica os filtros no df e retorna o df filtrado.
+# Mostra contagens dinâmicas nos botões (refletem o df ANTES de filtrar).
+# ============================================================================
+
+def _filtros_periodo_unidade(df, col_data, col_unidade, key_prefix, default_periodo="Hoje"):
+    """
+    Renderiza UI de filtros e retorna df filtrado.
+
+    Args:
+        df: DataFrame com as colunas
+        col_data: nome da coluna de timestamp (tz-aware)
+        col_unidade: nome da coluna com texto da unidade
+        key_prefix: prefixo único para session_state/button keys
+        default_periodo: período inicial selecionado ("Hoje", "24h", "3dias", "Tudo")
+    """
+    state_per  = f"{key_prefix}_periodo"
+    state_unid = f"{key_prefix}_unidade"
+
+    if state_per  not in st.session_state: st.session_state[state_per]  = default_periodo
+    if state_unid not in st.session_state: st.session_state[state_unid] = "Todas"
+
+    agora = datetime.now(TZ_SP)
+
+    # Contagens para os botões de PERÍODO (baseadas em todo o df, sem filtro de unidade)
+    if df.empty or col_data not in df.columns:
+        cnt_hoje = cnt_24h = cnt_3d = cnt_tudo = 0
+    else:
+        ts = df[col_data]
+        hoje_inicio = agora.replace(hour=0, minute=0, second=0, microsecond=0)
+        cnt_hoje = int((ts >= hoje_inicio).sum())
+        cnt_24h  = int((ts >= agora - timedelta(hours=24)).sum())
+        cnt_3d   = int((ts >= agora - timedelta(days=3)).sum())
+        cnt_tudo = len(df)
+
+    # ── Linha 1: botões de PERÍODO ──
+    col_p1, col_p2, col_p3, col_p4 = st.columns([1.1, 1.4, 1.5, 1.0])
+    with col_p1:
+        ativo = st.session_state[state_per] == "Hoje"
+        if st.button(f"📆 Hoje ({cnt_hoje})", type="primary" if ativo else "secondary",
+                     use_container_width=True, key=f"{key_prefix}_btn_p_hoje"):
+            st.session_state[state_per] = "Hoje"; st.rerun()
+    with col_p2:
+        ativo = st.session_state[state_per] == "24h"
+        if st.button(f"🕐 Últimas 24h ({cnt_24h})", type="primary" if ativo else "secondary",
+                     use_container_width=True, key=f"{key_prefix}_btn_p_24h"):
+            st.session_state[state_per] = "24h"; st.rerun()
+    with col_p3:
+        ativo = st.session_state[state_per] == "3dias"
+        if st.button(f"📅 Últimos 3 dias ({cnt_3d})", type="primary" if ativo else "secondary",
+                     use_container_width=True, key=f"{key_prefix}_btn_p_3d"):
+            st.session_state[state_per] = "3dias"; st.rerun()
+    with col_p4:
+        ativo = st.session_state[state_per] == "Tudo"
+        if st.button(f"♾️ Tudo ({cnt_tudo})", type="primary" if ativo else "secondary",
+                     use_container_width=True, key=f"{key_prefix}_btn_p_tudo"):
+            st.session_state[state_per] = "Tudo"; st.rerun()
+
+    # ── Aplica filtro de PERÍODO ──
+    df_f = df.copy()
+    if col_data in df_f.columns and not df_f.empty:
+        per = st.session_state[state_per]
+        if per == "Hoje":
+            df_f = df_f[df_f[col_data] >= agora.replace(hour=0, minute=0, second=0, microsecond=0)]
+        elif per == "24h":
+            df_f = df_f[df_f[col_data] >= agora - timedelta(hours=24)]
+        elif per == "3dias":
+            df_f = df_f[df_f[col_data] >= agora - timedelta(days=3)]
+        # "Tudo" → sem filtro
+
+    # Contagens para botões de UNIDADE (baseadas no df já filtrado por período)
+    if df_f.empty or col_unidade not in df_f.columns:
+        cnt_todas = cnt_mogi = cnt_suzano = 0
+    else:
+        s_unid = df_f[col_unidade].astype(str).str.lower()
+        cnt_todas  = len(df_f)
+        cnt_mogi   = int(s_unid.str.contains('mogi', na=False).sum())
+        cnt_suzano = int(s_unid.str.contains('suzano', na=False).sum())
+
+    # ── Linha 2: botões de UNIDADE ──
+    col_u1, col_u2, col_u3, _esp = st.columns([1.1, 1.4, 1.2, 1.3])
+    with col_u1:
+        ativo = st.session_state[state_unid] == "Todas"
+        if st.button(f"🏢 Todas ({cnt_todas})", type="primary" if ativo else "secondary",
+                     use_container_width=True, key=f"{key_prefix}_btn_u_todas"):
+            st.session_state[state_unid] = "Todas"; st.rerun()
+    with col_u2:
+        ativo = st.session_state[state_unid] == "Mogi"
+        if st.button(f"📍 Mogi ({cnt_mogi})", type="primary" if ativo else "secondary",
+                     use_container_width=True, key=f"{key_prefix}_btn_u_mogi"):
+            st.session_state[state_unid] = "Mogi"; st.rerun()
+    with col_u3:
+        ativo = st.session_state[state_unid] == "Suzano"
+        if st.button(f"📍 Suzano ({cnt_suzano})", type="primary" if ativo else "secondary",
+                     use_container_width=True, key=f"{key_prefix}_btn_u_suzano"):
+            st.session_state[state_unid] = "Suzano"; st.rerun()
+
+    # ── Aplica filtro de UNIDADE ──
+    unid = st.session_state[state_unid]
+    if unid != "Todas" and col_unidade in df_f.columns and not df_f.empty:
+        df_f = df_f[df_f[col_unidade].astype(str).str.lower().str.contains(unid.lower(), na=False)]
+
+    return df_f
+
+
+# ============================================================================
 # ABA 1: 📅 DISPAROS DO DIA
 # ============================================================================
 
@@ -167,91 +270,25 @@ def tela_confirmacao_disparos_dia():
         st.info("Nenhum disparo registrado ainda.")
         return
 
-    # ─── Filtros de período (3 botões — igual padrão das outras abas) ───
-    if 'conf_periodo_btn' not in st.session_state:
-        st.session_state['conf_periodo_btn'] = "Hoje"
-
-    agora = datetime.now(TZ_SP)
-    if 'timestamp_sp' in df.columns:
-        ts = df['timestamp_sp']
-        hoje_inicio = agora.replace(hour=0, minute=0, second=0, microsecond=0)
-        cnt_hoje  = int((ts >= hoje_inicio).sum())
-        cnt_24h   = int((ts >= agora - timedelta(hours=24)).sum())
-        cnt_3dias = int((ts >= agora - timedelta(days=3)).sum())
-    else:
-        cnt_hoje = cnt_24h = cnt_3dias = 0
-
-    col_p1, col_p2, col_p3, _ = st.columns([1.2, 1.4, 1.4, 4])
-    with col_p1:
-        ativo = st.session_state['conf_periodo_btn'] == "Hoje"
-        if st.button(f"📆 Hoje ({cnt_hoje})", type="primary" if ativo else "secondary",
-                     use_container_width=True, key="btn_conf_per_hoje"):
-            st.session_state['conf_periodo_btn'] = "Hoje"; st.rerun()
-    with col_p2:
-        ativo = st.session_state['conf_periodo_btn'] == "24h"
-        if st.button(f"🕐 Últimas 24h ({cnt_24h})", type="primary" if ativo else "secondary",
-                     use_container_width=True, key="btn_conf_per_24h"):
-            st.session_state['conf_periodo_btn'] = "24h"; st.rerun()
-    with col_p3:
-        ativo = st.session_state['conf_periodo_btn'] == "3dias"
-        if st.button(f"📅 Últimos 3 dias ({cnt_3dias})", type="primary" if ativo else "secondary",
-                     use_container_width=True, key="btn_conf_per_3dias"):
-            st.session_state['conf_periodo_btn'] = "3dias"; st.rerun()
-
-    # Aplica filtro de período
-    if 'timestamp_sp' in df.columns:
-        if st.session_state['conf_periodo_btn'] == "Hoje":
-            df = df[df['timestamp_sp'] >= hoje_inicio]
-        elif st.session_state['conf_periodo_btn'] == "24h":
-            df = df[df['timestamp_sp'] >= agora - timedelta(hours=24)]
-        else:
-            df = df[df['timestamp_sp'] >= agora - timedelta(days=3)]
-
-    # ─── Filtros de unidade (3 botões — igual padrão das outras abas) ───
-    if 'conf_unid_btn' not in st.session_state:
-        st.session_state['conf_unid_btn'] = "Todas"
-
-    cnt_todas  = len(df)
-    cnt_mogi   = int((df['unidade'].astype(str).str.lower().str.contains('mogi', na=False)).sum()) if 'unidade' in df.columns else 0
-    cnt_suzano = int((df['unidade'].astype(str).str.lower().str.contains('suzano', na=False)).sum()) if 'unidade' in df.columns else 0
-
-    col_u1, col_u2, col_u3, _ = st.columns([1.2, 1.4, 1.2, 4])
-    with col_u1:
-        ativo = st.session_state['conf_unid_btn'] == "Todas"
-        if st.button(f"🏢 Todas ({cnt_todas})", type="primary" if ativo else "secondary",
-                     use_container_width=True, key="btn_conf_unid_todas"):
-            st.session_state['conf_unid_btn'] = "Todas"; st.rerun()
-    with col_u2:
-        ativo = st.session_state['conf_unid_btn'] == "Mogi"
-        if st.button(f"📍 Mogi ({cnt_mogi})", type="primary" if ativo else "secondary",
-                     use_container_width=True, key="btn_conf_unid_mogi"):
-            st.session_state['conf_unid_btn'] = "Mogi"; st.rerun()
-    with col_u3:
-        ativo = st.session_state['conf_unid_btn'] == "Suzano"
-        if st.button(f"📍 Suzano ({cnt_suzano})", type="primary" if ativo else "secondary",
-                     use_container_width=True, key="btn_conf_unid_suzano"):
-            st.session_state['conf_unid_btn'] = "Suzano"; st.rerun()
-
-    if st.session_state['conf_unid_btn'] != "Todas" and 'unidade' in df.columns:
-        df = df[df['unidade'].astype(str).str.lower().str.contains(
-            st.session_state['conf_unid_btn'].lower(), na=False)]
+    # Filtros de período + unidade
+    df_f = _filtros_periodo_unidade(df, "timestamp_sp", "unidade", "dispdia", default_periodo="Hoje")
 
     st.markdown("")
     busca = st.text_input("🔎 Buscar por nome ou telefone", key="conf_busca_disparos")
-    if busca and not df.empty:
+    if busca and not df_f.empty:
         bl = busca.lower()
-        df = df[
-            df['nome'].astype(str).str.lower().str.contains(bl, na=False) |
-            df['telefone'].astype(str).str.contains(busca, na=False)
+        df_f = df_f[
+            df_f['nome'].astype(str).str.lower().str.contains(bl, na=False) |
+            df_f['telefone'].astype(str).str.contains(busca, na=False)
         ]
 
-    # ─── KPIs ───
-    if df.empty:
+    if df_f.empty:
         st.info("Nenhum cliente nos filtros selecionados.")
         return
 
-    st_lower = df['status'].astype(str).str.lower() if 'status' in df.columns else pd.Series([], dtype=str)
-    qtd_total       = len(df)
+    # ─── KPIs ───
+    st_lower = df_f['status'].astype(str).str.lower() if 'status' in df_f.columns else pd.Series([], dtype=str)
+    qtd_total       = len(df_f)
     qtd_confirmados = int((st_lower == 'confirmado').sum())
     qtd_aguardando  = int((st_lower == 'aguardando').sum())
     qtd_cancelados  = int(st_lower.str.contains('cancelado', na=False).sum())
@@ -265,11 +302,11 @@ def tela_confirmacao_disparos_dia():
     col_m5.markdown(_render_metric_card_local("🎁", qtd_indic, "Indicações", "purple"), unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown(f"### Lista de disparos · {len(df)} cliente(s)")
+    st.markdown(f"### Lista de disparos · {len(df_f)} cliente(s)")
 
     # Ordena por timestamp desc (mais recente primeiro)
-    if 'timestamp_sp' in df.columns:
-        df = df.sort_values('timestamp_sp', ascending=False)
+    if 'timestamp_sp' in df_f.columns:
+        df_f = df_f.sort_values('timestamp_sp', ascending=False)
 
     # Cabeçalho
     h1, h2, h3, h4, h5, h6 = st.columns([2, 1.3, 0.9, 1.5, 1.3, 1.1])
@@ -281,7 +318,7 @@ def tela_confirmacao_disparos_dia():
     h6.markdown("**Status**")
     st.markdown('<hr style="margin: 4px 0 8px 0;">', unsafe_allow_html=True)
 
-    for _, row in df.head(100).iterrows():
+    for _, row in df_f.head(100).iterrows():
         c1, c2, c3, c4, c5, c6 = st.columns([2, 1.3, 0.9, 1.5, 1.3, 1.1])
         nome = row.get('nome', '—') or '—'
         tel = str(row.get('telefone', '—'))
@@ -314,8 +351,8 @@ def tela_confirmacao_disparos_dia():
         c5.markdown(f"<div style='font-size: 12px; color: #9CA3AF;'>{quando}</div>", unsafe_allow_html=True)
         c6.write(emoji_label)
 
-    if len(df) > 100:
-        st.caption(f"Mostrando 100 de {len(df)} disparos. Use filtros pra refinar.")
+    if len(df_f) > 100:
+        st.caption(f"Mostrando 100 de {len(df_f)} disparos. Use filtros pra refinar.")
 
     st.caption(f"⏱️ Dados em cache por 30s — última atualização: {data.get('gerado_em', '—')[:19].replace('T', ' ')}")
 
@@ -337,61 +374,73 @@ def tela_confirmacao_historico():
         st.info("Sem registros no log ainda.")
         return
 
-    # ─── Filtros ───
+    # Filtros de período + unidade (default 24h pra cobrir noite anterior)
+    df_f = _filtros_periodo_unidade(df, "Data/Hora_sp", "Unidade", "hist", default_periodo="24h")
+
+    st.markdown("")
+
+    # Filtros adicionais (tipo + busca)
     col_f1, col_f2 = st.columns([2, 3])
     with col_f1:
-        tipos = ["Todos"] + sorted(df['Tipo de Mensagem'].dropna().unique().tolist()) if 'Tipo de Mensagem' in df.columns else ["Todos"]
+        tipos = ["Todos"] + sorted(df_f['Tipo de Mensagem'].dropna().unique().tolist()) if 'Tipo de Mensagem' in df_f.columns else ["Todos"]
         tipo_filtro = st.selectbox("Tipo de mensagem", tipos, key="hist_tipo")
     with col_f2:
         busca = st.text_input("🔎 Buscar (nome, telefone ou observação)", key="hist_busca")
 
-    df_filt = df.copy()
-    if tipo_filtro != "Todos" and 'Tipo de Mensagem' in df_filt.columns:
-        df_filt = df_filt[df_filt['Tipo de Mensagem'] == tipo_filtro]
+    if tipo_filtro != "Todos" and 'Tipo de Mensagem' in df_f.columns:
+        df_f = df_f[df_f['Tipo de Mensagem'] == tipo_filtro]
     if busca:
         bl = busca.lower()
-        df_filt = df_filt[
-            df_filt['Nome'].astype(str).str.lower().str.contains(bl, na=False) |
-            df_filt['Telefone'].astype(str).str.contains(busca, na=False) |
-            df_filt['Observação'].astype(str).str.lower().str.contains(bl, na=False)
+        df_f = df_f[
+            df_f['Nome'].astype(str).str.lower().str.contains(bl, na=False) |
+            df_f['Telefone'].astype(str).str.contains(busca, na=False) |
+            df_f['Observação'].astype(str).str.lower().str.contains(bl, na=False)
         ]
 
-    st.markdown(f"### {len(df_filt)} registro(s)")
-    if df_filt.empty:
+    st.markdown(f"### {len(df_f)} registro(s)")
+    if df_f.empty:
         st.info("Nada encontrado com esses filtros.")
         return
 
-    h1, h2, h3, h4, h5 = st.columns([1.2, 1.6, 1.3, 1.2, 3])
+    # Cabeçalho COM coluna Unidade
+    h1, h2, h3, h4, h5, h6 = st.columns([1.0, 1.5, 0.8, 1.1, 1.0, 2.6])
     h1.markdown("**Quando**")
     h2.markdown("**Cliente**")
-    h3.markdown("**Tipo**")
-    h4.markdown("**Status**")
-    h5.markdown("**Observação**")
+    h3.markdown("**Unidade**")
+    h4.markdown("**Tipo**")
+    h5.markdown("**Status**")
+    h6.markdown("**Observação**")
     st.markdown('<hr style="margin: 4px 0 8px 0;">', unsafe_allow_html=True)
 
-    for _, row in df_filt.head(200).iterrows():
-        c1, c2, c3, c4, c5 = st.columns([1.2, 1.6, 1.3, 1.2, 3])
+    for _, row in df_f.head(200).iterrows():
+        c1, c2, c3, c4, c5, c6 = st.columns([1.0, 1.5, 0.8, 1.1, 1.0, 2.6])
         try:
             quando = row['Data/Hora_sp'].strftime('%d/%m %H:%M')
         except Exception:
             quando = "—"
         nome = str(row.get('Nome', '—') or '—')
         tel = str(row.get('Telefone', '—'))
+        unid_raw = str(row.get('Unidade', '—') or '—')
+        if unid_raw in ("-", "None", ""):
+            unid = "—"
+        else:
+            unid = unid_raw.replace('Mogi das Cruzes', 'Mogi')
         tipo = str(row.get('Tipo de Mensagem', '—') or '—')
         st_depois = str(row.get('Status Depois', '—') or '—')
         obs = str(row.get('Observação', '') or '')
-        if len(obs) > 80:
-            obs = obs[:80] + "…"
+        if len(obs) > 70:
+            obs = obs[:70] + "…"
 
         c1.markdown(f"<div style='font-size: 12px; color: #6B7280;'>{quando}</div>", unsafe_allow_html=True)
         c2.markdown(f"<div style='font-weight: 600; font-size: 13px;'>{nome}</div>"
                     f"<div style='font-size: 11px; color: #9CA3AF;'>+{tel}</div>", unsafe_allow_html=True)
-        c3.markdown(f"<div style='font-size: 12px;'>{tipo}</div>", unsafe_allow_html=True)
-        c4.markdown(f"<div style='font-size: 12px;'>{STATUS_EMOJI.get(st_depois, st_depois)}</div>", unsafe_allow_html=True)
-        c5.markdown(f"<div style='font-size: 12px; color: #4B5563;'>{obs}</div>", unsafe_allow_html=True)
+        c3.markdown(f"<div style='font-size: 12px;'>{unid}</div>", unsafe_allow_html=True)
+        c4.markdown(f"<div style='font-size: 12px;'>{tipo}</div>", unsafe_allow_html=True)
+        c5.markdown(f"<div style='font-size: 12px;'>{STATUS_EMOJI.get(st_depois, st_depois)}</div>", unsafe_allow_html=True)
+        c6.markdown(f"<div style='font-size: 12px; color: #4B5563;'>{obs}</div>", unsafe_allow_html=True)
 
-    if len(df_filt) > 200:
-        st.caption(f"Mostrando 200 de {len(df_filt)} registros. Use a busca pra refinar.")
+    if len(df_f) > 200:
+        st.caption(f"Mostrando 200 de {len(df_f)} registros. Use a busca pra refinar.")
 
     st.caption(f"⏱️ Cache 30s · {data.get('total', 0)} registros carregados de {data.get('total_planilha', 0)} na planilha")
 
@@ -413,23 +462,31 @@ def tela_confirmacao_indicacoes():
         st.info("Sem dados de indicações ainda.")
         return
 
-    # Filtra só registros relacionados a indicação
+    # Filtra primeiro só registros relacionados a indicação
     df_ind = df[df['status'].astype(str).str.startswith('indicacao_', na=False)].copy()
 
     if df_ind.empty:
         st.info("Nenhum convite de indicação enviado ainda.")
         return
 
-    st_lower = df_ind['status'].astype(str).str.lower()
+    # Filtros de período + unidade (default Tudo pra ver o histórico completo)
+    df_f = _filtros_periodo_unidade(df_ind, "timestamp_sp", "unidade", "indic", default_periodo="Tudo")
+
+    if df_f.empty:
+        st.info("Nenhum convite nos filtros selecionados.")
+        return
+
+    st_lower = df_f['status'].astype(str).str.lower()
     qtd_pendente = int((st_lower == 'indicacao_pendente').sum())
     qtd_aceita   = int((st_lower == 'indicacao_aceita').sum())
     qtd_recusada = int((st_lower == 'indicacao_recusada').sum())
     qtd_sem_resp = int((st_lower == 'indicacao_sem_resposta').sum())
-    total = len(df_ind)
+    total = len(df_f)
     respondidas = qtd_aceita + qtd_recusada
-    taxa_resp = (respondidas / total * 100) if total else 0
+    taxa_resp  = (respondidas / total * 100) if total else 0
     taxa_aceit = (qtd_aceita / respondidas * 100) if respondidas else 0
 
+    st.markdown("")
     col_m1, col_m2, col_m3, col_m4 = st.columns(4)
     col_m1.markdown(_render_metric_card_local("✉️", total, "Convites enviados", "primary"), unsafe_allow_html=True)
     col_m2.markdown(_render_metric_card_local("📩", f"{taxa_resp:.0f}%", "Taxa de resposta",
@@ -440,7 +497,7 @@ def tela_confirmacao_indicacoes():
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Funil
+    # Funil + pizza
     col_g1, col_g2 = st.columns(2)
     with col_g1:
         st.markdown("### Funil")
@@ -465,10 +522,10 @@ def tela_confirmacao_indicacoes():
         st.plotly_chart(fig2, use_container_width=True)
 
     st.divider()
-    st.markdown(f"### Lista · {len(df_ind)} convite(s)")
+    st.markdown(f"### Lista · {len(df_f)} convite(s)")
 
-    if 'timestamp_sp' in df_ind.columns:
-        df_ind = df_ind.sort_values('timestamp_sp', ascending=False)
+    if 'timestamp_sp' in df_f.columns:
+        df_f = df_f.sort_values('timestamp_sp', ascending=False)
 
     h1, h2, h3, h4, h5 = st.columns([1.8, 1.3, 0.9, 1.3, 1.4])
     h1.markdown("**Cliente**")
@@ -478,7 +535,7 @@ def tela_confirmacao_indicacoes():
     h5.markdown("**Quando**")
     st.markdown('<hr style="margin: 4px 0 8px 0;">', unsafe_allow_html=True)
 
-    for _, row in df_ind.head(100).iterrows():
+    for _, row in df_f.head(100).iterrows():
         c1, c2, c3, c4, c5 = st.columns([1.8, 1.3, 0.9, 1.3, 1.4])
         nome = row.get('nome', '—') or '—'
         tel = str(row.get('telefone', '—'))
@@ -495,8 +552,8 @@ def tela_confirmacao_indicacoes():
         c4.write(STATUS_EMOJI.get(status, status))
         c5.markdown(f"<div style='font-size: 12px; color: #9CA3AF;'>{quando}</div>", unsafe_allow_html=True)
 
-    if len(df_ind) > 100:
-        st.caption(f"Mostrando 100 de {len(df_ind)} convites.")
+    if len(df_f) > 100:
+        st.caption(f"Mostrando 100 de {len(df_f)} convites.")
 
 
 # ============================================================================
@@ -505,63 +562,79 @@ def tela_confirmacao_indicacoes():
 
 def tela_confirmacao_metricas():
     st.markdown("## 📊 Métricas Robô Confirmação")
-    st.caption("Visão geral do desempenho do robô de confirmação de agenda.")
+    st.caption("Visão geral filtrável por período e unidade — recalculada localmente conforme os filtros.")
 
-    stats = _apps_script_get("stats")
-    if _mostrar_erro_e_parar(stats, "(carregando stats)"):
+    data = _apps_script_get("contexto")
+    if _mostrar_erro_e_parar(data, "(carregando métricas)"):
         return
 
-    total = stats.get('total', 0)
-    por_status = stats.get('por_status', {})
-    por_unidade = stats.get('por_unidade', {})
-    hoje = stats.get('hoje', {})
-    pendentes_agora = stats.get('pendentes_agora', 0)
+    df = _ctx_to_df(data)
+    if df.empty:
+        st.info("Sem dados ainda.")
+        return
 
-    # Cards principais
-    confirmados = por_status.get('confirmado', 0)
-    cancelados  = por_status.get('cancelado_sem_resposta', 0)
-    reagendados = por_status.get('reagendado', 0)
+    # Filtros de período + unidade (default Tudo)
+    df_f = _filtros_periodo_unidade(df, "timestamp_sp", "unidade", "metr", default_periodo="Tudo")
 
-    # Taxa de confirmação = confirmados / (confirmados + cancelados + reagendados)
+    if df_f.empty:
+        st.info("Sem dados nos filtros selecionados.")
+        return
+
+    st.markdown("")
+
+    # Calcula stats locais a partir do df filtrado
+    st_lower = df_f['status'].astype(str).str.lower()
+    total = len(df_f)
+    confirmados  = int((st_lower == 'confirmado').sum())
+    reagendados  = int((st_lower == 'reagendado').sum())
+    cancelados   = int(st_lower.str.contains('cancelado', na=False).sum())
+    aguardando   = int((st_lower == 'aguardando').sum())
+    recepcao     = int(st_lower.str.contains('recep', na=False).sum())
+    indic_pend   = int((st_lower == 'indicacao_pendente').sum())
+    indic_aceit  = int((st_lower == 'indicacao_aceita').sum())
+    indic_recus  = int((st_lower == 'indicacao_recusada').sum())
+    indic_sresp  = int((st_lower == 'indicacao_sem_resposta').sum())
+
+    # Taxa de confirmação considera só os "decididos" (confirmados + cancelados + reagendados)
     finalizados = confirmados + cancelados + reagendados
     taxa_conf = (confirmados / finalizados * 100) if finalizados else 0
 
+    # Cards principais
     col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-    col_m1.markdown(_render_metric_card_local("📋", total, "Total na planilha", "primary"), unsafe_allow_html=True)
+    col_m1.markdown(_render_metric_card_local("📋", total, "Total no filtro", "primary"), unsafe_allow_html=True)
     col_m2.markdown(_render_metric_card_local("✅", f"{taxa_conf:.1f}%", "Taxa confirmação",
                                               "green", sub=f"{confirmados} de {finalizados}"), unsafe_allow_html=True)
-    col_m3.markdown(_render_metric_card_local("⏳", pendentes_agora, "Aguardando agora", "amber"), unsafe_allow_html=True)
-    col_m4.markdown(_render_metric_card_local("📅", hoje.get('total_cadastrados', 0), "Cadastrados hoje", "blue",
-                                              sub=f"{hoje.get('confirmados', 0)} já confirmaram"), unsafe_allow_html=True)
+    col_m3.markdown(_render_metric_card_local("⏳", aguardando, "Aguardando", "amber"), unsafe_allow_html=True)
+    col_m4.markdown(_render_metric_card_local("🎁", indic_aceit, "Indic. aceitas", "purple",
+                                              sub=f"{indic_pend} pendentes"), unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-
-    # Hoje em detalhe
-    if hoje.get('total_cadastrados', 0) > 0:
-        st.markdown("### 📆 Resumo de hoje")
-        cc1, cc2, cc3, cc4, cc5 = st.columns(5)
-        cc1.metric("Cadastrados", hoje.get('total_cadastrados', 0))
-        cc2.metric("Confirmados", hoje.get('confirmados', 0))
-        cc3.metric("Reagendaram", hoje.get('reagendados', 0))
-        cc4.metric("Cancelados", hoje.get('cancelados', 0))
-        cc5.metric("Aguardando", hoje.get('aguardando_agora', 0))
-        st.markdown("<br>", unsafe_allow_html=True)
-
     st.divider()
 
-    # Distribuição por status + por unidade
+    # Gráficos: por status + por unidade
     col_g1, col_g2 = st.columns(2)
 
     with col_g1:
-        st.markdown("### Por status (geral)")
-        if por_status:
-            df_st = pd.DataFrame([
-                {"Status": STATUS_EMOJI.get(k, k), "Qtd": v}
-                for k, v in por_status.items()
-            ]).sort_values('Qtd', ascending=True)
+        st.markdown("### Por status")
+        por_status_dict = {
+            "🟢 Confirmado": confirmados,
+            "🔄 Reagendado": reagendados,
+            "🔴 Cancelado": cancelados,
+            "🟡 Aguardando": aguardando,
+            "🟣 Recepção": recepcao,
+            "🟠 Indic. pendente": indic_pend,
+            "🎁 Indic. aceita": indic_aceit,
+            "⚫ Indic. recusada": indic_recus,
+            "⚪ Indic. sem resp": indic_sresp,
+        }
+        por_status_dict = {k: v for k, v in por_status_dict.items() if v > 0}
+        if por_status_dict:
+            df_st = pd.DataFrame([{"Status": k, "Qtd": v} for k, v in por_status_dict.items()]) \
+                      .sort_values('Qtd', ascending=True)
             fig = px.bar(df_st, x='Qtd', y='Status', orientation='h',
-                         color_discrete_sequence=["#5BC0BE"])
-            fig.update_layout(height=350, margin=dict(t=10, b=10, l=10, r=10),
+                         color_discrete_sequence=["#5BC0BE"], text='Qtd')
+            fig.update_traces(textposition='outside')
+            fig.update_layout(height=380, margin=dict(t=10, b=10, l=10, r=30),
                               yaxis_title=None, xaxis_title=None)
             st.plotly_chart(fig, use_container_width=True)
         else:
@@ -569,24 +642,26 @@ def tela_confirmacao_metricas():
 
     with col_g2:
         st.markdown("### Por unidade")
-        if por_unidade:
-            df_un = pd.DataFrame([
-                {"Unidade": k, "Qtd": v} for k, v in por_unidade.items()
-            ])
-            fig = px.pie(df_un, values='Qtd', names='Unidade',
-                         color_discrete_sequence=["#5BC0BE", "#3b82f6", "#a3a3a3"])
-            fig.update_layout(height=350, margin=dict(t=10, b=10, l=10, r=10))
-            st.plotly_chart(fig, use_container_width=True)
+        if 'unidade' in df_f.columns:
+            cnt_unid = df_f['unidade'].astype(str).str.replace('Mogi das Cruzes', 'Mogi').value_counts()
+            if not cnt_unid.empty:
+                df_un = pd.DataFrame({"Unidade": cnt_unid.index, "Qtd": cnt_unid.values})
+                fig = px.pie(df_un, values='Qtd', names='Unidade',
+                             color_discrete_sequence=["#5BC0BE", "#3b82f6", "#a3a3a3"])
+                fig.update_layout(height=380, margin=dict(t=10, b=10, l=10, r=10))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Sem dados.")
         else:
-            st.info("Sem dados.")
+            st.info("Sem dados de unidade.")
 
     st.divider()
 
     # Composição de outcomes (taxa)
-    st.markdown("### 🎯 Composição de resultados (acumulado)")
+    st.markdown("### 🎯 Composição de resultados (apenas disparos finalizados)")
     if finalizados > 0:
         outcomes = pd.DataFrame({
-            "Resultado": ["Confirmados", "Reagendaram", "Cancelados (sem resp)"],
+            "Resultado": ["Confirmados", "Reagendaram", "Cancelados"],
             "Qtd": [confirmados, reagendados, cancelados],
             "Pct": [
                 confirmados/finalizados*100,
@@ -596,13 +671,15 @@ def tela_confirmacao_metricas():
         })
         fig = go.Figure(go.Bar(
             x=outcomes['Qtd'], y=outcomes['Resultado'], orientation='h',
-            text=[f"{p:.1f}%" for p in outcomes['Pct']],
+            text=[f"{q} ({p:.1f}%)" for q, p in zip(outcomes['Qtd'], outcomes['Pct'])],
             textposition='auto',
             marker_color=["#22c55e", "#3b82f6", "#ef4444"]
         ))
-        fig.update_layout(height=200, margin=dict(t=10, b=10, l=10, r=10))
+        fig.update_layout(height=200, margin=dict(t=10, b=10, l=10, r=10),
+                          xaxis_title=None, yaxis_title=None)
         st.plotly_chart(fig, use_container_width=True)
+        st.caption(f"Considera apenas os {finalizados} disparos finalizados. Aguardando/Recepção/Indicações ficam fora desta conta.")
     else:
-        st.info("Ainda não há disparos finalizados pra calcular.")
+        st.info("Ainda não há disparos finalizados nos filtros pra calcular.")
 
-    st.caption(f"⏱️ Atualizado em {stats.get('gerado_em', '—')[:19].replace('T', ' ')} · Cache 30s")
+    st.caption(f"⏱️ Atualizado: {data.get('gerado_em', '—')[:19].replace('T', ' ')} · Cache 30s")
