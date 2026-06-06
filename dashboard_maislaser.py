@@ -2,36 +2,6 @@
 ==============================================================================
 DASHBOARD MAISLASER — Bia
 ==============================================================================
-Painel de monitoramento das conversas do robô Bia em tempo real.
-
-Setup:
-1. pip install -r requirements.txt
-2. Configurar .streamlit/secrets.toml com:
-       SUPABASE_URL = "https://pmorwdbmzbeaakutxhdk.supabase.co"
-       SUPABASE_KEY = "sb_secret_..."
-       DASHBOARD_PASSWORD = "sua_senha_aqui"
-3. streamlit run dashboard_maislaser.py
-
-Para deploy:
-- Subir no Streamlit Cloud (gratuito): https://streamlit.io/cloud
-- Conectar com este arquivo no GitHub
-- Configurar os secrets no painel do Streamlit Cloud
-
-==============================================================================
-🗺️  GUIA DE NAVEGAÇÃO DESTE ARQUIVO
-==============================================================================
-  1) IMPORTS
-  2) CONFIG INICIAL          (page_config, constantes globais)
-  3) CSS                     (visual polido tipo WhatsApp)
-  4) AUTENTICAÇÃO            (login com lembrar-de-mim)
-  5) CONEXÃO SUPABASE        (get_supabase cacheado)
-  6) CARREGAMENTO DE DADOS   (carregar_conversas, _leads, _agendamentos, etc)
-  7) HELPERS                 (agrupar, alertas, formatar, detectar tags)
-  8) RENDER DETALHE          (renderizar_conversa — tela de uma conversa)
-  9) TELAS DAS ABAS          (tela_conversas, _transferencias, _agendamentos,
-                              _metricas, _configuracoes)
- 10) MAIN                    (sidebar + roteamento das abas)
-==============================================================================
 """
 
 # ============================================================================
@@ -46,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
 import time
 import hashlib
+import base64
+import os
 
 # Módulos das abas novas (Fase 7+)
 from aba_base_clientes import render_aba_base_clientes
@@ -63,28 +35,251 @@ st.set_page_config(
 )
 
 TZ_SP = timezone(timedelta(hours=-3))
-COR_PRIMARIA = "#22c55e"
+COR_PRIMARIA = "#5BC0BE"      # teal do logo Maislaser
+COR_PRIMARIA_DARK = "#3D9991"
 CUSTO_USD_POR_MTOK = 3.0
+VERSAO_DASHBOARD = "v4.0"
+VERSAO_CEREBRO = "v3.10"
+MODELO_CLAUDE_DEFAULT = "claude-sonnet-4-6"
 
 
 # ============================================================================
-# 3) CSS — visual polido tipo WhatsApp
+# 3) CSS — visual moderno (paleta teal do logo)
 # ============================================================================
 
 st.markdown("""
 <style>
-    .stApp { background-color: #f7f9fc; }
-    .msg-cliente { background: #dcfce7; padding: 10px 14px; border-radius: 12px 12px 12px 2px; margin: 6px 0; max-width: 75%; margin-right: auto; word-wrap: break-word; white-space: pre-wrap; }
-    .msg-bia { background: #ffffff; border: 1px solid #e5e7eb; padding: 10px 14px; border-radius: 12px 12px 2px 12px; margin: 6px 0 6px auto; max-width: 75%; word-wrap: break-word; white-space: pre-wrap; }
-    .msg-timestamp { font-size: 11px; color: #6b7280; margin-top: 2px; }
-    .badge-alerta { background: #fee2e2; color: #991b1b; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
-    .badge-ok { background: #dcfce7; color: #166534; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
-    .badge-info { background: #dbeafe; color: #1e40af; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
-    .card-metric { background: white; padding: 16px; border-radius: 12px; border: 1px solid #e5e7eb; text-align: center; }
-    .stTabs [data-baseweb="tab-list"] { gap: 4px; }
-    .stTabs [data-baseweb="tab"] { padding: 8px 20px; font-weight: 600; }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+:root {
+    --primary: #5BC0BE;
+    --primary-dark: #3D9991;
+    --primary-light: #A0D9D7;
+    --primary-bg: #ECFAF9;
+    --green: #22c55e;
+    --red: #ef4444;
+    --amber: #f59e0b;
+    --blue: #3b82f6;
+    --text: #1A2332;
+    --text-secondary: #6B7280;
+    --text-muted: #9CA3AF;
+    --bg-page: #F7F9FC;
+    --bg-card: #FFFFFF;
+    --border: #E5E7EB;
+    --border-light: #F3F4F6;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
+    --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+    --shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+    --shadow-lg: 0 10px 30px rgba(0,0,0,0.10);
+    --radius: 12px;
+    --radius-sm: 8px;
+    --radius-lg: 16px;
+}
+
+/* App body */
+.stApp { background-color: var(--bg-page); font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+.stApp, .stApp p, .stApp span, .stApp div, .stApp label { font-family: 'Inter', sans-serif; }
+
+/* Headers */
+h1, h2, h3, h4 { color: var(--text); font-weight: 700 !important; letter-spacing: -0.02em; }
+h1 { font-size: 28px !important; }
+h2 { font-size: 22px !important; }
+h3 { font-size: 18px !important; }
+
+/* ===== SIDEBAR ===== */
+[data-testid="stSidebar"] { background: linear-gradient(180deg, #5BC0BE 0%, #3D9991 100%); border-right: none; }
+[data-testid="stSidebar"] > div:first-child { padding-top: 1.5rem; }
+[data-testid="stSidebar"] * { color: white; }
+[data-testid="stSidebar"] input, [data-testid="stSidebar"] textarea { color: var(--text) !important; background: rgba(255,255,255,0.95) !important; }
+
+/* Logo card no topo da sidebar */
+.logo-card { background: white; border-radius: 14px; padding: 20px 16px 16px 16px; margin: 0 -4px 20px -4px; box-shadow: 0 6px 20px rgba(0,0,0,0.18); text-align: center; }
+.logo-card img { width: 100%; max-width: 180px; height: auto; display: block; margin: 0 auto; }
+.logo-card .logo-subtitle { font-size: 11px; color: var(--text-secondary) !important; margin-top: 8px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; }
+
+/* Botões da sidebar com fundo branco semi-transparente */
+[data-testid="stSidebar"] .stButton button {
+    background: rgba(255,255,255,0.18) !important;
+    color: white !important;
+    border: 1px solid rgba(255,255,255,0.28) !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    backdrop-filter: blur(10px);
+    transition: all 0.2s ease;
+}
+[data-testid="stSidebar"] .stButton button:hover {
+    background: rgba(255,255,255,0.28) !important;
+    border-color: rgba(255,255,255,0.5) !important;
+}
+
+/* Info da sidebar — bloco de versão/modelo */
+.sidebar-info { background: rgba(255,255,255,0.15); border-radius: 10px; padding: 10px 14px; margin: 6px 0; backdrop-filter: blur(10px); }
+.sidebar-info-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; opacity: 0.85; margin-bottom: 2px; }
+.sidebar-info-value { font-size: 13px; font-weight: 600; }
+
+/* ===== TABS ===== */
+.stTabs [data-baseweb="tab-list"] { gap: 4px; background: transparent; border-bottom: 1px solid var(--border); padding: 0 4px; }
+.stTabs [data-baseweb="tab"] {
+    background: transparent !important;
+    color: var(--text-secondary) !important;
+    border: none !important;
+    padding: 12px 20px !important;
+    font-weight: 600 !important;
+    font-size: 14px !important;
+    border-radius: 0 !important;
+    transition: all 0.2s ease;
+}
+.stTabs [data-baseweb="tab"]:hover { color: var(--text) !important; }
+.stTabs [aria-selected="true"] { color: var(--primary-dark) !important; border-bottom: 2px solid var(--primary) !important; }
+
+/* ===== MÉTRICAS NATIVAS (st.metric) ===== */
+[data-testid="stMetric"] {
+    background: white;
+    padding: 20px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-sm);
+    transition: all 0.2s ease;
+}
+[data-testid="stMetric"]:hover { box-shadow: var(--shadow-md); }
+[data-testid="stMetricValue"] { font-size: 30px !important; font-weight: 700 !important; color: var(--text) !important; }
+[data-testid="stMetricLabel"] {
+    color: var(--text-secondary) !important;
+    font-size: 12px !important;
+    font-weight: 600 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+[data-testid="stMetricDelta"] { font-size: 12px !important; font-weight: 500 !important; }
+
+/* ===== CARDS DE MÉTRICA CUSTOMIZADOS ===== */
+.metric-card {
+    background: white;
+    padding: 22px 20px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-sm);
+    transition: all 0.2s ease;
+    height: 100%;
+    min-height: 130px;
+}
+.metric-card:hover { box-shadow: var(--shadow-md); transform: translateY(-1px); }
+.metric-card .mc-icon {
+    width: 40px; height: 40px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 14px; font-size: 20px;
+}
+.metric-card .mc-value { font-size: 30px; font-weight: 700; color: var(--text); line-height: 1.1; margin: 0; }
+.metric-card .mc-label { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600; margin-top: 6px; }
+.metric-card .mc-sub { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+/* ===== INPUTS ===== */
+.stTextInput input, .stTextArea textarea, .stSelectbox > div > div {
+    border-radius: var(--radius-sm) !important;
+    border-color: var(--border) !important;
+    background: white !important;
+}
+.stTextInput input:focus { border-color: var(--primary) !important; box-shadow: 0 0 0 3px var(--primary-bg) !important; }
+
+/* ===== BOTÕES (área principal) ===== */
+.main .stButton > button { border-radius: var(--radius-sm) !important; font-weight: 600 !important; transition: all 0.2s ease; }
+.main .stButton > button[kind="primary"] { background: var(--primary) !important; border-color: var(--primary) !important; color: white !important; }
+.main .stButton > button[kind="primary"]:hover { background: var(--primary-dark) !important; border-color: var(--primary-dark) !important; }
+
+/* ===== MENSAGENS DA CONVERSA ===== */
+.msg-cliente {
+    background: var(--primary-bg);
+    border: 1px solid var(--primary-light);
+    padding: 10px 14px;
+    border-radius: 14px 14px 14px 4px;
+    margin: 6px 0;
+    max-width: 75%;
+    margin-right: auto;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+}
+.msg-bia {
+    background: white;
+    border: 1px solid var(--border);
+    padding: 10px 14px;
+    border-radius: 14px 14px 4px 14px;
+    margin: 6px 0 6px auto;
+    max-width: 75%;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+    box-shadow: var(--shadow-sm);
+}
+.msg-timestamp { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+
+/* ===== BADGES ===== */
+.badge-alerta { background: #fee2e2; color: #991b1b; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.badge-ok { background: #dcfce7; color: #166534; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.badge-info { background: var(--primary-bg); color: var(--primary-dark); padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+
+/* ===== DIVISORES ===== */
+hr { border-color: var(--border-light) !important; margin: 1.5rem 0 !important; }
+
+/* ===== CAPTIONS ===== */
+.stCaption, [data-testid="stCaptionContainer"] { color: var(--text-secondary) !important; font-size: 13px !important; }
+
+/* ===== DATAFRAMES / ALERTS ===== */
+[data-testid="stDataFrame"] { border-radius: var(--radius) !important; border: 1px solid var(--border) !important; overflow: hidden; }
+[data-testid="stAlert"] { border-radius: var(--radius) !important; border: 1px solid var(--border) !important; box-shadow: var(--shadow-sm); }
+
+/* ===== LISTA DE CONVERSAS ===== */
+.conv-row { padding: 14px 8px; border-bottom: 1px solid var(--border-light); transition: background 0.15s ease; border-radius: 6px; }
+.conv-row:hover { background: var(--primary-bg); }
+.conv-name { font-weight: 600; color: var(--text); }
+.conv-phone { font-size: 12px; color: var(--text-secondary); }
+.conv-meta { font-size: 12px; color: var(--text-muted); }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ============================================================================
+# 3.5) HELPERS DE UI — logo e cards
+# ============================================================================
+
+@st.cache_data
+def _get_logo_html():
+    """HTML do logo em base64. Fallback gracioso se arquivo não existir."""
+    # Tenta vários caminhos (deploy vs local)
+    candidatos = [
+        'logo_maislaser.png',
+        os.path.join(os.path.dirname(__file__), 'logo_maislaser.png'),
+        '/mount/src/dashboard-bia-maislaser/logo_maislaser.png',
+    ]
+    for caminho in candidatos:
+        try:
+            with open(caminho, 'rb') as f:
+                b64 = base64.b64encode(f.read()).decode()
+            return f'<img src="data:image/png;base64,{b64}" alt="Maislaser by Ana Hickmann" />'
+        except Exception:
+            continue
+    # Fallback
+    return '<div style="color: var(--text); font-size: 22px; font-weight: 700;">💚 maislaser</div>'
+
+
+def render_metric_card(icon, value, label, color="primary", sub=None):
+    """Card de métrica customizado com ícone colorido."""
+    color_map = {
+        'primary': '#5BC0BE',
+        'green': '#22c55e',
+        'red': '#ef4444',
+        'amber': '#f59e0b',
+        'blue': '#3b82f6',
+        'purple': '#8b5cf6',
+    }
+    cor = color_map.get(color, color)
+    sub_html = f'<div class="mc-sub">{sub}</div>' if sub else ''
+    return f"""
+    <div class="metric-card">
+        <div class="mc-icon" style="background: {cor}1A; color: {cor};">{icon}</div>
+        <div class="mc-value">{value}</div>
+        <div class="mc-label">{label}</div>
+        {sub_html}
+    </div>
+    """
 
 
 # ============================================================================
@@ -113,9 +308,10 @@ def check_password():
             header[data-testid="stHeader"] {visibility: hidden;}
             section[data-testid="stSidebar"] {display: none;}
             section.main > div.block-container { padding-top: 2rem !important; max-width: 100% !important; }
-            .bia-login-box { background: white; padding: 44px 40px; border-radius: 20px; box-shadow: 0 12px 40px rgba(34, 197, 94, 0.15); max-width: 440px; margin: 4vh auto 0 auto; text-align: center; border: 1px solid #e5e7eb; }
-            .bia-login-title { font-size: 40px; font-weight: 700; color: #166534; margin-bottom: 2px; line-height: 1.1; }
-            .bia-login-subtitle { color: #6b7280; margin-bottom: 28px; font-size: 15px; }
+            .bia-login-box { background: white; padding: 44px 40px; border-radius: 20px; box-shadow: 0 12px 40px rgba(91, 192, 190, 0.15); max-width: 440px; margin: 4vh auto 0 auto; text-align: center; border: 1px solid #e5e7eb; }
+            .bia-login-logo { margin-bottom: 20px; }
+            .bia-login-logo img { max-width: 220px; height: auto; }
+            .bia-login-subtitle { color: #6b7280; margin-bottom: 28px; font-size: 14px; font-weight: 500; letter-spacing: 1px; text-transform: uppercase; }
             .bia-login-box div[data-testid="stTextInput"] label { display: none; }
             .bia-login-box .stCheckbox { margin-top: 6px; margin-bottom: 14px; text-align: left; }
         </style>
@@ -124,8 +320,8 @@ def check_password():
     _, col_meio, _ = st.columns([1, 2, 1])
     with col_meio:
         st.markdown('<div class="bia-login-box">', unsafe_allow_html=True)
-        st.markdown('<div class="bia-login-title">💚 Bia</div>', unsafe_allow_html=True)
-        st.markdown('<div class="bia-login-subtitle">Dashboard MaisLaser</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="bia-login-logo">{_get_logo_html()}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="bia-login-subtitle">Dashboard Bia</div>', unsafe_allow_html=True)
 
         with st.form("login_form", clear_on_submit=False):
             senha = st.text_input("Senha", type="password", placeholder="Digite a senha")
@@ -188,6 +384,19 @@ def carregar_leads():
         return df
     except Exception as e:
         st.error(f"Erro ao carregar leads: {e}")
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=60)
+def carregar_clientes_base_nomes():
+    """Carrega só telefone+nome de clientes_base (leve, pra fallback de nome)."""
+    sb = get_supabase()
+    try:
+        result = sb.table("clientes_base").select("telefone, nome").limit(5000).execute()
+        df = pd.DataFrame(result.data)
+        return df
+    except Exception as e:
+        # Tabela pode não existir ainda; falha silenciosa
         return pd.DataFrame()
 
 
@@ -254,7 +463,12 @@ def carregar_agendamentos():
 # 7) HELPERS
 # ============================================================================
 
-def agrupar_conversas(df_conv, df_leads, df_agend=None):
+def agrupar_conversas(df_conv, df_leads, df_agend=None, df_clientes_base=None):
+    """
+    Agrupa conversas por telefone e resolve nome/unidade com FALLBACK:
+      - nome: leads.nome → agendamentos.nome → clientes_base.nome
+      - unidade: leads.slot_unidade → leads.unidade → agendamentos.unidade
+    """
     if df_conv.empty:
         return pd.DataFrame()
 
@@ -272,17 +486,64 @@ def agrupar_conversas(df_conv, df_leads, df_agend=None):
         lambda x: (x[:80] + '...') if isinstance(x, str) and len(x) > 80 else x
     )
 
+    # ─── Merge com leads (nome, unidade, slot_unidade, etc) ───
     if not df_leads.empty:
         cols_lead = ['telefone', 'nome', 'unidade', 'status', 'tipo_cliente', 'genero']
+        if 'slot_unidade' in df_leads.columns:
+            cols_lead.append('slot_unidade')
         if 'transferido_em' in df_leads.columns:
             cols_lead.append('transferido_em')
         grouped = grouped.merge(df_leads[cols_lead], on='telefone', how='left')
     else:
         grouped['nome'] = None
         grouped['unidade'] = None
+        grouped['slot_unidade'] = None
         grouped['status'] = None
         grouped['tipo_cliente'] = None
         grouped['genero'] = None
+
+    # ─── FALLBACK DE NOME ───
+    # 1. leads.nome (já no merge)
+    # 2. agendamentos.nome
+    if df_agend is not None and not df_agend.empty and 'nome' in df_agend.columns:
+        nomes_agend = (df_agend[['telefone', 'nome']]
+                       .dropna(subset=['nome'])
+                       .drop_duplicates('telefone', keep='first')
+                       .rename(columns={'nome': '_nome_agend'}))
+        grouped = grouped.merge(nomes_agend, on='telefone', how='left')
+        grouped['nome'] = grouped['nome'].fillna(grouped['_nome_agend'])
+        grouped = grouped.drop(columns=['_nome_agend'], errors='ignore')
+    # 3. clientes_base.nome
+    if df_clientes_base is not None and not df_clientes_base.empty and 'nome' in df_clientes_base.columns:
+        nomes_cb = (df_clientes_base[['telefone', 'nome']]
+                    .dropna(subset=['nome'])
+                    .drop_duplicates('telefone', keep='first')
+                    .rename(columns={'nome': '_nome_cb'}))
+        grouped = grouped.merge(nomes_cb, on='telefone', how='left')
+        grouped['nome'] = grouped['nome'].fillna(grouped['_nome_cb'])
+        grouped = grouped.drop(columns=['_nome_cb'], errors='ignore')
+
+    # ─── FALLBACK DE UNIDADE ───
+    # 1. slot_unidade (confirmado pelo cliente, mais confiável)
+    # 2. unidade do lead (operacional/fallback)
+    # 3. unidade do agendamento mais recente
+    if 'slot_unidade' in grouped.columns:
+        grouped['_unidade_resolvida'] = grouped['slot_unidade'].fillna(grouped['unidade'])
+    else:
+        grouped['_unidade_resolvida'] = grouped['unidade']
+
+    if df_agend is not None and not df_agend.empty and 'unidade' in df_agend.columns:
+        agend_sorted = df_agend.sort_values('criado_em', ascending=False) if 'criado_em' in df_agend.columns else df_agend
+        unid_agend = (agend_sorted[['telefone', 'unidade']]
+                      .dropna(subset=['unidade'])
+                      .drop_duplicates('telefone', keep='first')
+                      .rename(columns={'unidade': '_unid_agend'}))
+        grouped = grouped.merge(unid_agend, on='telefone', how='left')
+        grouped['_unidade_resolvida'] = grouped['_unidade_resolvida'].fillna(grouped['_unid_agend'])
+        grouped = grouped.drop(columns=['_unid_agend'], errors='ignore')
+
+    grouped['unidade'] = grouped['_unidade_resolvida']
+    grouped = grouped.drop(columns=['_unidade_resolvida'], errors='ignore')
 
     grouped['alertas'] = grouped.apply(
         lambda row: detectar_alertas(row, df_conv, df_agend, df_leads),
@@ -380,28 +641,50 @@ def detectar_tags(mensagem):
 # 8) RENDER DETALHE
 # ============================================================================
 
-def renderizar_conversa(telefone, df_conv, df_leads):
+def renderizar_conversa(telefone, df_conv, df_leads, df_agend=None, df_clientes_base=None):
     msgs = df_conv[df_conv['telefone'] == telefone].sort_values('criado_em')
 
     if msgs.empty:
         st.warning("Conversa não encontrada.")
         return
 
+    # Resolver nome com fallback (mesma lógica de agrupar_conversas)
+    nome = "Sem nome"
     lead = df_leads[df_leads['telefone'] == telefone] if not df_leads.empty else pd.DataFrame()
+    if not lead.empty and pd.notna(lead.iloc[0].get('nome')):
+        nome = lead.iloc[0]['nome']
+    elif df_agend is not None and not df_agend.empty:
+        match_a = df_agend[df_agend['telefone'] == telefone]
+        if not match_a.empty and pd.notna(match_a.iloc[0].get('nome')):
+            nome = match_a.iloc[0]['nome']
+    if nome == "Sem nome" and df_clientes_base is not None and not df_clientes_base.empty:
+        match_c = df_clientes_base[df_clientes_base['telefone'] == telefone]
+        if not match_c.empty and pd.notna(match_c.iloc[0].get('nome')):
+            nome = match_c.iloc[0]['nome']
+
+    # Resolver unidade com fallback
+    unidade = '-'
+    if not lead.empty:
+        slot_u = lead.iloc[0].get('slot_unidade') if 'slot_unidade' in lead.columns else None
+        unid_l = lead.iloc[0].get('unidade')
+        unidade = slot_u or unid_l or unidade
+    if (unidade == '-' or pd.isna(unidade)) and df_agend is not None and not df_agend.empty:
+        match_a = df_agend[df_agend['telefone'] == telefone]
+        if not match_a.empty and pd.notna(match_a.iloc[0].get('unidade')):
+            unidade = match_a.iloc[0]['unidade']
 
     col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
     with col1:
-        nome = lead.iloc[0]['nome'] if not lead.empty and pd.notna(lead.iloc[0]['nome']) else "Sem nome"
         st.markdown(f"### 💬 {nome}")
         st.caption(f"📱 +{telefone}")
     with col2:
-        if not lead.empty:
-            unidade = lead.iloc[0]['unidade'] or '-'
-            st.metric("Unidade", unidade.title())
+        st.metric("Unidade", str(unidade).title() if unidade and unidade != '-' else '—')
     with col3:
         if not lead.empty:
-            tipo = lead.iloc[0]['tipo_cliente'] or 'novo'
-            st.metric("Tipo", tipo.title())
+            tipo = lead.iloc[0].get('tipo_cliente') or 'novo'
+            st.metric("Tipo", str(tipo).title())
+        else:
+            st.metric("Tipo", "Novo")
     with col4:
         st.metric("Mensagens", len(msgs))
 
@@ -448,10 +731,11 @@ def renderizar_conversa(telefone, df_conv, df_leads):
 # 9) TELAS DAS ABAS
 # ============================================================================
 
-# ─────────── ABA 1: 💬 CONVERSAS ───────────
+# ─────────── ABA 1: 💬 CONVERSAS (modernizada) ───────────
 
-def tela_conversas(df_conv, df_leads, df_agend):
+def tela_conversas(df_conv, df_leads, df_agend, df_clientes_base=None):
     st.markdown("## 💬 Conversas")
+    st.caption("Acompanhe em tempo real o que a Bia tá conversando.")
 
     col_filt1, col_filt2, col_filt3, col_filt4 = st.columns([2, 2, 2, 3])
     with col_filt1:
@@ -478,14 +762,14 @@ def tela_conversas(df_conv, df_leads, df_agend):
     if not df_conv.empty and 'criado_em' in df_conv.columns:
         df_conv = df_conv[df_conv['criado_em'] >= dt_inicio]
 
-    df_agrupado = agrupar_conversas(df_conv, df_leads, df_agend)
+    df_agrupado = agrupar_conversas(df_conv, df_leads, df_agend, df_clientes_base)
 
     if df_agrupado.empty:
         st.info("Nenhuma conversa no período selecionado.")
         return
 
     if unidade_filt != "Todas":
-        df_agrupado = df_agrupado[df_agrupado['unidade'].str.contains(unidade_filt.lower(), case=False, na=False)]
+        df_agrupado = df_agrupado[df_agrupado['unidade'].astype(str).str.contains(unidade_filt.lower(), case=False, na=False)]
     if so_alertas:
         df_agrupado = df_agrupado[df_agrupado['alertas'].apply(lambda x: len(x) > 0)]
     if busca:
@@ -495,21 +779,32 @@ def tela_conversas(df_conv, df_leads, df_agend):
             df_agrupado['nome'].fillna('').str.contains(busca_lower, case=False, na=False)
         ]
 
-    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-    col_m1.metric("Conversas", len(df_agrupado))
-    col_m2.metric("Mensagens", int(df_agrupado['total_mensagens'].sum()) if not df_agrupado.empty else 0)
-    col_m3.metric("Com alertas", int(df_agrupado['alertas'].apply(lambda x: len(x) > 0).sum()))
+    # ───── CARDS MODERNOS PARA OS KPIs ─────
+    qtd_conversas = len(df_agrupado)
+    qtd_msgs = int(df_agrupado['total_mensagens'].sum()) if not df_agrupado.empty else 0
+    qtd_alertas = int(df_agrupado['alertas'].apply(lambda x: len(x) > 0).sum())
     tokens_total = int(df_agrupado['total_tokens'].sum()) if not df_agrupado.empty else 0
     custo = (tokens_total / 1_000_000) * CUSTO_USD_POR_MTOK
-    col_m4.metric("Custo IA", f"US$ {custo:.3f}")
 
-    st.divider()
+    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+    with col_m1:
+        st.markdown(render_metric_card("💬", qtd_conversas, "Conversas", "primary"), unsafe_allow_html=True)
+    with col_m2:
+        st.markdown(render_metric_card("📨", qtd_msgs, "Mensagens", "blue"), unsafe_allow_html=True)
+    with col_m3:
+        cor_al = "red" if qtd_alertas > 0 else "green"
+        st.markdown(render_metric_card("⚠️", qtd_alertas, "Com alertas", cor_al), unsafe_allow_html=True)
+    with col_m4:
+        st.markdown(render_metric_card("💰", f"US$ {custo:.3f}", "Custo IA", "amber",
+                                       sub=f"{tokens_total:,} tokens".replace(',', '.')), unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
 
     if df_agrupado.empty:
         st.info("Nada por aqui com esses filtros.")
         return
 
-    st.markdown("### Lista")
+    st.markdown("### Lista de conversas")
     st.caption(f"📊 {len(df_agrupado)} conversa(s) · clique em **Ver detalhes** pra abrir")
 
     h1, h2, h3, h4, h5, h6 = st.columns([2, 1.5, 1, 3, 1, 1.2])
@@ -519,22 +814,23 @@ def tela_conversas(df_conv, df_leads, df_agend):
     h4.markdown("**Última msg**")
     h5.markdown("**Quando**")
     h6.markdown("**Ação**")
-    st.divider()
+    st.markdown('<hr style="margin: 4px 0 8px 0;">', unsafe_allow_html=True)
 
     for idx, row in df_agrupado.head(50).iterrows():
         c1, c2, c3, c4, c5, c6 = st.columns([2, 1.5, 1, 3, 1, 1.2])
 
         nome_display = row['nome'] if pd.notna(row.get('nome')) else "Sem nome"
-        c1.markdown(f"**{nome_display}**")
+        c1.markdown(f"<div class='conv-name'>{nome_display}</div>", unsafe_allow_html=True)
         if row['alertas']:
             for a in row['alertas']:
                 c1.markdown(f'<span class="badge-alerta">{a}</span>', unsafe_allow_html=True)
 
-        c2.text(f"+{row['telefone']}")
-        c3.text(str(row['unidade']).title() if pd.notna(row.get('unidade')) and row.get('unidade') else '-')
+        c2.markdown(f"<div class='conv-phone'>+{row['telefone']}</div>", unsafe_allow_html=True)
+        unidade_str = str(row['unidade']).title() if pd.notna(row.get('unidade')) and row.get('unidade') else '—'
+        c3.markdown(f"<div class='conv-meta'>{unidade_str}</div>", unsafe_allow_html=True)
 
         papel_emoji = "👤" if row['ultimo_papel'] == 'user' else "💚"
-        c4.text(f"{papel_emoji} {row['ultima_mensagem_preview']}")
+        c4.markdown(f"<div class='conv-meta'>{papel_emoji} {row['ultima_mensagem_preview']}</div>", unsafe_allow_html=True)
 
         try:
             ts_local = row['ultima_atualizacao'].tz_convert(TZ_SP)
@@ -550,7 +846,7 @@ def tela_conversas(df_conv, df_leads, df_agend):
                 tempo_str = ts_local.strftime('%d/%m')
         except Exception:
             tempo_str = "-"
-        c5.text(tempo_str)
+        c5.markdown(f"<div class='conv-meta'>{tempo_str}</div>", unsafe_allow_html=True)
 
         if c6.button("Ver detalhes", key=f"btn_{row['telefone']}_{idx}"):
             st.session_state['conversa_selecionada'] = row['telefone']
@@ -560,7 +856,7 @@ def tela_conversas(df_conv, df_leads, df_agend):
         st.caption(f"Mostrando 50 de {len(df_agrupado)} conversas. Use os filtros pra refinar.")
 
 
-# ─────────── ABA 2: 🔥 TRANSFERÊNCIAS ───────────
+# ─────────── ABA 2: 🔥 TRANSFERÊNCIAS (mantida) ───────────
 
 def tela_transferencias(df_leads, df_conv):
     st.markdown("# 🔥 Transferências")
@@ -582,14 +878,6 @@ def tela_transferencias(df_leads, df_conv):
         df_transf['transferido_em_sp'] = df_transf['transferido_em']
 
     df_transf = df_transf.sort_values('transferido_em', ascending=False)
-
-    st.markdown("")
-    st.markdown("""
-        <style>
-        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] button[kind="primary"] { background-color: #22c55e !important; color: white !important; border-color: #22c55e !important; font-weight: 600 !important; }
-        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] button[kind="secondary"] { background-color: #f3f4f6 !important; color: #374151 !important; border-color: #e5e7eb !important; }
-        </style>
-    """, unsafe_allow_html=True)
 
     if 'transf_unidade_btn' not in st.session_state:
         st.session_state['transf_unidade_btn'] = "Todas"
@@ -732,7 +1020,7 @@ def tela_transferencias(df_leads, df_conv):
         st.markdown("---")
 
 
-# ─────────── ABA 3: 📅 AGENDAMENTOS ───────────
+# ─────────── ABA 3: 📅 AGENDAMENTOS (mantida) ───────────
 
 def tela_agendamentos(df_agend, df_leads, df_conv):
     st.markdown("# 📅 Agendamentos")
@@ -760,13 +1048,6 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
         return u
 
     df['unidade_norm'] = df['unidade'].apply(_norm_unidade)
-
-    st.markdown("""
-        <style>
-        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] button[kind="primary"] { background-color: #22c55e !important; color: white !important; border-color: #22c55e !important; font-weight: 600 !important; }
-        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] button[kind="secondary"] { background-color: #f3f4f6 !important; color: #374151 !important; border-color: #e5e7eb !important; }
-        </style>
-    """, unsafe_allow_html=True)
 
     if 'agend_unidade_btn' not in st.session_state:
         st.session_state['agend_unidade_btn'] = "Todas"
@@ -921,7 +1202,7 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
     st.caption("⚡ = cliente quer fazer a sessão na hora  ·  ⏭️ = agendamento futuro")
 
 
-# ─────────── ABA 4: 📈 MÉTRICAS ───────────
+# ─────────── ABA 4: 📈 MÉTRICAS (mantida, fix de funil vem na Entrega 2) ───────────
 
 def tela_metricas(df_conv, df_leads, df_agend):
     st.markdown("## 📈 Métricas")
@@ -960,6 +1241,7 @@ def tela_metricas(df_conv, df_leads, df_agend):
 
     st.divider()
     st.markdown("### 🎯 Funil de conversão")
+    st.caption("⚠️ Funil ainda usa detecção por texto — fix de cruzamento com tabela agendamentos vem na próxima entrega.")
 
     if df_conv_p.empty:
         st.info("Sem dados no período.")
@@ -987,7 +1269,7 @@ def tela_metricas(df_conv, df_leads, df_agend):
             y=["Iniciaram conversa", "Engajaram (3+ msgs)", "Transferiram", "Agendaram"],
             x=[iniciaram, engajaram, transferiram, agendaram],
             textinfo="value+percent initial",
-            marker={"color": [COR_PRIMARIA, "#16a34a", "#15803d", "#14532d"]}
+            marker={"color": [COR_PRIMARIA, COR_PRIMARIA_DARK, "#15803d", "#14532d"]}
         ))
         fig.update_layout(height=350, margin=dict(t=20, b=20, l=20, r=20))
         st.plotly_chart(fig, use_container_width=True)
@@ -1092,7 +1374,7 @@ def tela_metricas(df_conv, df_leads, df_agend):
             st.success("🎉 Nenhuma conversa problemática detectada no período!")
 
 
-# ─────────── ABA 5: ⚙️ CONFIGURAÇÕES ───────────
+# ─────────── ABA 5: ⚙️ CONFIGURAÇÕES (mantida + modelo Sonnet) ───────────
 
 def tela_configuracoes():
     st.markdown("## ⚙️ Configurações")
@@ -1163,8 +1445,8 @@ def tela_configuracoes():
     st.markdown("### 📊 Informações do sistema")
     col_i1, col_i2 = st.columns(2)
     with col_i1:
-        st.metric("Versão do cérebro", "v3.10")
-        st.metric("Modelo Claude", "claude-haiku-4-5")
+        st.metric("Versão do cérebro", VERSAO_CEREBRO)
+        st.metric("Modelo Claude", MODELO_CLAUDE_DEFAULT)
     with col_i2:
         st.metric("Webhook n8n", "✅ Online")
         st.caption("https://maislaser-robo.app.n8n.cloud/webhook/maislaser-whatsapp")
@@ -1182,9 +1464,13 @@ def main():
         st.stop()
 
     with st.sidebar:
-        st.markdown("# 💚 Bia")
-        st.caption("Dashboard MaisLaser")
-        st.divider()
+        # Logo card no topo
+        st.markdown(f"""
+        <div class="logo-card">
+            {_get_logo_html()}
+            <div class="logo-subtitle">Dashboard Bia</div>
+        </div>
+        """, unsafe_allow_html=True)
 
         if st.button("🔄 Atualizar dados", use_container_width=True):
             st.cache_data.clear()
@@ -1192,11 +1478,26 @@ def main():
 
         auto_refresh = st.checkbox("Auto-refresh a cada 30s", value=False)
 
-        st.divider()
-        st.caption("**Versão Cérebro:** v3.10")
-        st.caption("**Modelo:** claude-haiku-4-5")
+        st.markdown("<br>", unsafe_allow_html=True)
 
-        st.divider()
+        # Info box com versão/modelo
+        st.markdown(f"""
+        <div class="sidebar-info">
+            <div class="sidebar-info-label">Cérebro</div>
+            <div class="sidebar-info-value">{VERSAO_CEREBRO}</div>
+        </div>
+        <div class="sidebar-info">
+            <div class="sidebar-info-label">Modelo Claude</div>
+            <div class="sidebar-info-value">{MODELO_CLAUDE_DEFAULT}</div>
+        </div>
+        <div class="sidebar-info">
+            <div class="sidebar-info-label">Dashboard</div>
+            <div class="sidebar-info-value">{VERSAO_DASHBOARD}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
         if st.button("🚪 Sair", use_container_width=True):
             st.session_state["password_correct"] = False
             if "t" in st.query_params:
@@ -1207,12 +1508,13 @@ def main():
         df_conv = carregar_conversas(dias_atras=30)
         df_leads = carregar_leads()
         df_agend = carregar_agendamentos()
+        df_clientes_base = carregar_clientes_base_nomes()
 
     if 'conversa_selecionada' in st.session_state and st.session_state['conversa_selecionada']:
         if st.button("← Voltar pra lista"):
             del st.session_state['conversa_selecionada']
             st.rerun()
-        renderizar_conversa(st.session_state['conversa_selecionada'], df_conv, df_leads)
+        renderizar_conversa(st.session_state['conversa_selecionada'], df_conv, df_leads, df_agend, df_clientes_base)
     else:
         tab1, tab2, tab3, tab_base, tab4, tab5 = st.tabs([
             "💬 Conversas",
@@ -1224,7 +1526,7 @@ def main():
         ])
 
         with tab1:
-            tela_conversas(df_conv, df_leads, df_agend)
+            tela_conversas(df_conv, df_leads, df_agend, df_clientes_base)
 
         with tab2:
             tela_transferencias(df_leads, df_conv)
