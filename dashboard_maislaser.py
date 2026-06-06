@@ -1670,40 +1670,6 @@ def main():
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # ─── Info-boxes dinâmicas conforme robô ativo ───────────
-        if robo == 'bia':
-            st.markdown(f"""
-            <div class="sidebar-info">
-                <div class="sidebar-info-label">Cérebro</div>
-                <div class="sidebar-info-value">{VERSAO_CEREBRO}</div>
-            </div>
-            <div class="sidebar-info">
-                <div class="sidebar-info-label">Modelo Claude</div>
-                <div class="sidebar-info-value">{MODELO_CLAUDE_DEFAULT}</div>
-            </div>
-            <div class="sidebar-info">
-                <div class="sidebar-info-label">Dashboard</div>
-                <div class="sidebar-info-value">{VERSAO_DASHBOARD}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        else:  # confirmacao
-            st.markdown(f"""
-            <div class="sidebar-info">
-                <div class="sidebar-info-label">Apps Script</div>
-                <div class="sidebar-info-value">{VERSAO_APPS_SCRIPT}</div>
-            </div>
-            <div class="sidebar-info">
-                <div class="sidebar-info-label">WhatsApp</div>
-                <div class="sidebar-info-value">Confirmação</div>
-            </div>
-            <div class="sidebar-info">
-                <div class="sidebar-info-label">Dashboard</div>
-                <div class="sidebar-info-value">{VERSAO_DASHBOARD}</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        st.markdown("<br>", unsafe_allow_html=True)
-
         if st.button("🚪 Sair", use_container_width=True):
             st.session_state["password_correct"] = False
             if "t" in st.query_params:
