@@ -144,6 +144,85 @@ def _log_to_df(data):
 
 
 # ============================================================================
+# 🆕 v4 (06/06/2026) — HELPERS DE ARQUIVAMENTO MENSAL DO CONTEXTO (Apps Script v6.8)
+# ============================================================================
+# A partir do v6.8 do Code.gs, linhas finalizadas do Contexto são MOVIDAS pra
+# abas mensais "Contexto MMM/YYYY" em vez de deletadas. O endpoint contexto_mes
+# permite ler essas abas históricas.
+#
+# Estas duas funções são usadas SÓ pela aba Indicações no modo Personalizado:
+# - _meses_no_range:    lista todos os (ano, mes) cobertos por um range de datas
+# - _buscar_contexto_com_arquivados: combina contexto atual + meses arquivados
+# ============================================================================
+
+def _meses_no_range(data_de, data_ate):
+    """
+    Retorna lista de tuplas (ano, mes) que cobrem o range entre 2 datas.
+    Ex: 15/05/2026 → 20/07/2026 retorna [(2026,5), (2026,6), (2026,7)]
+    """
+    if not data_de or not data_ate or data_de > data_ate:
+        return []
+    meses = []
+    d = data_de.replace(day=1)
+    while d <= data_ate:
+        meses.append((d.year, d.month))
+        if d.month == 12:
+            d = d.replace(year=d.year + 1, month=1)
+        else:
+            d = d.replace(month=d.month + 1)
+    return meses
+
+
+def _buscar_contexto_com_arquivados(meses_extras):
+    """
+    Busca contexto atual + abas mensais arquivadas e combina num único DataFrame.
+
+    Args:
+        meses_extras: lista de tuplas (ano, mes) — meses arquivados a buscar
+                      (geralmente meses anteriores ao corrente)
+
+    Returns:
+        (df_combinado, lista_de_avisos)
+        df_combinado: DataFrame com timestamp_sp já parseado
+        avisos: lista de strings com erros não-fatais (mês sem aba etc)
+    """
+    avisos = []
+    data_atual = _apps_script_get("contexto")
+
+    # Erro fatal no contexto atual → propaga pra UI fazer mostrar_erro_e_parar
+    if isinstance(data_atual, dict) and data_atual.get("_erro"):
+        return None, [data_atual["_erro"]]
+
+    df_atual = _ctx_to_df(data_atual)
+    dfs = [df_atual] if not df_atual.empty else []
+
+    for ano, mes in meses_extras:
+        data_mes = _apps_script_get("contexto_mes", ano=ano, mes=mes)
+        if isinstance(data_mes, dict):
+            if data_mes.get("_erro"):
+                avisos.append(f"📅 {mes:02d}/{ano}: {data_mes['_erro']}")
+                continue
+            # API pode devolver aviso "aba não existe" — não é erro, só sem dados
+            if data_mes.get("aviso"):
+                # Silencioso: meses anteriores ao início do arquivamento simplesmente não têm aba
+                continue
+            df_mes = _ctx_to_df(data_mes)
+            if not df_mes.empty:
+                dfs.append(df_mes)
+
+    if not dfs:
+        return pd.DataFrame(), avisos
+
+    df_combinado = pd.concat(dfs, ignore_index=True)
+    # Dedupe por telefone (defensivo — não deveria ter duplicata,
+    # mas se houver mantém o do contexto atual que vem primeiro)
+    if "telefone" in df_combinado.columns:
+        df_combinado = df_combinado.drop_duplicates(subset=["telefone"], keep="first")
+
+    return df_combinado, avisos
+
+
+# ============================================================================
 # 🆕 v2 — FILTROS REUSÁVEIS DE PERÍODO + UNIDADE
 # ============================================================================
 # Renderiza:
@@ -565,11 +644,43 @@ def tela_confirmacao_indicacoes():
     st.markdown("## 🎁 Programa de indicações")
     st.caption("Status dos convites enviados após a confirmação da sessão.")
 
-    data = _apps_script_get("contexto")
-    if _mostrar_erro_e_parar(data, "(carregando indicações)"):
-        return
+    # 🆕 v4 — Detecta se o usuário está em modo Personalizado e identifica
+    # quais meses ANTERIORES ao atual precisam ser buscados das abas arquivadas
+    modo_periodo = st.session_state.get("indic_periodo", "Tudo")
+    meses_arquivados = []
+    if modo_periodo == "Personalizado":
+        data_de  = st.session_state.get("indic_data_de")
+        data_ate = st.session_state.get("indic_data_ate")
+        if data_de and data_ate and data_de <= data_ate:
+            agora = datetime.now(TZ_SP).date()
+            mes_corrente = (agora.year, agora.month)
+            meses_arquivados = [
+                (y, m) for (y, m) in _meses_no_range(data_de, data_ate)
+                if (y, m) != mes_corrente
+            ]
 
-    df = _ctx_to_df(data)
+    # Busca os dados: simples (só atual) ou combinada (atual + arquivados)
+    if meses_arquivados:
+        with st.spinner(f"📦 Buscando dados arquivados de {len(meses_arquivados)} mês(es)..."):
+            df, avisos_arq = _buscar_contexto_com_arquivados(meses_arquivados)
+
+        # Se o contexto atual falhou, df será None e avisos_arq terá o erro fatal
+        if df is None:
+            st.error(f"⚠️ **Robô Confirmação temporariamente indisponível** (carregando indicações)\n\n{avisos_arq[0]}")
+            if st.button("🔄 Tentar novamente", key="retry_indic_arq"):
+                st.cache_data.clear()
+                st.rerun()
+            return
+
+        # Avisos não-fatais (mês específico falhou mas o resto carregou)
+        for aviso in avisos_arq:
+            st.warning(aviso)
+    else:
+        data = _apps_script_get("contexto")
+        if _mostrar_erro_e_parar(data, "(carregando indicações)"):
+            return
+        df = _ctx_to_df(data)
+
     if df.empty or 'status' not in df.columns:
         st.info("Sem dados de indicações ainda.")
         return
