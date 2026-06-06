@@ -274,12 +274,13 @@ def tela_confirmacao_disparos_dia():
     df_f = _filtros_periodo_unidade(df, "timestamp_sp", "unidade", "dispdia", default_periodo="Hoje")
 
     st.markdown("")
-    busca = st.text_input("🔎 Buscar por nome ou telefone", key="conf_busca_disparos")
+    busca = st.text_input("🔎 Buscar por nome, telefone ou serviço", key="conf_busca_disparos")
     if busca and not df_f.empty:
         bl = busca.lower()
         df_f = df_f[
             df_f['nome'].astype(str).str.lower().str.contains(bl, na=False) |
-            df_f['telefone'].astype(str).str.contains(busca, na=False)
+            df_f['telefone'].astype(str).str.contains(busca, na=False) |
+            df_f['servico'].astype(str).str.lower().str.contains(bl, na=False)
         ]
 
     if df_f.empty:
@@ -308,25 +309,55 @@ def tela_confirmacao_disparos_dia():
     if 'timestamp_sp' in df_f.columns:
         df_f = df_f.sort_values('timestamp_sp', ascending=False)
 
-    # Cabeçalho
-    h1, h2, h3, h4, h5, h6 = st.columns([2, 1.3, 0.9, 1.5, 1.3, 1.1])
+    # Cabeçalho — Cliente, Telefone, Serviço, Unidade, Horário, Quando, Status
+    h1, h2, h3, h4, h5, h6, h7 = st.columns([1.6, 1.2, 1.6, 0.7, 1.5, 0.9, 1.2])
     h1.markdown("**Cliente**")
     h2.markdown("**Telefone**")
-    h3.markdown("**Unidade**")
-    h4.markdown("**Horário sessão**")
-    h5.markdown("**Quando**")
-    h6.markdown("**Status**")
+    h3.markdown("**Serviço**")
+    h4.markdown("**Unidade**")
+    h5.markdown("**Horário sessão**")
+    h6.markdown("**Quando**")
+    h7.markdown("**Status**")
     st.markdown('<hr style="margin: 4px 0 8px 0;">', unsafe_allow_html=True)
 
     for _, row in df_f.head(100).iterrows():
-        c1, c2, c3, c4, c5, c6 = st.columns([2, 1.3, 0.9, 1.5, 1.3, 1.1])
+        c1, c2, c3, c4, c5, c6, c7 = st.columns([1.6, 1.2, 1.6, 0.7, 1.5, 0.9, 1.2])
         nome = row.get('nome', '—') or '—'
         tel = str(row.get('telefone', '—'))
         unid = str(row.get('unidade', '—') or '—').replace('Mogi das Cruzes', 'Mogi')
-        horario = str(row.get('horario', '—') or '—')
-        if len(horario) > 24:
-            horario = horario[:24] + "…"
 
+        # Serviço (trunca em 32 chars)
+        servico = str(row.get('servico', '') or '')
+        if servico in ('', '-', 'None'):
+            servico_disp = '—'
+        elif len(servico) > 32:
+            servico_disp = servico[:32] + "…"
+        else:
+            servico_disp = servico
+
+        # Horário principal (trunca)
+        horario = str(row.get('horario', '—') or '—')
+        if len(horario) > 22:
+            horario_disp = horario[:22] + "…"
+        else:
+            horario_disp = horario
+
+        # 2ª sessão (badge inline quando existir)
+        horario2 = str(row.get('horario2', '') or '')
+        servico2 = str(row.get('servico2', '') or '')
+        if horario2 not in ('', '-', 'None'):
+            h2_disp = horario2[:22] + "…" if len(horario2) > 22 else horario2
+            s2_short = ''
+            if servico2 not in ('', '-', 'None'):
+                s2_short = f" ({servico2[:15]}{'…' if len(servico2) > 15 else ''})"
+            horario_html = (
+                f"<div style='font-size: 12px; color: #6B7280;'>{horario_disp}</div>"
+                f"<div style='font-size: 11px; color: #f59e0b; margin-top: 2px; font-weight: 600;'>+ {h2_disp}{s2_short}</div>"
+            )
+        else:
+            horario_html = f"<div style='font-size: 12px; color: #6B7280;'>{horario_disp}</div>"
+
+        # "Quando" relativo
         try:
             ts_local = row['timestamp_sp']
             delta = datetime.now(TZ_SP) - ts_local
@@ -341,15 +372,28 @@ def tela_confirmacao_disparos_dia():
         except Exception:
             quando = "—"
 
+        # Status + badge inválidas (quando >= 1)
         status = str(row.get('status', '—') or '—')
         emoji_label = STATUS_EMOJI.get(status, f"❓ {status}")
+        try:
+            tentativas = int(row.get('tentativas_invalidas', 0) or 0)
+        except (ValueError, TypeError):
+            tentativas = 0
+        if tentativas >= 1:
+            status_html = (
+                f"<div style='font-size: 13px;'>{emoji_label}</div>"
+                f"<div style='font-size: 11px; color: #ef4444; font-weight: 600; margin-top: 2px;'>⚠️ {tentativas} inv.</div>"
+            )
+        else:
+            status_html = f"<div style='font-size: 13px;'>{emoji_label}</div>"
 
         c1.markdown(f"<div style='font-weight: 600;'>{nome}</div>", unsafe_allow_html=True)
         c2.markdown(f"<div style='font-size: 12px; color: #6B7280;'>+{tel}</div>", unsafe_allow_html=True)
-        c3.write(unid)
-        c4.markdown(f"<div style='font-size: 12px; color: #6B7280;'>{horario}</div>", unsafe_allow_html=True)
-        c5.markdown(f"<div style='font-size: 12px; color: #9CA3AF;'>{quando}</div>", unsafe_allow_html=True)
-        c6.write(emoji_label)
+        c3.markdown(f"<div style='font-size: 12px; color: #4B5563;'>{servico_disp}</div>", unsafe_allow_html=True)
+        c4.write(unid)
+        c5.markdown(horario_html, unsafe_allow_html=True)
+        c6.markdown(f"<div style='font-size: 12px; color: #9CA3AF;'>{quando}</div>", unsafe_allow_html=True)
+        c7.markdown(status_html, unsafe_allow_html=True)
 
     if len(df_f) > 100:
         st.caption(f"Mostrando 100 de {len(df_f)} disparos. Use filtros pra refinar.")
