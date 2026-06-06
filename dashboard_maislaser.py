@@ -76,9 +76,14 @@ st.markdown("""
     --radius-lg: 16px;
 }
 
-/* App body */
+/* App body — IMPORTANTE: NÃO aplicar Inter em '*' porque atropela Material Symbols dos ícones */
 .stApp { background-color: var(--bg-page); font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
-.stApp, .stApp p, .stApp span, .stApp div, .stApp label { font-family: 'Inter', sans-serif; }
+/* Aplica Inter só em elementos de texto, NUNCA em ícones */
+.stApp p, .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6,
+.stApp label, .stApp button, .stApp input, .stApp textarea, .stApp select { font-family: 'Inter', sans-serif; }
+/* Preserva fonte dos ícones do Streamlit (Material Symbols) */
+[data-testid="stIconMaterial"], .material-icons, .material-symbols-outlined,
+[class*="material-symbols"], [class*="MaterialSymbols"] { font-family: 'Material Symbols Outlined', 'Material Symbols Rounded', 'Material Icons' !important; }
 
 /* Headers */
 h1, h2, h3, h4 { color: var(--text); font-weight: 700 !important; letter-spacing: -0.02em; }
@@ -89,8 +94,19 @@ h3 { font-size: 18px !important; }
 /* ===== SIDEBAR ===== */
 [data-testid="stSidebar"] { background: linear-gradient(180deg, #5BC0BE 0%, #3D9991 100%); border-right: none; }
 [data-testid="stSidebar"] > div:first-child { padding-top: 1.5rem; }
-[data-testid="stSidebar"] * { color: white; }
+/* Texto branco SÓ em elementos de texto, NÃO em ícones (Material Symbols) */
+[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3,
+[data-testid="stSidebar"] p, [data-testid="stSidebar"] label, [data-testid="stSidebar"] span,
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] { color: white !important; }
 [data-testid="stSidebar"] input, [data-testid="stSidebar"] textarea { color: var(--text) !important; background: rgba(255,255,255,0.95) !important; }
+/* Ícones (botão colapsar sidebar) ficam brancos mas mantêm font de ícone */
+[data-testid="stSidebar"] [data-testid="stIconMaterial"],
+[data-testid="stSidebar"] .material-icons,
+[data-testid="stSidebar"] .material-symbols-outlined { color: white !important; }
+/* Botão de colapsar a sidebar (canto superior direito da sidebar) — ícone branco */
+[data-testid="stSidebarCollapseButton"] svg,
+[data-testid="stSidebarCollapseButton"] * { color: white !important; fill: white !important; }
 
 /* Logo card no topo da sidebar */
 .logo-card { background: white; border-radius: 14px; padding: 20px 16px 16px 16px; margin: 0 -4px 20px -4px; box-shadow: 0 6px 20px rgba(0,0,0,0.18); text-align: center; }
@@ -130,7 +146,10 @@ h3 { font-size: 18px !important; }
     transition: all 0.2s ease;
 }
 .stTabs [data-baseweb="tab"]:hover { color: var(--text) !important; }
-.stTabs [aria-selected="true"] { color: var(--primary-dark) !important; border-bottom: 2px solid var(--primary) !important; }
+.stTabs [aria-selected="true"] { color: var(--primary-dark) !important; }
+/* Sublinhado animado da tab ativa (Streamlit usa um elemento separado) */
+.stTabs [data-baseweb="tab-highlight"],
+.stTabs [data-baseweb="tab-border"] { background-color: var(--primary) !important; }
 
 /* ===== MÉTRICAS NATIVAS (st.metric) ===== */
 [data-testid="stMetric"] {
@@ -181,10 +200,22 @@ h3 { font-size: 18px !important; }
 }
 .stTextInput input:focus { border-color: var(--primary) !important; box-shadow: 0 0 0 3px var(--primary-bg) !important; }
 
-/* ===== BOTÕES (área principal) ===== */
+/* ===== BOTÕES — área principal ===== */
 .main .stButton > button { border-radius: var(--radius-sm) !important; font-weight: 600 !important; transition: all 0.2s ease; }
-.main .stButton > button[kind="primary"] { background: var(--primary) !important; border-color: var(--primary) !important; color: white !important; }
-.main .stButton > button[kind="primary"]:hover { background: var(--primary-dark) !important; border-color: var(--primary-dark) !important; }
+
+/* Botões "primary" GLOBAIS (Todas/Mogi/Suzano nas abas, Salvar no Supabase, etc) — força teal */
+button[kind="primary"],
+button[data-baseweb="button"][kind="primary"] {
+    background: var(--primary) !important;
+    border-color: var(--primary) !important;
+    color: white !important;
+}
+button[kind="primary"]:hover,
+button[data-baseweb="button"][kind="primary"]:hover {
+    background: var(--primary-dark) !important;
+    border-color: var(--primary-dark) !important;
+}
+/* Botão "Sair" da sidebar e similares — manter glassmorphism que já existe na regra de sidebar */
 
 /* ===== MENSAGENS DA CONVERSA ===== */
 .msg-cliente {
