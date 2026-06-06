@@ -38,9 +38,16 @@ TZ_SP = timezone(timedelta(hours=-3))
 COR_PRIMARIA = "#5BC0BE"      # teal do logo Maislaser
 COR_PRIMARIA_DARK = "#3D9991"
 CUSTO_USD_POR_MTOK = 3.0
-VERSAO_DASHBOARD = "v4.0"
+VERSAO_DASHBOARD = "v5.0"
 VERSAO_CEREBRO = "v3.10"
+VERSAO_APPS_SCRIPT = "v6.5"
 MODELO_CLAUDE_DEFAULT = "claude-sonnet-4-6"
+
+# Robôs disponíveis no dashboard (centralizando tudo num só lugar)
+ROBOS = {
+    'bia':         '🤖 Robô Bia IA',
+    'confirmacao': '📅 Robô Confirmação Agenda',
+}
 
 
 # ============================================================================
@@ -314,6 +321,19 @@ def render_metric_card(icon, value, label, color="primary", sub=None):
         {sub_html}
     </div>
     """
+
+
+def placeholder_aba(titulo, descricao, etapa_prevista="Próxima entrega"):
+    """Renderiza uma aba em construção (estrutura visual antes da implementação)."""
+    st.markdown(f"## {titulo}")
+    st.markdown(f"""
+    <div style="background: white; padding: 40px; border-radius: 12px; border: 2px dashed #E5E7EB; text-align: center; margin: 20px 0;">
+        <div style="font-size: 48px; margin-bottom: 16px;">🚧</div>
+        <div style="font-size: 18px; font-weight: 600; color: #1A2332; margin-bottom: 8px;">Aba em construção</div>
+        <div style="font-size: 14px; color: #6B7280; max-width: 500px; margin: 0 auto 16px auto;">{descricao}</div>
+        <div style="display: inline-block; background: var(--primary-bg); color: var(--primary-dark); padding: 6px 14px; border-radius: 999px; font-size: 12px; font-weight: 600;">{etapa_prevista}</div>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 # ============================================================================
@@ -1608,12 +1628,18 @@ def main():
     if not check_password():
         st.stop()
 
+    # Inicializa o robô ativo (default = Bia)
+    if 'robo_ativo' not in st.session_state:
+        st.session_state['robo_ativo'] = 'bia'
+
+    robo = st.session_state['robo_ativo']
+
     with st.sidebar:
         # Logo card no topo
         st.markdown(f"""
         <div class="logo-card">
             {_get_logo_html()}
-            <div class="logo-subtitle">Dashboard Bia</div>
+            <div class="logo-subtitle">Dashboard</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1625,21 +1651,56 @@ def main():
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Info box com versão/modelo
-        st.markdown(f"""
-        <div class="sidebar-info">
-            <div class="sidebar-info-label">Cérebro</div>
-            <div class="sidebar-info-value">{VERSAO_CEREBRO}</div>
-        </div>
-        <div class="sidebar-info">
-            <div class="sidebar-info-label">Modelo Claude</div>
-            <div class="sidebar-info-value">{MODELO_CLAUDE_DEFAULT}</div>
-        </div>
-        <div class="sidebar-info">
-            <div class="sidebar-info-label">Dashboard</div>
-            <div class="sidebar-info-value">{VERSAO_DASHBOARD}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        # ─── Seletor de robô ────────────────────────────────────
+        st.markdown(
+            '<div class="sidebar-info-label" style="font-size: 11px; '
+            'margin-bottom: 8px; letter-spacing: 0.06em;">ROBÔ ATIVO</div>',
+            unsafe_allow_html=True
+        )
+        for key, label in ROBOS.items():
+            is_active = (robo == key)
+            btn_type = "primary" if is_active else "secondary"
+            if st.button(label, key=f"sel_robo_{key}", type=btn_type, use_container_width=True):
+                if robo != key:
+                    st.session_state['robo_ativo'] = key
+                    # Limpa estado que é só da Bia
+                    if 'conversa_selecionada' in st.session_state:
+                        del st.session_state['conversa_selecionada']
+                    st.rerun()
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ─── Info-boxes dinâmicas conforme robô ativo ───────────
+        if robo == 'bia':
+            st.markdown(f"""
+            <div class="sidebar-info">
+                <div class="sidebar-info-label">Cérebro</div>
+                <div class="sidebar-info-value">{VERSAO_CEREBRO}</div>
+            </div>
+            <div class="sidebar-info">
+                <div class="sidebar-info-label">Modelo Claude</div>
+                <div class="sidebar-info-value">{MODELO_CLAUDE_DEFAULT}</div>
+            </div>
+            <div class="sidebar-info">
+                <div class="sidebar-info-label">Dashboard</div>
+                <div class="sidebar-info-value">{VERSAO_DASHBOARD}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:  # confirmacao
+            st.markdown(f"""
+            <div class="sidebar-info">
+                <div class="sidebar-info-label">Apps Script</div>
+                <div class="sidebar-info-value">{VERSAO_APPS_SCRIPT}</div>
+            </div>
+            <div class="sidebar-info">
+                <div class="sidebar-info-label">WhatsApp</div>
+                <div class="sidebar-info-value">Confirmação</div>
+            </div>
+            <div class="sidebar-info">
+                <div class="sidebar-info-label">Dashboard</div>
+                <div class="sidebar-info-value">{VERSAO_DASHBOARD}</div>
+            </div>
+            """, unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1649,44 +1710,103 @@ def main():
                 del st.query_params["t"]
             st.rerun()
 
-    with st.spinner("Carregando dados..."):
-        df_conv = carregar_conversas(dias_atras=30)
-        df_leads = carregar_leads()
-        df_agend = carregar_agendamentos()
-        df_clientes_base = carregar_clientes_base_nomes()
+    # ════════════════════════════════════════════════════════════
+    # CONTEÚDO PRINCIPAL — bifurca conforme robô ativo
+    # ════════════════════════════════════════════════════════════
 
-    if 'conversa_selecionada' in st.session_state and st.session_state['conversa_selecionada']:
-        if st.button("← Voltar pra lista"):
-            del st.session_state['conversa_selecionada']
-            st.rerun()
-        renderizar_conversa(st.session_state['conversa_selecionada'], df_conv, df_leads, df_agend, df_clientes_base)
-    else:
-        tab1, tab2, tab3, tab_base, tab4, tab5 = st.tabs([
-            "💬 Conversas",
-            "🔥 Transferências",
-            "📅 Agendamentos",
-            "📊 Base de Clientes",
-            "📈 Métricas",
-            "⚙️ Configurações",
+    if robo == 'bia':
+        with st.spinner("Carregando dados..."):
+            df_conv = carregar_conversas(dias_atras=30)
+            df_leads = carregar_leads()
+            df_agend = carregar_agendamentos()
+            df_clientes_base = carregar_clientes_base_nomes()
+
+        if 'conversa_selecionada' in st.session_state and st.session_state['conversa_selecionada']:
+            if st.button("← Voltar pra lista"):
+                del st.session_state['conversa_selecionada']
+                st.rerun()
+            renderizar_conversa(st.session_state['conversa_selecionada'], df_conv, df_leads, df_agend, df_clientes_base)
+        else:
+            tab1, tab2, tab3, tab_base, tab4, tab5 = st.tabs([
+                "💬 Conversas",
+                "🔥 Transferências",
+                "📅 Agendamentos",
+                "📊 Base de Clientes",
+                "📈 Métricas",
+                "⚙️ Configurações",
+            ])
+
+            with tab1:
+                tela_conversas(df_conv, df_leads, df_agend, df_clientes_base)
+
+            with tab2:
+                tela_transferencias(df_leads, df_conv)
+
+            with tab3:
+                tela_agendamentos(df_agend, df_leads, df_conv)
+
+            with tab_base:
+                render_aba_base_clientes(get_supabase())
+
+            with tab4:
+                tela_metricas(df_conv, df_leads, df_agend)
+
+            with tab5:
+                tela_configuracoes()
+
+    elif robo == 'confirmacao':
+        # ─── Tabs do Robô Confirmação Agenda ────────────────────
+        # Fase A: estrutura visual + placeholders. Sem mexer no
+        # Apps Script que tá rodando hoje. Disparar fica primeira.
+        tab_disp, tab_dia, tab_hist, tab_indic, tab_metr = st.tabs([
+            "🚀 Disparar agenda",
+            "📅 Disparos do dia",
+            "💬 Histórico de respostas",
+            "🎁 Programa de indicações",
+            "📊 Métricas confirmação",
         ])
 
-        with tab1:
-            tela_conversas(df_conv, df_leads, df_agend, df_clientes_base)
+        with tab_disp:
+            placeholder_aba(
+                "🚀 Disparar agenda",
+                "Aqui vai ficar o disparador atual embarcado: upload da planilha XLSX do UNO, "
+                "seleção de unidade e disparo dos templates de confirmação. Hoje fica num app "
+                "separado (robo-maislaser.streamlit.app).",
+                "Fase D — última a ser implementada"
+            )
 
-        with tab2:
-            tela_transferencias(df_leads, df_conv)
+        with tab_dia:
+            placeholder_aba(
+                "📅 Disparos do dia",
+                "Lista todos clientes que receberam template hoje com seu status atual "
+                "(confirmado, aguardando, reagendado, cancelado, recepção, etc). Vai puxar "
+                "da aba Contexto da planilha 'Maislaser Contexto' via Apps Script.",
+                "Fase C"
+            )
 
-        with tab3:
-            tela_agendamentos(df_agend, df_leads, df_conv)
+        with tab_hist:
+            placeholder_aba(
+                "💬 Histórico de respostas",
+                "Log completo de interações filtrado, com busca por nome ou telefone. "
+                "Vai puxar da aba 'Log de Interações' via Apps Script.",
+                "Fase C"
+            )
 
-        with tab_base:
-            render_aba_base_clientes(get_supabase())
+        with tab_indic:
+            placeholder_aba(
+                "🎁 Programa de indicações",
+                "Status do programa de indicações (pendente, aceita, recusada, sem resposta) "
+                "e taxa de conversão. Mesma fonte do Disparos do dia.",
+                "Fase C"
+            )
 
-        with tab4:
-            tela_metricas(df_conv, df_leads, df_agend)
-
-        with tab5:
-            tela_configuracoes()
+        with tab_metr:
+            placeholder_aba(
+                "📊 Métricas confirmação",
+                "Taxa de confirmação, % cancelado por não responder, melhor horário pra "
+                "disparar, % de indicação aceita.",
+                "Fase C"
+            )
 
     if auto_refresh:
         time.sleep(30)
