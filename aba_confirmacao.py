@@ -419,19 +419,27 @@ def tela_confirmacao_disparos_dia():
         return
 
     # ─── KPIs ───
+    # 🆕 v5 (06/06/2026) — Confirmados conta todos que passaram pelo "confirmado"
+    # em algum momento, incluindo os que evoluíram pra indicacao_*.
+    # Justificativa: o trigger só envia convite de indicação pra quem JÁ confirmou,
+    # então todos os indicacao_* são confirmados que ainda não foram contados.
+    STATUS_CONFIRMOU = ['confirmado', 'indicacao_pendente', 'indicacao_aceita', 'indicacao_recusada', 'indicacao_sem_resposta']
+
     st_lower = df_f['status'].astype(str).str.lower() if 'status' in df_f.columns else pd.Series([], dtype=str)
     qtd_total       = len(df_f)
-    qtd_confirmados = int((st_lower == 'confirmado').sum())
+    qtd_confirmados = int(st_lower.isin(STATUS_CONFIRMOU).sum())
+    qtd_reagendados = int((st_lower == 'reagendado').sum())
     qtd_aguardando  = int((st_lower == 'aguardando').sum())
     qtd_cancelados  = int(st_lower.str.contains('cancelado', na=False).sum())
     qtd_indic       = int(st_lower.str.startswith('indicacao_').sum())
 
-    col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
-    col_m1.markdown(_render_metric_card_local("👥", qtd_total, "Total", "primary"), unsafe_allow_html=True)
-    col_m2.markdown(_render_metric_card_local("🟢", qtd_confirmados, "Confirmados", "green"), unsafe_allow_html=True)
-    col_m3.markdown(_render_metric_card_local("🟡", qtd_aguardando, "Aguardando", "amber"), unsafe_allow_html=True)
-    col_m4.markdown(_render_metric_card_local("🔴", qtd_cancelados, "Cancelados", "red"), unsafe_allow_html=True)
-    col_m5.markdown(_render_metric_card_local("🎁", qtd_indic, "Indicações", "purple"), unsafe_allow_html=True)
+    col_m1, col_m2, col_m3, col_m4, col_m5, col_m6 = st.columns(6)
+    col_m1.markdown(_render_metric_card_local("👥", qtd_total,       "Total",       "primary"), unsafe_allow_html=True)
+    col_m2.markdown(_render_metric_card_local("🟢", qtd_confirmados, "Confirmados", "green"),   unsafe_allow_html=True)
+    col_m3.markdown(_render_metric_card_local("🔄", qtd_reagendados, "Reagendados", "blue"),    unsafe_allow_html=True)
+    col_m4.markdown(_render_metric_card_local("🟡", qtd_aguardando,  "Aguardando",  "amber"),   unsafe_allow_html=True)
+    col_m5.markdown(_render_metric_card_local("🔴", qtd_cancelados,  "Cancelados",  "red"),     unsafe_allow_html=True)
+    col_m6.markdown(_render_metric_card_local("🎁", qtd_indic,       "Indicações",  "purple"),  unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(f"### Lista de disparos · {len(df_f)} cliente(s)")
@@ -808,7 +816,22 @@ def tela_confirmacao_metricas():
     # Calcula stats locais a partir do df filtrado
     st_lower = df_f['status'].astype(str).str.lower()
     total = len(df_f)
-    confirmados  = int((st_lower == 'confirmado').sum())
+
+    # 🆕 v5 (06/06/2026) — Distinção entre 2 conceitos de "confirmados":
+    #
+    # confirmados_literal: cliente está LITERALMENTE em status="confirmado" agora
+    #   → usado no gráfico granular "Por status" (visão operacional do estado atual)
+    #
+    # confirmados (total): cliente PASSOU pelo "confirmado" em algum momento
+    #   → inclui os que evoluíram pra indicacao_pendente/aceita/recusada/sem_resposta
+    #   → usado na Taxa de confirmação (métrica real de performance do robô)
+    #
+    # Antes da v5, ambos usavam o mesmo cálculo (confirmados_literal), o que
+    # subestimava drasticamente a Taxa de confirmação (ex: 31% em vez de 74%).
+    confirmados_literal = int((st_lower == 'confirmado').sum())
+    STATUS_CONFIRMOU = ['confirmado', 'indicacao_pendente', 'indicacao_aceita', 'indicacao_recusada', 'indicacao_sem_resposta']
+    confirmados  = int(st_lower.isin(STATUS_CONFIRMOU).sum())
+
     reagendados  = int((st_lower == 'reagendado').sum())
     cancelados   = int(st_lower.str.contains('cancelado', na=False).sum())
     aguardando   = int((st_lower == 'aguardando').sum())
@@ -819,6 +842,7 @@ def tela_confirmacao_metricas():
     indic_sresp  = int((st_lower == 'indicacao_sem_resposta').sum())
 
     # Taxa de confirmação considera só os "decididos" (confirmados + cancelados + reagendados)
+    # Usa confirmados TOTAL (inclui indicacao_*) — é a métrica real de performance
     finalizados = confirmados + cancelados + reagendados
     taxa_conf = (confirmados / finalizados * 100) if finalizados else 0
 
@@ -839,8 +863,9 @@ def tela_confirmacao_metricas():
 
     with col_g1:
         st.markdown("### Por status")
+        # 🆕 v5: usa confirmados_literal pra evitar duplicação (cada indicacao_* aparece separado)
         por_status_dict = {
-            "🟢 Confirmado": confirmados,
+            "🟢 Confirmado": confirmados_literal,
             "🔄 Reagendado": reagendados,
             "🔴 Cancelado": cancelados,
             "🟡 Aguardando": aguardando,
