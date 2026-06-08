@@ -28,7 +28,7 @@ from aba_confirmacao import (
     tela_confirmacao_metricas,
 )
 from aba_disparador import render_aba_disparador
-from aba_zapi import render_aba_zapi_aguardando
+from aba_zapi import render_aba_zapi_aguardando, render_aba_zapi_ranking
 
 
 # ============================================================================
@@ -1788,12 +1788,7 @@ def main():
             )
 
         with tab_rank:
-            placeholder_aba(
-                "🏆 Ranking funcionárias",
-                "Leaderboard das 17 funcionárias por clientes captados e indicações "
-                "válidas. Hoje recepção Mogi lidera com 326. Próxima entrega da Fase Z.",
-                "Fase Z.2 — em breve"
-            )
+            render_aba_zapi_ranking()
 
         with tab_metr:
             placeholder_aba(
