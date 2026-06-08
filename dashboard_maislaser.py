@@ -19,7 +19,6 @@ import hashlib
 import base64
 import os
 
-# DEPOIS:
 # Módulos das abas novas (Fase 7+)
 from aba_base_clientes import render_aba_base_clientes
 from aba_confirmacao import (
@@ -1740,15 +1739,8 @@ def main():
             "📊 Métricas confirmação",
         ])
 
-      # DEPOIS:
         with tab_disp:
             render_aba_disparador()
-                "🚀 Disparar agenda",
-                "Aqui vai ficar o disparador atual embarcado: upload da planilha XLSX do UNO, "
-                "seleção de unidade e disparo dos templates de confirmação. Hoje fica num app "
-                "separado (robo-maislaser.streamlit.app).",
-                "Fase D — última a ser implementada"
-            )
 
         with tab_dia:
             tela_confirmacao_disparos_dia()
