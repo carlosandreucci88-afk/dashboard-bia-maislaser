@@ -623,9 +623,9 @@ def tela_confirmacao_disparos_dia():
 
 def tela_confirmacao_historico():
     st.markdown("## 💬 Histórico de respostas")
-    st.caption("Log completo de interações entre o robô e os clientes (últimas 500 entradas).")
+    st.caption("Log completo de interações entre o robô e os clientes (últimas 2000 entradas do mês corrente).")
 
-    data = _apps_script_get("log", limit=500)
+    data = _apps_script_get("log", limit=2000)
     if _mostrar_erro_e_parar(data, "(carregando log)"):
         return
 
