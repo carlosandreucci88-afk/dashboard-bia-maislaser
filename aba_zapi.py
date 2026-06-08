@@ -376,9 +376,216 @@ def tela_zapi_aguardando_validacao():
 
 
 # ============================================================================
-# ENTRY POINT — chamado pelo dashboard_maislaser.py dentro da tab
+# TELA: 🏆 RANKING FUNCIONÁRIAS
+# ============================================================================
+# Lê do endpoint funcionarias_real (Apps Script v9.3) que calcula em tempo real
+# a partir de CLIENTES + CLIENTES_ARQUIVO + INDICACOES + INDICACOES_ARQUIVO,
+# normalizando lowercase (case-insensitive) e filtrando 'teste'.
+#
+# Critério "trouxe cliente" = coluna DATA BATEU META preenchida.
+# A aba FUNCIONARIAS NÃO é usada aqui (cálculo dela puxa errado por homônimas
+# e ignora arquivados).
+# ============================================================================
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _zapi_get_ranking():
+    """
+    Chama o endpoint funcionarias_real do Apps Script.
+    Cache 5min porque o endpoint lê ~4500 linhas e é pesado.
+    Implementação independente do _zapi_get (que tem ttl=30s).
+    """
+    try:
+        url = st.secrets["APPS_SCRIPT_URL_ZAPI"]
+        token = st.secrets["APPS_SCRIPT_TOKEN_ZAPI"]
+    except Exception:
+        return {"_erro": "Configuração ausente: APPS_SCRIPT_URL_ZAPI / APPS_SCRIPT_TOKEN_ZAPI"}
+
+    try:
+        resp = requests.get(
+            url,
+            params={"endpoint": "funcionarias_real", "token": token},
+            timeout=30,  # endpoint pesado, dou 30s
+            allow_redirects=True,
+        )
+        if resp.status_code != 200:
+            return {"_erro": f"HTTP {resp.status_code} ao calcular ranking"}
+        data = resp.json()
+        if isinstance(data, dict) and data.get("erro"):
+            return {"_erro": f"Z-API: {data['erro']}"}
+        return data
+    except requests.exceptions.Timeout:
+        return {"_erro": "Apps Script demorou demais (>30s) — provavelmente carga alta. Tente novamente."}
+    except requests.exceptions.RequestException as e:
+        return {"_erro": f"Erro de rede: {e}"}
+    except ValueError:
+        return {"_erro": "Resposta do Apps Script não é JSON válido."}
+
+
+def tela_zapi_ranking():
+    st.markdown("## 🏆 Ranking de funcionárias")
+    st.caption(
+        "Calculado em tempo real a partir de CLIENTES + arquivo + INDICACOES + arquivo. "
+        "Conta como **cliente** quem enviou os 20 contatos (bateu a meta). "
+        "Conta como **indicação** cada contato com status VALIDO."
+    )
+
+    # Botão pra forçar refresh (cache 5min é agressivo)
+    col_btn, _ = st.columns([1, 5])
+    with col_btn:
+        if st.button("🔄 Atualizar", key="rank_refresh"):
+            _zapi_get_ranking.clear()
+            st.rerun()
+
+    with st.spinner("Calculando ranking..."):
+        data = _zapi_get_ranking()
+
+    if _mostrar_erro_e_parar(data, "(carregando ranking)"):
+        return
+
+    ranking = data.get("ranking", [])
+    totais = data.get("totais", {})
+    if not ranking:
+        st.warning("Nenhum dado no ranking ainda.")
+        return
+
+    df = pd.DataFrame(ranking)
+
+    # ─── Cards de resumo ───
+    fontes = totais.get("fontes", {})
+    col_a, col_b, col_c, col_d = st.columns(4)
+    col_a.metric("👥 Funcionárias distintas", totais.get("funcionarias_distintas", 0))
+    col_b.metric("✅ Clientes que bateram meta", totais.get("clientes_bateu_meta", 0))
+    col_c.metric("📨 Indicações válidas", f"{totais.get('indicacoes_validas', 0):,}".replace(",", "."))
+    col_d.metric(
+        "📚 Fonte de dados",
+        f"{fontes.get('clientes_ativos', 0) + fontes.get('clientes_arquivo', 0)} clientes",
+        help=(
+            f"CLIENTES: {fontes.get('clientes_ativos', 0)} ativos + "
+            f"{fontes.get('clientes_arquivo', 0)} arquivados.\n"
+            f"INDICACOES: {fontes.get('indicacoes_ativas', 0)} ativas + "
+            f"{fontes.get('indicacoes_arquivo', 0)} arquivadas."
+        ),
+    )
+
+    st.markdown("---")
+
+    # ─── Filtro por unidade ───
+    unid_filtro = st.radio(
+        "Filtrar por unidade:",
+        ["Todas", "Mogi", "Suzano"],
+        horizontal=True,
+        key="rank_unid_filtro",
+    )
+    if unid_filtro != "Todas":
+        df = df[df["unidade"].str.lower() == unid_filtro.lower()]
+
+    if df.empty:
+        st.info(f"Nenhuma funcionária em {unid_filtro}.")
+        return
+
+    df = df.sort_values("indicacoes_validas", ascending=False).reset_index(drop=True)
+
+    # ─── Top 5 com cards medalha ───
+    st.markdown("### 🥇 Top 5")
+    top5 = df.head(5)
+    medalhas = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+    cols = st.columns(min(5, len(top5)))
+    for i, (_, r) in enumerate(top5.iterrows()):
+        with cols[i]:
+            st.markdown(
+                f"""
+                <div style="padding: 14px; border: 1px solid #e5e7eb; border-radius: 10px;
+                            text-align: center; background: #fafafa; min-height: 150px;">
+                  <div style="font-size: 28px;">{medalhas[i]}</div>
+                  <div style="font-weight: 700; font-size: 14px; margin-top: 4px;">
+                    {r['funcionaria']}
+                  </div>
+                  <div style="color: #6b7280; font-size: 12px;">{r['unidade']}</div>
+                  <div style="margin-top: 8px; font-size: 22px; font-weight: 700; color: #059669;">
+                    {int(r['indicacoes_validas']):,}
+                  </div>
+                  <div style="color: #6b7280; font-size: 11px;">indicações</div>
+                  <div style="margin-top: 4px; font-size: 12px; color: #374151;">
+                    {int(r['clientes_bateu_meta'])} cliente(s)
+                  </div>
+                </div>
+                """.replace(",", "."),
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("---")
+
+    # ─── Tabela completa ───
+    st.markdown("### 📋 Ranking completo")
+    df_tabela = df.copy()
+    df_tabela.insert(0, "#", range(1, len(df_tabela) + 1))
+    df_tabela = df_tabela.rename(columns={
+        "funcionaria": "Funcionária",
+        "unidade": "Unidade",
+        "clientes_bateu_meta": "Clientes (bateu meta)",
+        "indicacoes_validas": "Indicações válidas",
+        "indic_por_cliente": "Indic / cliente",
+    })
+    st.dataframe(
+        df_tabela,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "#": st.column_config.NumberColumn(width="small"),
+            "Indicações válidas": st.column_config.NumberColumn(format="%d"),
+            "Indic / cliente": st.column_config.NumberColumn(format="%.1f"),
+        },
+    )
+
+    st.markdown("---")
+
+    # ─── Gráfico de barras horizontal ───
+    st.markdown("### 📊 Indicações válidas por funcionária")
+    try:
+        import plotly.express as px
+        df_plot = df.copy()
+        df_plot["label"] = df_plot["funcionaria"] + " (" + df_plot["unidade"] + ")"
+        # ordenar do menor pro maior pra ficar bonito horizontal (maior em cima)
+        df_plot = df_plot.sort_values("indicacoes_validas", ascending=True)
+        fig = px.bar(
+            df_plot,
+            x="indicacoes_validas",
+            y="label",
+            orientation="h",
+            color="unidade",
+            color_discrete_map={"Mogi": "#6366f1", "Suzano": "#f59e0b"},
+            text="indicacoes_validas",
+            labels={"indicacoes_validas": "Indicações válidas", "label": "", "unidade": "Unidade"},
+        )
+        fig.update_traces(textposition="outside", textfont_size=11)
+        fig.update_layout(
+            height=max(300, 30 * len(df_plot) + 100),
+            margin=dict(l=10, r=10, t=10, b=10),
+            xaxis=dict(showgrid=True, gridcolor="#e5e7eb"),
+            yaxis=dict(showgrid=False),
+            plot_bgcolor="white",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.info(f"Gráfico indisponível: {e}")
+
+    # Footer com info do dado
+    st.caption(
+        f"📅 Calculado em {data.get('gerado_em', '—')} · "
+        f"Cache 5min (clica em 🔄 Atualizar pra forçar refresh)"
+    )
+
+
+# ============================================================================
+# ENTRY POINTS — chamados pelo dashboard_maislaser.py dentro da tab
 # ============================================================================
 
 def render_aba_zapi_aguardando():
     """Renderiza a tela principal do robô Z-API: aguardando validação."""
     tela_zapi_aguardando_validacao()
+
+
+def render_aba_zapi_ranking():
+    """Renderiza a tela de ranking de funcionárias."""
+    tela_zapi_ranking()
