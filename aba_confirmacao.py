@@ -23,6 +23,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import requests
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 
 TZ_SP = timezone(timedelta(hours=-3))
 
@@ -103,6 +104,76 @@ def _render_metric_card_local(icon, value, label, color="primary", sub=None):
         {sub_html}
     </div>
     """
+
+
+# ============================================================================
+# 🆕 v6 — EXPORT XLSX (Fase E item 1)
+# ============================================================================
+# Gera botão de download XLSX a partir do df FILTRADO COMPLETO.
+# Importante: o df_f das telas é truncado em .head(N) só pro DISPLAY visual.
+# O export precisa receber o df_f ANTES dessa truncagem pra levar tudo.
+# ============================================================================
+
+def _botao_export_xlsx(df, nome_tela, key_prefix):
+    """
+    Renderiza um botão de download XLSX com o df filtrado completo.
+
+    Args:
+        df: DataFrame filtrado COMPLETO (sem .head() de display)
+        nome_tela: identificador curto pro nome do arquivo (ex: 'disparos_dia')
+        key_prefix: mesmo prefixo usado em _filtros_periodo_unidade
+                    (pra ler do session_state qual período/unidade tá ativo
+                    e compor o nome do arquivo)
+    """
+    if df is None or df.empty:
+        # Mesmo vazio, mostra o botão desabilitado pra UX consistente
+        st.download_button(
+            label="📥 Exportar XLSX (sem dados)",
+            data=b"",
+            file_name="vazio.xlsx",
+            disabled=True,
+            key=f"export_{key_prefix}_disabled",
+        )
+        return
+
+    # Lê os filtros ativos do session_state pra compor o nome do arquivo
+    periodo = st.session_state.get(f"{key_prefix}_periodo", "tudo")
+    unidade = st.session_state.get(f"{key_prefix}_unidade", "todas")
+
+    # Normaliza pra slug ASCII safe
+    def _slug(s):
+        return (str(s).lower()
+                .replace(" ", "-")
+                .replace("ã", "a").replace("á", "a").replace("ç", "c")
+                .replace("ú", "u").replace("í", "i").replace("é", "e")
+                .replace("/", "-").replace(".", ""))
+
+    periodo_slug = _slug(periodo)
+    unidade_slug = _slug(unidade)
+    ts = datetime.now(TZ_SP).strftime("%Y%m%d-%H%M")
+    fname = f"confirmacao_{nome_tela}_{periodo_slug}_{unidade_slug}_{ts}.xlsx"
+
+    # Gera XLSX em memória
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        # Remove tz das colunas datetime — openpyxl não suporta tz-aware
+        df_export = df.copy()
+        for col in df_export.columns:
+            if pd.api.types.is_datetime64_any_dtype(df_export[col]):
+                try:
+                    df_export[col] = df_export[col].dt.tz_localize(None)
+                except (TypeError, AttributeError):
+                    pass  # já era tz-naive
+        df_export.to_excel(writer, index=False, sheet_name="dados")
+
+    st.download_button(
+        label=f"📥 Exportar XLSX ({len(df)} linha{'s' if len(df) != 1 else ''})",
+        data=buf.getvalue(),
+        file_name=fname,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"export_{key_prefix}",
+        help=f"Baixa todos os {len(df)} registros do filtro atual (não só os visíveis)",
+    )
 
 
 # ============================================================================
@@ -442,7 +513,13 @@ def tela_confirmacao_disparos_dia():
     col_m6.markdown(_render_metric_card_local("🎁", qtd_indic,       "Indicações",  "purple"),  unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown(f"### Lista de disparos · {len(df_f)} cliente(s)")
+
+    # Header + botão export lado a lado
+    col_titulo, col_export = st.columns([4, 1.4])
+    with col_titulo:
+        st.markdown(f"### Lista de disparos · {len(df_f)} cliente(s)")
+    with col_export:
+        _botao_export_xlsx(df_f, "disparos_dia", "dispdia")
 
     # Ordena por timestamp desc (mais recente primeiro)
     if 'timestamp_sp' in df_f.columns:
@@ -581,7 +658,13 @@ def tela_confirmacao_historico():
             df_f['Conteúdo Exato'].astype(str).str.lower().str.contains(bl, na=False)
         ]
 
-    st.markdown(f"### {len(df_f)} registro(s)")
+    # Header + botão export lado a lado
+    col_titulo, col_export = st.columns([4, 1.4])
+    with col_titulo:
+        st.markdown(f"### {len(df_f)} registro(s)")
+    with col_export:
+        _botao_export_xlsx(df_f, "historico", "hist")
+
     if df_f.empty:
         st.info("Nada encontrado com esses filtros.")
         return
@@ -753,7 +836,13 @@ def tela_confirmacao_indicacoes():
         st.plotly_chart(fig2, use_container_width=True)
 
     st.divider()
-    st.markdown(f"### Lista · {len(df_f)} convite(s)")
+
+    # Header + botão export lado a lado
+    col_titulo, col_export = st.columns([4, 1.4])
+    with col_titulo:
+        st.markdown(f"### Lista · {len(df_f)} convite(s)")
+    with col_export:
+        _botao_export_xlsx(df_f, "indicacoes", "indic")
 
     if 'timestamp_sp' in df_f.columns:
         df_f = df_f.sort_values('timestamp_sp', ascending=False)
