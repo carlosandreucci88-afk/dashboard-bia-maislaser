@@ -28,6 +28,7 @@ from aba_confirmacao import (
     tela_confirmacao_metricas,
 )
 from aba_disparador import render_aba_disparador
+from aba_zapi import render_aba_zapi_aguardando
 
 
 # ============================================================================
@@ -54,6 +55,7 @@ MODELO_CLAUDE_DEFAULT = "claude-sonnet-4-6"
 ROBOS = {
     'bia':         '🤖 Robô Bia IA',
     'confirmacao': '📅 Robô Confirmação Agenda',
+    'zapi':        '🎁 Robô Z-API Indicações',
 }
 
 
@@ -1753,6 +1755,54 @@ def main():
 
         with tab_metr:
             tela_confirmacao_metricas()
+
+    elif robo == 'zapi':
+        # ─── Tabs do Robô Z-API Indicações ──────────────────────
+        # v1 (08/06/2026): só 1 tab funcional — ⏳ Aguardando validação.
+        # As outras telas (clientes, indicações, ranking, métricas) virão depois.
+        tab_aguard, tab_clientes, tab_indic, tab_rank, tab_metr = st.tabs([
+            "⏳ Aguardando validação",
+            "👥 Clientes no programa",
+            "📨 Indicações",
+            "🏆 Ranking funcionárias",
+            "📊 Métricas",
+        ])
+
+        with tab_aguard:
+            render_aba_zapi_aguardando()
+
+        with tab_clientes:
+            placeholder_aba(
+                "👥 Clientes no programa",
+                "Lista das 76 clientes ativas no programa Indique e Ganhe, com filtro "
+                "por status, unidade e funcionária. Próxima entrega da Fase Z.",
+                "Fase Z.2 — em breve"
+            )
+
+        with tab_indic:
+            placeholder_aba(
+                "📨 Indicações",
+                "Lista das indicações válidas (913 atuais + 3518 arquivadas) com busca "
+                "por nome/telefone e export XLSX. Próxima entrega da Fase Z.",
+                "Fase Z.2 — em breve"
+            )
+
+        with tab_rank:
+            placeholder_aba(
+                "🏆 Ranking funcionárias",
+                "Leaderboard das 17 funcionárias por clientes captados e indicações "
+                "válidas. Hoje recepção Mogi lidera com 326. Próxima entrega da Fase Z.",
+                "Fase Z.2 — em breve"
+            )
+
+        with tab_metr:
+            placeholder_aba(
+                "📊 Métricas Z-API",
+                "Funil completo (cadastrado → respondeu privacidade → mandou contatos → "
+                "validada → voucher liberado), conversão por etapa, tempo médio até voucher. "
+                "Próxima entrega da Fase Z.",
+                "Fase Z.2 — em breve"
+            )
 
     if auto_refresh:
         time.sleep(30)
