@@ -19,6 +19,7 @@ import hashlib
 import base64
 import os
 
+# DEPOIS:
 # Módulos das abas novas (Fase 7+)
 from aba_base_clientes import render_aba_base_clientes
 from aba_confirmacao import (
@@ -27,6 +28,7 @@ from aba_confirmacao import (
     tela_confirmacao_indicacoes,
     tela_confirmacao_metricas,
 )
+from aba_disparador import render_aba_disparador
 
 
 # ============================================================================
@@ -1738,8 +1740,9 @@ def main():
             "📊 Métricas confirmação",
         ])
 
+      # DEPOIS:
         with tab_disp:
-            placeholder_aba(
+            render_aba_disparador()
                 "🚀 Disparar agenda",
                 "Aqui vai ficar o disparador atual embarcado: upload da planilha XLSX do UNO, "
                 "seleção de unidade e disparo dos templates de confirmação. Hoje fica num app "
