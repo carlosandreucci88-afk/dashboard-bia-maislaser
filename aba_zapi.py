@@ -180,13 +180,18 @@ def tela_zapi_aguardando_validacao():
     )
 
     qtd_total = len(df)
-    qtd_urgente = int((df["horas_parado"] >= 24).sum())
-    qtd_atencao = int(((df["horas_parado"] >= 12) & (df["horas_parado"] < 24)).sum())
-    qtd_mogi = int((df["unidade"].str.lower() == "mogi").sum())
-    qtd_suzano = int((df["unidade"].str.lower() == "suzano").sum())
+    # Separa quem já foi marcado (processando) de quem ainda precisa da captadora
+    _marcadas = df["validacao_marcada"].fillna("").astype(str).str.upper().isin(["VALIDADO", "INVALIDADO"])
+    qtd_processando = int(_marcadas.sum())
+    df_para_contar = df[~_marcadas]
+    qtd_urgente = int((df_para_contar["horas_parado"] >= 24).sum())
+    qtd_atencao = int(((df_para_contar["horas_parado"] >= 12) & (df_para_contar["horas_parado"] < 24)).sum())
+    qtd_mogi = int((df_para_contar["unidade"].str.lower() == "mogi").sum())
+    qtd_suzano = int((df_para_contar["unidade"].str.lower() == "suzano").sum())
 
     col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-    col_m1.metric("📋 Total na fila", qtd_total)
+    col_m1.metric("📋 Aguardando captadora", len(df_para_contar),
+                  help=f"{qtd_total} no total ({qtd_processando} já marcadas, em processamento)")
     col_m2.metric("🔴 Urgente (24h+)", qtd_urgente)
     col_m3.metric("🟡 Atenção (12-24h)", qtd_atencao)
     col_m4.metric("📍 Mogi / Suzano", f"{qtd_mogi} / {qtd_suzano}")
@@ -211,7 +216,25 @@ def tela_zapi_aguardando_validacao():
     # Ordena: mais urgente primeiro
     df = df.sort_values("horas_parado", ascending=False).reset_index(drop=True)
 
-    st.markdown(f"### {len(df)} cliente(s) aguardando")
+    # Separa: já marcados (aguardando trigger processar) × ainda precisam de captadora
+    df["validacao_marcada"] = df["validacao_marcada"].fillna("").astype(str).str.upper()
+    df_processando = df[df["validacao_marcada"].isin(["VALIDADO", "INVALIDADO"])].copy()
+    df_aguardando = df[~df["validacao_marcada"].isin(["VALIDADO", "INVALIDADO"])].copy()
+
+    # Banner em cima se tem alguém processando
+    if not df_processando.empty:
+        nomes_proc = ", ".join(df_processando["nome"].tolist()[:5])
+        extras = f" e mais {len(df_processando) - 5}" if len(df_processando) > 5 else ""
+        st.info(
+            f"⏳ **{len(df_processando)} cliente(s) processando:** {nomes_proc}{extras}. "
+            f"O trigger do Apps Script vai disparar voucher/mensagem em até 5min e elas saem desta lista."
+        )
+
+    if df_aguardando.empty:
+        st.success("🎉 Sem pendências pra captadora atuar agora.")
+        return
+
+    st.markdown(f"### {len(df_aguardando)} cliente(s) aguardando captadora")
 
     # CSS local pros badges
     st.markdown("""
@@ -225,8 +248,8 @@ def tela_zapi_aguardando_validacao():
     </style>
     """, unsafe_allow_html=True)
 
-    # Lista de cards (1 por cliente pendente)
-    for _, row in df.iterrows():
+    # Lista de cards (1 por cliente pendente — só os que ainda precisam de ação)
+    for _, row in df_aguardando.iterrows():
         tel = row["telefone"]
         nome = row["nome"] or "(sem nome)"
         func = row["funcionaria"] or "—"
@@ -237,6 +260,7 @@ def tela_zapi_aguardando_validacao():
         dt = row["data_hora_dt"]
         tempo = _humanizar_tempo(dt)
         urg = _classe_urgencia(dt)
+
 
         urg_label = {"urgente": "🔴 URGENTE", "atencao": "🟡 ATENÇÃO", "ok": "🟢 OK"}[urg]
         priv_label = {"ANONIMO": "🤫 anônima", "IDENTIFICADO": "✨ identificada"}.get(priv, "— sem privacidade")
