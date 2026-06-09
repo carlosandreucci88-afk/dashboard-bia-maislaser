@@ -1155,6 +1155,348 @@ def tela_zapi_metricas():
 
 
 # ============================================================================
+# TELA: 👥 CLIENTES NO PROGRAMA (v9.8)
+# ============================================================================
+
+# Classificação visual: status → categoria amigável com emoji
+_CATEGORIAS_CLIENTES = [
+    ("🔵 Aguardando validação", lambda s: s == 'AGUARDANDO_VALIDACAO'),
+    ("🟠 Invalidado (vai encerrar)", lambda s: s == 'INVALIDADO_COBRADO'),
+    ("🟠 Invalidado (1ª tentativa)", lambda s: s in ('INVALIDADO', 'INVALIDADO_AVISADO')),
+    ("🟡 Privacidade (cobrando)", lambda s: 'PRIVACIDADE' in s and 'COBRADO' in s),
+    ("⚪ Privacidade (esperando)", lambda s: s == 'AGUARDANDO_PRIVACIDADE'),
+    ("🟡 Contatos (cobrando)", lambda s: 'CONTATOS' in s and 'COBRADO' in s),
+    ("⚪ Contatos (esperando)", lambda s: s == 'AGUARDANDO_CONTATOS'),
+    ("✅ Finalizado", lambda s: s == 'FINALIZADO'),
+    ("🚫 Encerrado", lambda s: s == 'ENCERRADO'),
+    ("💤 Desistiu (sem resposta)", lambda s: s == '_COBRADOSEMRESPOSTA'),
+]
+
+
+def _categoria_cliente(status):
+    s = str(status).upper() if status else ''
+    for cat, predicado in _CATEGORIAS_CLIENTES:
+        if predicado(s):
+            return cat
+    return f"❓ {s}"
+
+
+def _eh_ativo(status):
+    """Cliente em estado ativo (não terminal). Os terminais são FIN/ENC/DES."""
+    s = str(status).upper() if status else ''
+    return s not in ('FINALIZADO', 'ENCERRADO', '_COBRADOSEMRESPOSTA')
+
+
+def tela_zapi_clientes_programa():
+    st.markdown("## 👥 Clientes no programa")
+    st.caption(
+        "Todos os clientes em CLIENTES (atual). "
+        "Ordenado por tempo no status atual — mais urgente no topo."
+    )
+
+    col_btn, _ = st.columns([1, 5])
+    with col_btn:
+        if st.button("🔄 Atualizar", key="cliprog_refresh", use_container_width=True):
+            _zapi_get.clear()
+            st.rerun()
+
+    with st.spinner("Carregando clientes..."):
+        data = _zapi_get("clientes")
+
+    if _mostrar_erro_e_parar(data, "(carregando clientes)"):
+        return
+
+    linhas = data.get("linhas", [])
+    if not linhas:
+        st.info("Nenhum cliente em CLIENTES no momento.")
+        return
+
+    # Monta DataFrame
+    df = pd.DataFrame(linhas)
+
+    # Filtra 'teste' (consistente com outras telas)
+    if 'Funcionaria' in df.columns:
+        df = df[df['Funcionaria'].astype(str).str.lower().str.strip() != 'teste']
+
+    if df.empty:
+        st.info("Nenhum cliente real (só 'teste').")
+        return
+
+    # Enriquece com categoria + tempo no status
+    status_col = 'STATUS DE AONDE PAROU' if 'STATUS DE AONDE PAROU' in df.columns else 'status_rec'
+    df['_categoria'] = df[status_col].apply(_categoria_cliente)
+    df['_ativo'] = df[status_col].apply(_eh_ativo)
+
+    # Tempo no status
+    if 'DATA E HORA' in df.columns:
+        df['_data_hora'] = pd.to_datetime(df['DATA E HORA'], errors='coerce', utc=True).dt.tz_convert(TZ_SP)
+        agora = datetime.now(TZ_SP)
+        df['_horas'] = (agora - df['_data_hora']).dt.total_seconds() / 3600
+
+    # ─── Cards de resumo ───
+    n_total = len(df)
+    n_ativos = df['_ativo'].sum()
+    n_voucher = (df.get('Voucher Liberado', '').astype(str).str.upper() == 'SIM').sum() if 'Voucher Liberado' in df.columns else 0
+    n_desistiu = (df[status_col] == '_COBRADOSEMRESPOSTA').sum()
+
+    col_a, col_b, col_c, col_d = st.columns(4)
+    col_a.metric("👥 Total em CLIENTES", n_total)
+    col_b.metric("🔵 Em ação ativa", int(n_ativos),
+        help="Não-terminais: ainda precisam de algo (cobrança automática ou validação)")
+    col_c.metric("✅ Voucher liberado", int(n_voucher))
+    col_d.metric("💤 Desistiu", int(n_desistiu))
+
+    st.markdown("---")
+
+    # ─── Filtros ───
+    categorias_disponiveis = sorted(df['_categoria'].unique().tolist())
+
+    col_cat, col_unid, col_busca = st.columns([3, 2, 3])
+    with col_cat:
+        cats_selecionadas = st.multiselect(
+            "📂 Categoria:",
+            categorias_disponiveis,
+            default=[],
+            key="cliprog_cats",
+            placeholder="Todas as categorias",
+        )
+    with col_unid:
+        unid_filtro = st.radio("📍 Unidade:", ["Todas", "Mogi", "Suzano"],
+            horizontal=True, key="cliprog_unid")
+    with col_busca:
+        busca = st.text_input("🔍 Buscar:", placeholder="Nome ou telefone",
+            key="cliprog_busca")
+
+    # Aplica filtros
+    df_f = df.copy()
+    if cats_selecionadas:
+        df_f = df_f[df_f['_categoria'].isin(cats_selecionadas)]
+    if unid_filtro != "Todas" and 'Unidade' in df_f.columns:
+        df_f = df_f[df_f['Unidade'].astype(str).str.lower() == unid_filtro.lower()]
+    if busca.strip():
+        b = busca.strip().lower()
+        mask_nome = df_f['Nome'].astype(str).str.lower().str.contains(b, na=False) if 'Nome' in df_f.columns else False
+        mask_tel = df_f['Telefone'].astype(str).str.contains(b, na=False) if 'Telefone' in df_f.columns else False
+        df_f = df_f[mask_nome | mask_tel]
+
+    # Ordena por horas_no_status DESC (mais antigo primeiro)
+    if '_horas' in df_f.columns:
+        df_f = df_f.sort_values('_horas', ascending=False)
+
+    st.caption(f"Mostrando **{len(df_f)}** de {n_total} clientes")
+
+    if df_f.empty:
+        st.info("Nenhum cliente com esses filtros.")
+        return
+
+    # ─── Tabela display ───
+    df_display = df_f.copy()
+    if '_horas' in df_display.columns:
+        df_display['⏱️ Tempo'] = df_display['_horas'].apply(_fmt_tempo_horas)
+
+    # Renomeia + seleciona colunas
+    col_renames = {
+        '_categoria': '🚦 Status',
+        'Nome': '👤 Nome',
+        'Telefone': '📱 Telefone',
+        'Unidade': '📍 Unidade',
+        'Funcionaria': '👩 Funcionária',
+        'Total Indicacoes': '📨 Indicações',
+        'PRIVACIDADE': '🔐 Privacidade',
+        'Voucher Liberado': '🎁 Voucher',
+    }
+    cols_display = ['🚦 Status', '👤 Nome', '📱 Telefone', '📍 Unidade',
+                    '👩 Funcionária', '⏱️ Tempo', '📨 Indicações',
+                    '🔐 Privacidade', '🎁 Voucher']
+    df_display = df_display.rename(columns=col_renames)
+    cols_existentes = [c for c in cols_display if c in df_display.columns]
+    df_display = df_display[cols_existentes]
+
+    # Capitaliza unidade e funcionária
+    if '📍 Unidade' in df_display.columns:
+        df_display['📍 Unidade'] = df_display['📍 Unidade'].astype(str).str.title()
+    if '👩 Funcionária' in df_display.columns:
+        df_display['👩 Funcionária'] = df_display['👩 Funcionária'].astype(str).str.title()
+
+    # Botão export ANTES da tabela
+    col_exp, _ = st.columns([2, 5])
+    with col_exp:
+        sufixo = (unid_filtro.lower() if unid_filtro != "Todas" else "todas")
+        _xlsx_clientes_prog(df_display, sufixo)
+
+    st.dataframe(df_display, use_container_width=True, hide_index=True, height=450)
+
+    st.markdown("---")
+
+    # ─── Ação por cliente ───
+    st.markdown("### 🎯 Ação em cliente")
+    st.caption(
+        "Selecione um cliente abaixo pra ver contatos enviados ou marcar validação."
+    )
+
+    # Monta lista de opções (nome + telefone + status)
+    df_f_reset = df_f.reset_index(drop=True)
+    opcoes = ["— Selecione um cliente —"]
+    for _, r in df_f_reset.iterrows():
+        nome = str(r.get('Nome', '?'))[:30]
+        tel = str(r.get('Telefone', ''))
+        cat = r['_categoria']
+        opcoes.append(f"{cat} | {nome} | {tel}")
+
+    escolha = st.selectbox("Cliente:", opcoes, key="cliprog_select", label_visibility="collapsed")
+
+    if escolha == opcoes[0]:
+        return
+
+    idx_escolhido = opcoes.index(escolha) - 1
+    cli = df_f_reset.iloc[idx_escolhido]
+    tel_cli = str(cli.get('Telefone', ''))
+    nome_cli = str(cli.get('Nome', '?'))
+    camp_id = str(cli.get('ID Campanha', ''))
+    status_atual = str(cli.get(status_col, ''))
+    total_ind = int(cli.get('Total Indicacoes', 0) or 0)
+
+    # Card com info do cliente
+    st.info(
+        f"**{nome_cli}** — {tel_cli} — {cli['_categoria']}\n\n"
+        f"Unidade: {str(cli.get('Unidade', '?')).title()} · "
+        f"Funcionária: {str(cli.get('Funcionaria', '?')).title()} · "
+        f"Indicações: {total_ind} · "
+        f"Voucher: {cli.get('Voucher Liberado', '?')}"
+    )
+
+    # Botões de ação (varia por status)
+    col_a1, col_a2, col_a3 = st.columns(3)
+
+    # Ver contatos (sempre disponível se tiver indicações)
+    with col_a1:
+        if total_ind > 0:
+            if st.button(f"📞 Ver {total_ind} contato{'s' if total_ind != 1 else ''}",
+                         key="cliprog_ver_contatos", use_container_width=True):
+                st.session_state['cliprog_mostrar_contatos'] = camp_id
+        else:
+            st.button("📞 Sem contatos ainda", disabled=True, use_container_width=True)
+
+    # Validar / Invalidar (só se aguardando)
+    status_upper = status_atual.upper()
+    aguardando_val = status_upper == 'AGUARDANDO_VALIDACAO'
+
+    with col_a2:
+        if aguardando_val:
+            if st.button("✅ Validar (libera voucher)",
+                         key="cliprog_validar", type="primary", use_container_width=True):
+                st.session_state['cliprog_confirma_validacao'] = ('VALIDADO', tel_cli, nome_cli)
+        else:
+            st.button("✅ Validar", disabled=True, use_container_width=True,
+                help="Disponível só pra clientes em AGUARDANDO_VALIDACAO")
+
+    with col_a3:
+        if aguardando_val:
+            if st.button("❌ Invalidar",
+                         key="cliprog_invalidar", use_container_width=True):
+                st.session_state['cliprog_confirma_validacao'] = ('INVALIDADO', tel_cli, nome_cli)
+        else:
+            st.button("❌ Invalidar", disabled=True, use_container_width=True,
+                help="Disponível só pra clientes em AGUARDANDO_VALIDACAO")
+
+    # ─── Mostrar contatos (se solicitado) ───
+    if st.session_state.get('cliprog_mostrar_contatos') == camp_id and camp_id:
+        st.markdown(f"#### 📞 Contatos enviados por {nome_cli}")
+        with st.spinner("Buscando contatos..."):
+            contatos_data = _zapi_get("contatos_cliente", campanha_id=camp_id)
+
+        if isinstance(contatos_data, dict) and contatos_data.get("_erro"):
+            st.error(contatos_data["_erro"])
+        else:
+            contatos = contatos_data.get("linhas", []) if isinstance(contatos_data, dict) else []
+            if contatos:
+                df_c = pd.DataFrame(contatos)
+                # Mostra colunas úteis
+                cols_c = [c for c in ['nome_indicado', 'telefone_indicado', 'status', 'motivo'] if c in df_c.columns]
+                df_c_display = df_c[cols_c].rename(columns={
+                    'nome_indicado': '👤 Nome',
+                    'telefone_indicado': '📱 Telefone',
+                    'status': '✅ Status',
+                    'motivo': '📝 Motivo',
+                })
+                st.dataframe(df_c_display, use_container_width=True, hide_index=True)
+            else:
+                st.info("Nenhum contato encontrado pra essa campanha.")
+
+        if st.button("Fechar lista", key="cliprog_fechar_contatos"):
+            st.session_state['cliprog_mostrar_contatos'] = None
+            st.rerun()
+
+    # ─── Confirmação dupla de validação ───
+    pendente = st.session_state.get('cliprog_confirma_validacao')
+    if pendente:
+        decisao, tel_p, nome_p = pendente
+        if decisao == 'VALIDADO':
+            st.warning(f"⚠️ **Confirmar:** validar {nome_p} ({tel_p})? Voucher será disparado em até 5min após confirmação.")
+        else:
+            st.warning(f"⚠️ **Confirmar:** invalidar {nome_p} ({tel_p})? Cliente recebe nova chance ou encerra (se 2ª invalidação).")
+
+        col_sim, col_nao, _ = st.columns([1, 1, 4])
+        with col_sim:
+            if st.button(f"✅ Sim, {decisao.lower()}", key="cliprog_conf_sim",
+                         type="primary", use_container_width=True):
+                with st.spinner("Marcando..."):
+                    resp = _zapi_get("marcar_validacao", tel=tel_p, decisao=decisao)
+                if isinstance(resp, dict) and resp.get("_erro"):
+                    st.error(f"Falhou: {resp['_erro']}")
+                else:
+                    st.success(f"✅ Marcado como {decisao}! Trigger de 5min vai processar.")
+                    st.session_state['cliprog_confirma_validacao'] = None
+                    _zapi_get.clear()
+                    st.balloons()
+        with col_nao:
+            if st.button("❌ Cancelar", key="cliprog_conf_nao", use_container_width=True):
+                st.session_state['cliprog_confirma_validacao'] = None
+                st.rerun()
+
+
+def _fmt_tempo_horas(h):
+    """Formata horas em string legível: '45min', '3h', '2d 4h'"""
+    if pd.isna(h):
+        return "—"
+    if h < 1:
+        return f"{int(h*60)}min"
+    if h < 24:
+        return f"{int(h)}h"
+    dias = int(h // 24)
+    horas = int(h % 24)
+    return f"{dias}d {horas}h" if horas else f"{dias}d"
+
+
+def _xlsx_clientes_prog(df_export, sufixo):
+    """Export XLSX de clientes no programa."""
+    if df_export is None or df_export.empty:
+        st.download_button("📥 Exportar XLSX (sem dados)", data=b"",
+            file_name="vazio.xlsx", disabled=True, key=f"exp_clip_void_{sufixo}")
+        return
+
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        d = df_export.copy()
+        for col in d.columns:
+            if pd.api.types.is_datetime64_any_dtype(d[col]):
+                try: d[col] = d[col].dt.tz_localize(None)
+                except (TypeError, AttributeError): pass
+        d.to_excel(writer, index=False, sheet_name="clientes")
+
+    ts = datetime.now(TZ_SP).strftime("%Y%m%d-%H%M")
+    fname = f"zapi_clientes_programa_{sufixo}_{ts}.xlsx"
+    st.download_button(
+        label=f"📥 Exportar XLSX ({len(df_export)} linhas)",
+        data=buf.getvalue(),
+        file_name=fname,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"exp_clip_{sufixo}",
+        help=f"Baixa os {len(df_export)} clientes filtrados",
+    )
+
+
+# ============================================================================
 # ENTRY POINTS — chamados pelo dashboard_maislaser.py dentro da tab
 # ============================================================================
 
@@ -1176,3 +1518,8 @@ def render_aba_zapi_indicacoes():
 def render_aba_zapi_metricas():
     """Renderiza a tela de métricas do funil Z-API."""
     tela_zapi_metricas()
+
+
+def render_aba_zapi_clientes():
+    """Renderiza a tela de clientes no programa."""
+    tela_zapi_clientes_programa()
