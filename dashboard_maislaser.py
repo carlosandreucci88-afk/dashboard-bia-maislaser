@@ -370,38 +370,61 @@ def check_password():
         <style>
             header[data-testid="stHeader"] {visibility: hidden;}
             section[data-testid="stSidebar"] {display: none;}
-            section.main > div.block-container { padding-top: 2rem !important; max-width: 100% !important; }
-            .bia-login-box { background: white; padding: 44px 40px; border-radius: 20px; box-shadow: 0 12px 40px rgba(91, 192, 190, 0.15); max-width: 440px; margin: 4vh auto 0 auto; text-align: center; border: 1px solid #e5e7eb; }
-            .bia-login-logo { margin-bottom: 20px; }
-            .bia-login-logo img { max-width: 220px; height: auto; }
-            .bia-login-subtitle { color: #6b7280; margin-bottom: 28px; font-size: 14px; font-weight: 500; letter-spacing: 1px; text-transform: uppercase; }
-            .bia-login-box div[data-testid="stTextInput"] label { display: none; }
-            .bia-login-box .stCheckbox { margin-top: 6px; margin-bottom: 14px; text-align: left; }
+            section.main > div.block-container {
+                padding-top: 6vh !important;
+                max-width: 460px !important;
+                margin: 0 auto;
+            }
+            .bia-login-header { text-align: center; margin-bottom: 28px; }
+            .bia-login-header img { max-width: 220px; height: auto; }
+            .bia-login-header p {
+                color: #6b7280;
+                margin: 14px 0 0 0;
+                font-size: 12px;
+                font-weight: 600;
+                letter-spacing: 2px;
+                text-transform: uppercase;
+            }
+            /* Esconde a label "Senha" — placeholder já indica */
+            div[data-testid="stTextInput"] label { display: none; }
+            /* Visual de card aplicado direto no form do Streamlit */
+            div[data-testid="stForm"] {
+                background: white;
+                padding: 36px 32px;
+                border-radius: 18px;
+                box-shadow: 0 10px 30px rgba(91, 192, 190, 0.15);
+                border: 1px solid #e5e7eb;
+            }
+            div[data-testid="stForm"] .stCheckbox {
+                margin-top: 4px;
+                margin-bottom: 12px;
+            }
         </style>
     """, unsafe_allow_html=True)
 
-    _, col_meio, _ = st.columns([1, 2, 1])
-    with col_meio:
-        st.markdown('<div class="bia-login-box">', unsafe_allow_html=True)
-        st.markdown(f'<div class="bia-login-logo">{_get_logo_html()}</div>', unsafe_allow_html=True)
-        st.markdown('<div class="bia-login-subtitle">Dashboard Bia</div>', unsafe_allow_html=True)
+    # Header: logo + subtitle (HTML puro — sem componentes Streamlit dentro)
+    st.markdown(f"""
+        <div class="bia-login-header">
+            {_get_logo_html()}
+            <p>Dashboard Bia</p>
+        </div>
+    """, unsafe_allow_html=True)
 
-        with st.form("login_form", clear_on_submit=False):
-            senha = st.text_input("Senha", type="password", placeholder="Digite a senha")
-            lembrar = st.checkbox("Lembrar de mim neste dispositivo", value=True,
-                help="Se ativo, você fica logado mesmo depois de fechar o navegador.")
-            submit = st.form_submit_button("Entrar", type="primary", use_container_width=True)
+    # Form do Streamlit — o CSS aplica visual de card direto no <form>
+    with st.form("login_form", clear_on_submit=False):
+        senha = st.text_input("Senha", type="password", placeholder="Digite a senha")
+        lembrar = st.checkbox("Lembrar de mim neste dispositivo", value=True,
+            help="Se ativo, você fica logado mesmo depois de fechar o navegador.")
+        submit = st.form_submit_button("Entrar", type="primary", use_container_width=True)
 
-        if submit:
-            if senha == st.secrets.get("DASHBOARD_PASSWORD", "maislaser"):
-                st.session_state["password_correct"] = True
-                if lembrar:
-                    st.query_params["t"] = _expected_login_token()
-                st.rerun()
-            else:
-                st.error("❌ Senha incorreta")
-
-        st.markdown('</div>', unsafe_allow_html=True)
+    if submit:
+        if senha == st.secrets.get("DASHBOARD_PASSWORD", "maislaser"):
+            st.session_state["password_correct"] = True
+            if lembrar:
+                st.query_params["t"] = _expected_login_token()
+            st.rerun()
+        else:
+            st.error("❌ Senha incorreta")
 
     return False
 
