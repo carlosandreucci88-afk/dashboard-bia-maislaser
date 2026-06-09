@@ -532,12 +532,34 @@ def tela_zapi_ranking():
 
     df = pd.DataFrame(ranking)
 
-    # ─── Cards de resumo ───
+    # ─── Filtro por unidade (vem ANTES dos cards pra que eles reflitam o filtro) ───
+    unid_filtro = st.radio(
+        "Filtrar por unidade:",
+        ["Todas", "Mogi", "Suzano"],
+        horizontal=True,
+        key="rank_unid_filtro",
+    )
+    df_filtrado = df.copy()
+    if unid_filtro != "Todas":
+        df_filtrado = df_filtrado[df_filtrado["unidade"].str.lower() == unid_filtro.lower()]
+
+    # ─── Cards de resumo — recalculados a partir do DF FILTRADO ───
     fontes = totais.get("fontes", {})
+    if unid_filtro == "Todas":
+        # Usa totais do API direto (mais preciso, vem do Apps Script)
+        n_func = totais.get("funcionarias_distintas", 0)
+        n_cli = totais.get("clientes_com_indicacoes", 0)
+        n_ind = totais.get("indicacoes_validas", 0)
+    else:
+        # Calcula a partir do DF filtrado
+        n_func = len(df_filtrado)
+        n_cli = int(df_filtrado["clientes_com_indicacoes"].sum())
+        n_ind = int(df_filtrado["indicacoes_validas"].sum())
+
     col_a, col_b, col_c, col_d = st.columns(4)
-    col_a.metric("👥 Funcionárias distintas", totais.get("funcionarias_distintas", 0))
-    col_b.metric("✅ Clientes que indicaram", totais.get("clientes_com_indicacoes", 0))
-    col_c.metric("📨 Indicações válidas", f"{totais.get('indicacoes_validas', 0):,}".replace(",", "."))
+    col_a.metric("👥 Funcionárias distintas", n_func)
+    col_b.metric("✅ Clientes que indicaram", n_cli)
+    col_c.metric("📨 Indicações válidas", f"{n_ind:,}".replace(",", "."))
     col_d.metric(
         "📚 Fonte de dados",
         f"{fontes.get('clientes_ativos', 0) + fontes.get('clientes_arquivo', 0)} clientes",
@@ -545,21 +567,15 @@ def tela_zapi_ranking():
             f"CLIENTES: {fontes.get('clientes_ativos', 0)} ativos + "
             f"{fontes.get('clientes_arquivo', 0)} arquivados.\n"
             f"INDICACOES: {fontes.get('indicacoes_ativas', 0)} ativas + "
-            f"{fontes.get('indicacoes_arquivo', 0)} arquivadas."
+            f"{fontes.get('indicacoes_arquivo', 0)} arquivadas.\n"
+            f"(Não filtra por unidade — é a base completa de dados.)"
         ),
     )
 
     st.markdown("---")
 
-    # ─── Filtro por unidade ───
-    unid_filtro = st.radio(
-        "Filtrar por unidade:",
-        ["Todas", "Mogi", "Suzano"],
-        horizontal=True,
-        key="rank_unid_filtro",
-    )
-    if unid_filtro != "Todas":
-        df = df[df["unidade"].str.lower() == unid_filtro.lower()]
+    # Substitui df pelo filtrado pra resto da tela usar
+    df = df_filtrado
 
     if df.empty:
         st.info(f"Nenhuma funcionária em {unid_filtro}.")
