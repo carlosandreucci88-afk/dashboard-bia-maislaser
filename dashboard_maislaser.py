@@ -177,11 +177,19 @@ h3 { font-size: 18px !important; }
     padding: 12px 20px !important;
     font-weight: 600 !important;
     font-size: 14px !important;
-    border-radius: 0 !important;
+    border-radius: 8px 8px 0 0 !important;
     transition: all 0.2s ease;
 }
-.stTabs [data-baseweb="tab"]:hover { color: var(--text) !important; }
-.stTabs [aria-selected="true"] { color: var(--primary-dark) !important; }
+.stTabs [data-baseweb="tab"]:hover {
+    color: var(--text) !important;
+    background: rgba(91, 192, 190, 0.04) !important;
+}
+.stTabs [aria-selected="true"] {
+    color: var(--primary-dark) !important;
+    background: rgba(91, 192, 190, 0.10) !important;
+    box-shadow: inset 0 2px 5px rgba(91, 192, 190, 0.18),
+                inset 0 -1px 0 rgba(255, 255, 255, 0.4) !important;
+}
 /* Sublinhado animado da tab ativa (Streamlit usa um elemento separado) */
 .stTabs [data-baseweb="tab-highlight"],
 .stTabs [data-baseweb="tab-border"] { background-color: var(--primary) !important; }
