@@ -28,7 +28,7 @@ from aba_confirmacao import (
     tela_confirmacao_metricas,
 )
 from aba_disparador import render_aba_disparador
-from aba_zapi import render_aba_zapi_aguardando, render_aba_zapi_ranking, render_aba_zapi_indicacoes, render_aba_zapi_metricas
+from aba_zapi import render_aba_zapi_aguardando, render_aba_zapi_ranking, render_aba_zapi_indicacoes, render_aba_zapi_metricas, render_aba_zapi_clientes
 
 
 # ============================================================================
@@ -1819,12 +1819,7 @@ def main():
             render_aba_zapi_aguardando()
 
         with tab_clientes:
-            placeholder_aba(
-                "👥 Clientes no programa",
-                "Lista das 76 clientes ativas no programa Indique e Ganhe, com filtro "
-                "por status, unidade e funcionária. Próxima entrega da Fase Z.",
-                "Fase Z.2 — em breve"
-            )
+            render_aba_zapi_clientes()
 
         with tab_indic:
             render_aba_zapi_indicacoes()
