@@ -28,7 +28,7 @@ from aba_confirmacao import (
     tela_confirmacao_metricas,
 )
 from aba_disparador import render_aba_disparador
-from aba_zapi import render_aba_zapi_aguardando, render_aba_zapi_ranking
+from aba_zapi import render_aba_zapi_aguardando, render_aba_zapi_ranking, render_aba_zapi_indicacoes
 
 
 # ============================================================================
@@ -1827,12 +1827,7 @@ def main():
             )
 
         with tab_indic:
-            placeholder_aba(
-                "📨 Indicações",
-                "Lista das indicações válidas (913 atuais + 3518 arquivadas) com busca "
-                "por nome/telefone e export XLSX. Próxima entrega da Fase Z.",
-                "Fase Z.2 — em breve"
-            )
+            render_aba_zapi_indicacoes()
 
         with tab_rank:
             render_aba_zapi_ranking()
