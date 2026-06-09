@@ -402,11 +402,10 @@ def check_password():
         </style>
     """, unsafe_allow_html=True)
 
-    # Header: logo + subtitle (HTML puro — sem componentes Streamlit dentro)
+    # Header: só o logo (sem subtitle)
     st.markdown(f"""
         <div class="bia-login-header">
             {_get_logo_html()}
-            <p>Dashboard Bia</p>
         </div>
     """, unsafe_allow_html=True)
 
