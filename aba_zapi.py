@@ -902,20 +902,21 @@ def tela_zapi_indicacoes():
 # ============================================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _zapi_get_metricas():
-    """Chama o endpoint metricas_funil. Cache 5min (operação pesada)."""
+def _zapi_get_metricas(data_inicio: str = "", data_fim: str = ""):
+    """Chama o endpoint metricas_funil com filtro opcional de período.
+    Cache 5min por combinação de datas."""
     try:
         url = st.secrets["APPS_SCRIPT_URL_ZAPI"]
         token = st.secrets["APPS_SCRIPT_TOKEN_ZAPI"]
     except Exception:
         return {"_erro": "Configuração ausente: APPS_SCRIPT_URL_ZAPI / APPS_SCRIPT_TOKEN_ZAPI"}
 
+    params = {"endpoint": "metricas_funil", "token": token}
+    if data_inicio: params["data_inicio"] = data_inicio
+    if data_fim:    params["data_fim"] = data_fim
+
     try:
-        resp = requests.get(
-            url,
-            params={"endpoint": "metricas_funil", "token": token},
-            timeout=45, allow_redirects=True,
-        )
+        resp = requests.get(url, params=params, timeout=45, allow_redirects=True)
         if resp.status_code != 200:
             return {"_erro": f"HTTP {resp.status_code} ao calcular métricas"}
         data = resp.json()
@@ -937,14 +938,54 @@ def tela_zapi_metricas():
         "convertem, onde travam, e quanto tempo leva."
     )
 
-    col_btn, _ = st.columns([1, 5])
+    # ─── v9.7: Filtro de período personalizado ───────────────────────────
+    # Filtra por Data Cadastro (quando cliente entrou no programa).
+    # ───────────────────────────────────────────────────────────────────
+    from datetime import date, timedelta
+    hoje = date.today()
+
+    col_tog, col_di, col_df, col_btn = st.columns([2, 2, 2, 1])
+    with col_tog:
+        usar_filtro = st.toggle(
+            "🎯 Filtrar por período",
+            value=False, key="met_usar_filtro",
+            help="Liga pra recalcular tudo num período específico (por Data Cadastro do cliente)"
+        )
+
+    data_inicio_str = ""
+    data_fim_str = ""
+
+    if usar_filtro:
+        with col_di:
+            di = st.date_input("Data início:", value=hoje - timedelta(days=30),
+                max_value=hoje, key="met_di", format="DD/MM/YYYY")
+        with col_df:
+            df_data = st.date_input("Data fim:", value=hoje,
+                max_value=hoje, key="met_df", format="DD/MM/YYYY")
+        if di > df_data:
+            st.error("⚠️ Data início não pode ser maior que data fim.")
+            return
+        data_inicio_str = di.isoformat()
+        data_fim_str = df_data.isoformat()
+    else:
+        with col_di:
+            st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
+            st.caption("Mostrando: **todo o período**")
+
     with col_btn:
+        st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
         if st.button("🔄 Atualizar", key="met_refresh", use_container_width=True):
             _zapi_get_metricas.clear()
             st.rerun()
 
+    # Label do período aplicado (visual)
+    if usar_filtro:
+        di_fmt = "/".join(reversed(data_inicio_str.split("-")))
+        df_fmt = "/".join(reversed(data_fim_str.split("-")))
+        st.caption(f"📍 Período: **{di_fmt}** até **{df_fmt}**")
+
     with st.spinner("Calculando métricas do funil..."):
-        data = _zapi_get_metricas()
+        data = _zapi_get_metricas(data_inicio_str, data_fim_str)
 
     if _mostrar_erro_e_parar(data, "(carregando métricas)"):
         return
