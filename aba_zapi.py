@@ -388,11 +388,14 @@ def tela_zapi_aguardando_validacao():
 # ============================================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _zapi_get_ranking():
+def _zapi_get_ranking(data_inicio: str = "", data_fim: str = ""):
     """
-    Chama o endpoint funcionarias_real do Apps Script.
-    Cache 5min porque o endpoint lê ~4500 linhas e é pesado.
-    Implementação independente do _zapi_get (que tem ttl=30s).
+    Chama o endpoint funcionarias_real do Apps Script com filtro opcional de período.
+    Cache 5min por combinação de datas (cada filtro tem seu próprio cache).
+
+    Args:
+        data_inicio: ISO date YYYY-MM-DD ou string vazia pra sem filtro
+        data_fim: idem
     """
     try:
         url = st.secrets["APPS_SCRIPT_URL_ZAPI"]
@@ -400,11 +403,17 @@ def _zapi_get_ranking():
     except Exception:
         return {"_erro": "Configuração ausente: APPS_SCRIPT_URL_ZAPI / APPS_SCRIPT_TOKEN_ZAPI"}
 
+    params = {"endpoint": "funcionarias_real", "token": token}
+    if data_inicio:
+        params["data_inicio"] = data_inicio
+    if data_fim:
+        params["data_fim"] = data_fim
+
     try:
         resp = requests.get(
             url,
-            params={"endpoint": "funcionarias_real", "token": token},
-            timeout=30,  # endpoint pesado, dou 30s
+            params=params,
+            timeout=30,
             allow_redirects=True,
         )
         if resp.status_code != 200:
@@ -425,19 +434,92 @@ def tela_zapi_ranking():
     st.markdown("## 🏆 Ranking de funcionárias")
     st.caption(
         "Calculado em tempo real a partir de CLIENTES + arquivo + INDICACOES + arquivo. "
-        "Conta como **cliente** quem enviou os 20 contatos (bateu a meta). "
+        "Conta como **cliente** quem enviou pelo menos 1 contato (Total Indicacoes > 0). "
         "Conta como **indicação** cada contato com status VALIDO."
     )
 
-    # Botão pra forçar refresh (cache 5min é agressivo)
-    col_btn, _ = st.columns([1, 5])
-    with col_btn:
-        if st.button("🔄 Atualizar", key="rank_refresh"):
+    # ─── Seletor de período (v9.4) ───────────────────────────────────────
+    # Filtra DATA BATEU META (clientes) e DATA da indicação (indicações).
+    # Filtros independentes — cliente que bateu meta em maio com indicações
+    # que entraram em junho conta nas duas métricas separadamente.
+    # ───────────────────────────────────────────────────────────────────
+    from datetime import date, timedelta
+
+    hoje = date.today()
+    primeiro_dia_mes = hoje.replace(day=1)
+    ultimo_dia_mes_passado = primeiro_dia_mes - timedelta(days=1)
+    primeiro_dia_mes_passado = ultimo_dia_mes_passado.replace(day=1)
+
+    PRESETS = {
+        "📅 Todo o período": (None, None),
+        "🗓️ Hoje": (hoje, hoje),
+        "📆 Últimos 7 dias": (hoje - timedelta(days=6), hoje),
+        "🗓️ Últimos 30 dias": (hoje - timedelta(days=29), hoje),
+        "📅 Este mês": (primeiro_dia_mes, hoje),
+        "📆 Mês passado": (primeiro_dia_mes_passado, ultimo_dia_mes_passado),
+        "🎯 Personalizado": (None, None),  # vai abrir date_input
+    }
+
+    col_preset, col_atualizar = st.columns([4, 1])
+    with col_preset:
+        preset_escolhido = st.selectbox(
+            "Período:",
+            list(PRESETS.keys()),
+            index=0,
+            key="rank_periodo_preset",
+        )
+    with col_atualizar:
+        st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
+        if st.button("🔄 Atualizar", key="rank_refresh", use_container_width=True):
             _zapi_get_ranking.clear()
             st.rerun()
 
+    # Resolve as datas finais (string ISO ou vazio)
+    data_inicio_str = ""
+    data_fim_str = ""
+
+    if preset_escolhido == "🎯 Personalizado":
+        col_di, col_df = st.columns(2)
+        with col_di:
+            di = st.date_input(
+                "Data início:",
+                value=hoje - timedelta(days=30),
+                max_value=hoje,
+                key="rank_data_inicio",
+                format="DD/MM/YYYY",
+            )
+        with col_df:
+            df_data = st.date_input(
+                "Data fim:",
+                value=hoje,
+                max_value=hoje,
+                key="rank_data_fim",
+                format="DD/MM/YYYY",
+            )
+        if di > df_data:
+            st.error("⚠️ Data início não pode ser maior que data fim.")
+            return
+        data_inicio_str = di.isoformat()
+        data_fim_str = df_data.isoformat()
+    else:
+        di, df_data = PRESETS[preset_escolhido]
+        if di and df_data:
+            data_inicio_str = di.isoformat()
+            data_fim_str = df_data.isoformat()
+
+    # Label legível do período aplicado
+    if data_inicio_str and data_fim_str:
+        di_fmt = "/".join(reversed(data_inicio_str.split("-")))
+        df_fmt = "/".join(reversed(data_fim_str.split("-")))
+        if data_inicio_str == data_fim_str:
+            st.caption(f"📍 Mostrando dados de **{di_fmt}**")
+        else:
+            st.caption(f"📍 Mostrando dados de **{di_fmt}** até **{df_fmt}**")
+    else:
+        st.caption("📍 Mostrando **todo o histórico** (CLIENTES + arquivo + INDICACOES + arquivo)")
+
     with st.spinner("Calculando ranking..."):
-        data = _zapi_get_ranking()
+        data = _zapi_get_ranking(data_inicio_str, data_fim_str)
 
     if _mostrar_erro_e_parar(data, "(carregando ranking)"):
         return
@@ -454,7 +536,7 @@ def tela_zapi_ranking():
     fontes = totais.get("fontes", {})
     col_a, col_b, col_c, col_d = st.columns(4)
     col_a.metric("👥 Funcionárias distintas", totais.get("funcionarias_distintas", 0))
-    col_b.metric("✅ Clientes que bateram meta", totais.get("clientes_bateu_meta", 0))
+    col_b.metric("✅ Clientes que indicaram", totais.get("clientes_com_indicacoes", 0))
     col_c.metric("📨 Indicações válidas", f"{totais.get('indicacoes_validas', 0):,}".replace(",", "."))
     col_d.metric(
         "📚 Fonte de dados",
@@ -506,7 +588,7 @@ def tela_zapi_ranking():
                   </div>
                   <div style="color: #6b7280; font-size: 11px;">indicações</div>
                   <div style="margin-top: 4px; font-size: 12px; color: #374151;">
-                    {int(r['clientes_bateu_meta'])} cliente(s)
+                    {int(r['clientes_com_indicacoes'])} cliente(s)
                   </div>
                 </div>
                 """.replace(",", "."),
@@ -522,7 +604,7 @@ def tela_zapi_ranking():
     df_tabela = df_tabela.rename(columns={
         "funcionaria": "Funcionária",
         "unidade": "Unidade",
-        "clientes_bateu_meta": "Clientes (bateu meta)",
+        "clientes_com_indicacoes": "Clientes que indicaram",
         "indicacoes_validas": "Indicações válidas",
         "indic_por_cliente": "Indic / cliente",
     })
