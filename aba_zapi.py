@@ -26,7 +26,8 @@ v1 (08/06/2026): tela ⏳ Aguardando validação (operacional, com botões).
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
+from io import BytesIO
 
 TZ_SP = timezone(timedelta(hours=-3))
 
@@ -676,6 +677,227 @@ def tela_zapi_ranking():
 
 
 # ============================================================================
+# TELA: 📨 INDICAÇÕES (v9.5)
+# ============================================================================
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _zapi_get_indicacoes(data_inicio: str = "", data_fim: str = "",
+                          incluir_arquivo: bool = False,
+                          busca: str = "", status: str = "",
+                          unidade: str = "", funcionaria: str = "",
+                          limit: int = 5000):
+    """Chama o endpoint indicacoes com filtros. Cache 2min por combinação."""
+    try:
+        url = st.secrets["APPS_SCRIPT_URL_ZAPI"]
+        token = st.secrets["APPS_SCRIPT_TOKEN_ZAPI"]
+    except Exception:
+        return {"_erro": "Configuração ausente: APPS_SCRIPT_URL_ZAPI / APPS_SCRIPT_TOKEN_ZAPI"}
+
+    params = {"endpoint": "indicacoes", "token": token, "limit": str(limit)}
+    if data_inicio:     params["data_inicio"] = data_inicio
+    if data_fim:        params["data_fim"] = data_fim
+    if incluir_arquivo: params["incluir_arquivo"] = "true"
+    if busca:           params["busca"] = busca
+    if status:          params["status"] = status
+    if unidade:         params["unidade"] = unidade
+    if funcionaria:     params["funcionaria"] = funcionaria
+
+    try:
+        resp = requests.get(url, params=params, timeout=45, allow_redirects=True)
+        if resp.status_code != 200:
+            return {"_erro": f"HTTP {resp.status_code} ao buscar indicações"}
+        data = resp.json()
+        if isinstance(data, dict) and data.get("erro"):
+            return {"_erro": f"Z-API: {data['erro']}"}
+        return data
+    except requests.exceptions.Timeout:
+        return {"_erro": "Apps Script demorou demais (>45s). Reduza o período ou desmarque o arquivo."}
+    except requests.exceptions.RequestException as e:
+        return {"_erro": f"Erro de rede: {e}"}
+    except ValueError:
+        return {"_erro": "Resposta do Apps Script não é JSON válido."}
+
+
+def _xlsx_indicacoes(df_export, sufixo_arquivo):
+    """Gera XLSX em memória pra download das indicações filtradas."""
+    if df_export is None or df_export.empty:
+        st.download_button("📥 Exportar XLSX (sem dados)", data=b"",
+            file_name="vazio.xlsx", disabled=True,
+            key=f"exp_ind_void_{sufixo_arquivo}")
+        return
+
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        d = df_export.copy()
+        for col in d.columns:
+            if pd.api.types.is_datetime64_any_dtype(d[col]):
+                try: d[col] = d[col].dt.tz_localize(None)
+                except (TypeError, AttributeError): pass
+        d.to_excel(writer, index=False, sheet_name="indicacoes")
+
+    ts = datetime.now(TZ_SP).strftime("%Y%m%d-%H%M")
+    fname = f"zapi_indicacoes_{sufixo_arquivo}_{ts}.xlsx"
+    st.download_button(
+        label=f"📥 Exportar XLSX ({len(df_export)} linhas)",
+        data=buf.getvalue(),
+        file_name=fname,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"exp_ind_{sufixo_arquivo}",
+        help=f"Baixa os {len(df_export)} registros filtrados",
+    )
+
+
+def tela_zapi_indicacoes():
+    st.markdown("## 📨 Indicações")
+    st.caption(
+        "Cada linha é um contato indicado por um cliente. "
+        "Inclua o arquivo pra ver histórico completo (3.518 indicações de maio)."
+    )
+
+    # ─── Filtros linha 1: período + arquivo + atualizar ────────────────
+    hoje = date.today()
+    primeiro_mes = hoje.replace(day=1)
+    ult_dia_mp = primeiro_mes - timedelta(days=1)
+    primeiro_mp = ult_dia_mp.replace(day=1)
+
+    PRESETS = {
+        "📅 Todo o período": (None, None),
+        "🗓️ Hoje": (hoje, hoje),
+        "📆 Últimos 7 dias": (hoje - timedelta(days=6), hoje),
+        "🗓️ Últimos 30 dias": (hoje - timedelta(days=29), hoje),
+        "📅 Este mês": (primeiro_mes, hoje),
+        "📆 Mês passado": (primeiro_mp, ult_dia_mp),
+        "🎯 Personalizado": (None, None),
+    }
+
+    col_per, col_arq, col_btn = st.columns([3, 2, 1])
+    with col_per:
+        preset = st.selectbox("Período:", list(PRESETS.keys()), index=0, key="ind_periodo")
+    with col_arq:
+        st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
+        incluir_arq = st.toggle("📦 Incluir arquivo (maio)", value=False, key="ind_inc_arq",
+            help="Ativa pra incluir os 3.518 contatos das campanhas arquivadas")
+    with col_btn:
+        st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
+        if st.button("🔄 Atualizar", key="ind_refresh", use_container_width=True):
+            _zapi_get_indicacoes.clear()
+            st.rerun()
+
+    data_inicio_str = ""
+    data_fim_str = ""
+    if preset == "🎯 Personalizado":
+        cdi, cdf = st.columns(2)
+        with cdi:
+            di = st.date_input("Data início:", value=hoje - timedelta(days=30),
+                max_value=hoje, key="ind_di", format="DD/MM/YYYY")
+        with cdf:
+            df_data = st.date_input("Data fim:", value=hoje,
+                max_value=hoje, key="ind_df", format="DD/MM/YYYY")
+        if di > df_data:
+            st.error("⚠️ Data início não pode ser maior que data fim.")
+            return
+        data_inicio_str = di.isoformat()
+        data_fim_str = df_data.isoformat()
+    else:
+        di, df_data = PRESETS[preset]
+        if di and df_data:
+            data_inicio_str = di.isoformat()
+            data_fim_str = df_data.isoformat()
+
+    # ─── Filtros linha 2: busca + unidade + funcionária ────────────────
+    col_b, col_u, col_f = st.columns([3, 2, 2])
+    with col_b:
+        busca = st.text_input("🔍 Buscar:", placeholder="Nome ou telefone (cliente ou indicado)",
+            key="ind_busca")
+    with col_u:
+        unid_filtro = st.radio("Unidade:", ["Todas", "Mogi", "Suzano"],
+            horizontal=True, key="ind_unid")
+    with col_f:
+        func_filtro = st.text_input("Funcionária:", placeholder="Ex: rafaela",
+            key="ind_func")
+
+    unidade_str = "" if unid_filtro == "Todas" else unid_filtro.lower()
+
+    # ─── Chamada ao endpoint ─────────────────────────────────────────────
+    with st.spinner("Carregando indicações..."):
+        data = _zapi_get_indicacoes(
+            data_inicio=data_inicio_str,
+            data_fim=data_fim_str,
+            incluir_arquivo=incluir_arq,
+            busca=busca.strip(),
+            unidade=unidade_str,
+            funcionaria=func_filtro.strip(),
+            limit=5000,
+        )
+
+    if _mostrar_erro_e_parar(data, "(carregando indicações)"):
+        return
+
+    linhas = data.get("linhas", [])
+    total_filtrado = data.get("total_filtrado", 0)
+    total_planilha = data.get("total_planilha", 0)
+    total_arquivo = data.get("total_arquivo", 0)
+    limit_aplicado = data.get("limit_aplicado", 5000)
+
+    # ─── Cards ───────────────────────────────────────────────────────────
+    base_total = total_planilha + (total_arquivo if incluir_arq else 0)
+    col_a, col_b_card, col_c, col_d = st.columns(4)
+    col_a.metric("📨 Filtradas", f"{total_filtrado:,}".replace(",", "."))
+    col_b_card.metric("📊 Base total",
+        f"{base_total:,}".replace(",", "."),
+        help=f"INDICACOES atual: {total_planilha}\n" +
+             (f"INDICACOES_ARQUIVO: {total_arquivo}" if incluir_arq else "(arquivo não incluído)"))
+    col_c.metric("👁️ Mostrando", f"{len(linhas):,}".replace(",", "."),
+        help=f"Limite por chamada: {limit_aplicado}.")
+    col_d.metric("📦 Arquivo", "Incluído" if incluir_arq else "Não incluído")
+
+    if total_filtrado > len(linhas):
+        st.warning(f"⚠️ {total_filtrado:,} indicações no filtro, mas só {len(linhas):,} exibidas (limite {limit_aplicado}). Refine ou use XLSX.".replace(",", "."))
+
+    if not linhas:
+        st.info("Nenhuma indicação encontrada com os filtros atuais.")
+        return
+
+    # ─── Tabela ──────────────────────────────────────────────────────────
+    df = pd.DataFrame(linhas)
+
+    if "data" in df.columns:
+        df["data_dt"] = pd.to_datetime(df["data"], errors="coerce", utc=True).dt.tz_convert(TZ_SP)
+        df["📅 Data"] = df["data_dt"].dt.strftime("%d/%m/%Y %H:%M")
+
+    col_map = {
+        "📅 Data": "📅 Data",
+        "nome_cliente": "👤 Cliente",
+        "telefone_cliente": "📱 Tel cliente",
+        "funcionaria": "👩 Funcionária",
+        "unidade": "📍 Unidade",
+        "nome_indicado": "🎯 Indicado",
+        "telefone_indicado": "📱 Tel indicado",
+        "status": "✅ Status",
+        "motivo": "📝 Motivo",
+    }
+    cols_display = [c for c in col_map.keys() if c in df.columns or c == "📅 Data"]
+    df_display = df[cols_display].rename(columns=col_map)
+
+    if "📍 Unidade" in df_display.columns:
+        df_display["📍 Unidade"] = df_display["📍 Unidade"].astype(str).str.title()
+    if "👩 Funcionária" in df_display.columns:
+        df_display["👩 Funcionária"] = df_display["👩 Funcionária"].astype(str).str.title()
+
+    st.markdown("---")
+
+    col_exp, _ = st.columns([2, 5])
+    with col_exp:
+        sufixo = preset.split(" ", 1)[-1].lower().replace(" ", "-")
+        sufixo = sufixo.replace("ç", "c").replace("ã", "a").replace("é", "e")[:20]
+        if unid_filtro != "Todas":
+            sufixo += f"_{unid_filtro.lower()}"
+        _xlsx_indicacoes(df_display, sufixo)
+
+    st.dataframe(df_display, use_container_width=True, hide_index=True, height=520)
+
+
+# ============================================================================
 # ENTRY POINTS — chamados pelo dashboard_maislaser.py dentro da tab
 # ============================================================================
 
@@ -687,3 +909,8 @@ def render_aba_zapi_aguardando():
 def render_aba_zapi_ranking():
     """Renderiza a tela de ranking de funcionárias."""
     tela_zapi_ranking()
+
+
+def render_aba_zapi_indicacoes():
+    """Renderiza a tela de indicações com filtros e export."""
+    tela_zapi_indicacoes()
