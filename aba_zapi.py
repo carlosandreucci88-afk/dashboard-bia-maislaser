@@ -898,6 +898,222 @@ def tela_zapi_indicacoes():
 
 
 # ============================================================================
+# TELA: 📊 MÉTRICAS Z-API (v9.6)
+# ============================================================================
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _zapi_get_metricas():
+    """Chama o endpoint metricas_funil. Cache 5min (operação pesada)."""
+    try:
+        url = st.secrets["APPS_SCRIPT_URL_ZAPI"]
+        token = st.secrets["APPS_SCRIPT_TOKEN_ZAPI"]
+    except Exception:
+        return {"_erro": "Configuração ausente: APPS_SCRIPT_URL_ZAPI / APPS_SCRIPT_TOKEN_ZAPI"}
+
+    try:
+        resp = requests.get(
+            url,
+            params={"endpoint": "metricas_funil", "token": token},
+            timeout=45, allow_redirects=True,
+        )
+        if resp.status_code != 200:
+            return {"_erro": f"HTTP {resp.status_code} ao calcular métricas"}
+        data = resp.json()
+        if isinstance(data, dict) and data.get("erro"):
+            return {"_erro": f"Z-API: {data['erro']}"}
+        return data
+    except requests.exceptions.Timeout:
+        return {"_erro": "Apps Script demorou demais (>45s)"}
+    except requests.exceptions.RequestException as e:
+        return {"_erro": f"Erro de rede: {e}"}
+    except ValueError:
+        return {"_erro": "Resposta do Apps Script não é JSON válido."}
+
+
+def tela_zapi_metricas():
+    st.markdown("## 📊 Métricas Z-API — Funil & Conversão")
+    st.caption(
+        "Visão completa do programa Indique e Ganhe: onde os clientes "
+        "convertem, onde travam, e quanto tempo leva."
+    )
+
+    col_btn, _ = st.columns([1, 5])
+    with col_btn:
+        if st.button("🔄 Atualizar", key="met_refresh", use_container_width=True):
+            _zapi_get_metricas.clear()
+            st.rerun()
+
+    with st.spinner("Calculando métricas do funil..."):
+        data = _zapi_get_metricas()
+
+    if _mostrar_erro_e_parar(data, "(carregando métricas)"):
+        return
+
+    total = data.get("total_convidados", 0)
+    funil = data.get("funil", {})
+    drop = data.get("drop_off", {})
+    priv = data.get("privacidade", {})
+    por_unid = data.get("por_unidade", {})
+    tempos = data.get("tempos", {}).get("cadastro_ate_meta", {})
+    top5 = data.get("top5_conversao", [])
+    fontes = data.get("fontes", {})
+
+    n_voucher = funil.get("n4_recebeu_voucher", {}).get("total", 0)
+    pct_voucher = funil.get("n4_recebeu_voucher", {}).get("pct", 0)
+
+    # ─── 4 CARDS MACRO ───
+    col_a, col_b, col_c, col_d = st.columns(4)
+    col_a.metric("👥 Convidados", f"{total:,}".replace(",", "."))
+    col_b.metric("🎁 Voucher liberado", f"{n_voucher:,}".replace(",", "."),
+        delta=f"{pct_voucher}% conversão", delta_color="normal")
+    col_c.metric("⏱️ Mediana cadastro → meta", f"{tempos.get('mediana_h', 0):.1f}h",
+        help=f"Amostra: {tempos.get('amostra', 0)} clientes com timestamps válidos")
+    col_d.metric("💤 Desistiram", f"{drop.get('desistiu_sem_resp', 0):,}".replace(",", "."),
+        delta=f"-{round(drop.get('desistiu_sem_resp', 0)/total*100, 1) if total else 0}%",
+        delta_color="inverse",
+        help="Pararam de responder após cobrança (_COBRADOSEMRESPOSTA)")
+
+    st.markdown("---")
+
+    # ─── FUNIL VISUAL (barras horizontais) ───
+    st.markdown("### 🔻 Funil de conversão")
+
+    niveis = [
+        ("👥 Convidados",        funil.get("n1_convidados", {})),
+        ("✅ Escolheu privacidade", funil.get("n2_escolheu_priv", {})),
+        ("🎯 Bateu meta (20)",   funil.get("n3_bateu_meta", {})),
+        ("🎁 Recebeu voucher",   funil.get("n4_recebeu_voucher", {})),
+    ]
+
+    for label, dados_nivel in niveis:
+        n = dados_nivel.get("total", 0)
+        pct = dados_nivel.get("pct", 0)
+        # Barra com largura proporcional
+        st.markdown(
+            f"""<div style="margin: 8px 0;">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                    <strong>{label}</strong>
+                    <span style="color: #5BC0BE; font-weight: 700;">{n:,} ({pct}%)</span>
+                </div>
+                <div style="background: #e5e7eb; border-radius: 8px; height: 28px; overflow: hidden;">
+                    <div style="background: linear-gradient(90deg, #5BC0BE 0%, #4AA8A6 100%);
+                                width: {pct}%; height: 100%; border-radius: 8px;
+                                transition: width 0.6s ease;"></div>
+                </div>
+            </div>""".replace(",", "."),
+            unsafe_allow_html=True
+        )
+
+    st.markdown("---")
+
+    # ─── DROP-OFF — onde perde clientes ───
+    st.markdown("### 📉 Onde perde clientes")
+
+    drops = [
+        ("💤 Desistiu sem responder", drop.get("desistiu_sem_resp", 0), "🚨"),
+        ("⏸️ Travado em validação",   drop.get("travados_val", 0), ""),
+        ("🔒 Travado em privacidade", drop.get("travados_priv", 0), ""),
+        ("📞 Travado em contatos",    drop.get("travados_cont", 0), ""),
+        ("🚫 Encerrado (invalid. 2x)", drop.get("encerrados", 0), ""),
+    ]
+    drops.sort(key=lambda x: x[1], reverse=True)
+
+    cols = st.columns(len(drops))
+    for col, (label, qtd, badge) in zip(cols, drops):
+        pct_d = round(qtd/total*100, 1) if total else 0
+        col.metric(label, qtd, delta=f"{pct_d}%" if qtd else "0%",
+            delta_color="inverse" if qtd > 5 else "off")
+        if badge:
+            col.caption(f"{badge} maior gargalo")
+
+    st.markdown("---")
+
+    # ─── COMPARAÇÃO MOGI vs SUZANO ───
+    st.markdown("### 🏬 Comparação entre unidades")
+
+    col_m, col_s = st.columns(2)
+    for col, key, nome in [(col_m, "mogi", "🏙️ Mogi"), (col_s, "suzano", "🌆 Suzano")]:
+        u = por_unid.get(key, {})
+        utot = u.get("total", 0)
+        ufin = u.get("finalizados", 0)
+        upct = round(ufin/utot*100, 1) if utot else 0
+        col.markdown(f"#### {nome}")
+        col.metric("Total convidados", utot)
+        col.metric("Voucher liberado", ufin, delta=f"{upct}% conversão")
+        col.metric("Desistiram", u.get("desistiu", 0))
+        col.metric("Encerrados", u.get("encerrados", 0))
+
+    st.markdown("---")
+
+    # ─── PRIVACIDADE + TEMPOS ───
+    col_p, col_t = st.columns(2)
+
+    with col_p:
+        st.markdown("### 🔐 Privacidade")
+        ident = priv.get("identificado", 0)
+        anon = priv.get("anonimo", 0)
+        vazio = priv.get("vazio", 0)
+        pct_anon = priv.get("pct_anonimo_dentre_decididos", 0)
+
+        st.markdown(f"""
+        - **Identificadas (1):** {ident} cliente{'s' if ident != 1 else ''}
+        - **Anônimas (2):** {anon} cliente{'s' if anon != 1 else ''}
+        - **Sem registro:** {vazio} cliente{'s' if vazio != 1 else ''} *(antigos pré-v9)*
+
+        Entre quem escolheu: **{pct_anon}% optaram pelo modo anônimo.**
+        """)
+
+        if pct_anon > 50:
+            st.info(f"💡 Maioria prefere anonimato — talvez seja sinal de que clientes querem indicar mas não querem que amigos saibam.")
+
+    with col_t:
+        st.markdown("### ⏱️ Tempos médios")
+        amostra = tempos.get('amostra', 0)
+        if amostra > 0:
+            med = tempos.get('mediana_h', 0)
+            mean_ = tempos.get('media_h', 0)
+            mn = tempos.get('min_h', 0)
+            mx = tempos.get('max_h', 0)
+            st.markdown(f"""
+            **Cadastro → bater meta** *(amostra: {amostra} clientes)*
+
+            - **Mediana:** {med:.1f}h ⚡
+            - **Média:** {mean_:.1f}h
+            - **Mais rápido:** {mn:.2f}h ({int(mn*60)}min)
+            - **Mais demorado:** {mx:.1f}h
+            """)
+            if med < 1:
+                st.success(f"🚀 Engajamento muito rápido — metade dos clientes completam em menos de 1h.")
+        else:
+            st.info("Sem dados suficientes (precisa coluna DATA BATEU META preenchida).")
+
+    st.markdown("---")
+
+    # ─── TOP 5 CONVERSÃO ───
+    st.markdown("### 🏆 Top 5 funcionárias por taxa de conversão")
+    st.caption("Funcionárias com **≥3 convidados**, ordenadas por % de voucher liberado.")
+
+    if top5:
+        df_top = pd.DataFrame(top5)
+        df_top["📊 Conversão"] = df_top["taxa_conversao"].apply(lambda x: f"{x:.1f}%")
+        df_top = df_top[["funcionaria", "unidade", "convidados", "finalizados", "📊 Conversão"]]
+        df_top.columns = ["👩 Funcionária", "📍 Unidade", "👥 Convidados", "🎁 Vouchers", "📊 Conversão"]
+        df_top["📍 Unidade"] = df_top["📍 Unidade"].astype(str).str.title()
+        df_top.index = df_top.index + 1
+        df_top.index.name = "🏅"
+        st.dataframe(df_top, use_container_width=True)
+    else:
+        st.info("Ninguém atingiu amostra mínima (3 convidados) ainda.")
+
+    # ─── Fonte ───
+    st.caption(
+        f"📚 Fonte: {fontes.get('clientes_ativos', 0)} clientes ativos + "
+        f"{fontes.get('clientes_arquivo', 0)} arquivados. "
+        f"Cache 5min (clica em 🔄 Atualizar pra forçar refresh)."
+    )
+
+
+# ============================================================================
 # ENTRY POINTS — chamados pelo dashboard_maislaser.py dentro da tab
 # ============================================================================
 
@@ -914,3 +1130,8 @@ def render_aba_zapi_ranking():
 def render_aba_zapi_indicacoes():
     """Renderiza a tela de indicações com filtros e export."""
     tela_zapi_indicacoes()
+
+
+def render_aba_zapi_metricas():
+    """Renderiza a tela de métricas do funil Z-API."""
+    tela_zapi_metricas()
