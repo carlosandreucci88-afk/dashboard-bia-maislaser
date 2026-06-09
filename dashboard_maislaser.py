@@ -371,59 +371,57 @@ def check_password():
             header[data-testid="stHeader"] {visibility: hidden;}
             section[data-testid="stSidebar"] {display: none;}
             section.main > div.block-container {
-                padding-top: 6vh !important;
-                max-width: 460px !important;
-                margin: 0 auto;
+                padding-top: 8vh !important;
             }
-            .bia-login-header { text-align: center; margin-bottom: 28px; }
-            .bia-login-header img { max-width: 220px; height: auto; }
-            .bia-login-header p {
-                color: #6b7280;
-                margin: 14px 0 0 0;
-                font-size: 12px;
-                font-weight: 600;
-                letter-spacing: 2px;
-                text-transform: uppercase;
-            }
+            .bia-login-header { text-align: center; margin-bottom: 24px; }
+            .bia-login-header img { max-width: 200px; height: auto; }
             /* Esconde a label "Senha" — placeholder já indica */
             div[data-testid="stTextInput"] label { display: none; }
-            /* Visual de card aplicado direto no form do Streamlit */
+            /* Visual de card no form do Streamlit */
             div[data-testid="stForm"] {
                 background: white;
-                padding: 36px 32px;
-                border-radius: 18px;
-                box-shadow: 0 10px 30px rgba(91, 192, 190, 0.15);
+                padding: 32px 28px;
+                border-radius: 16px;
+                box-shadow: 0 8px 28px rgba(91, 192, 190, 0.18);
                 border: 1px solid #e5e7eb;
             }
             div[data-testid="stForm"] .stCheckbox {
                 margin-top: 4px;
-                margin-bottom: 12px;
+                margin-bottom: 10px;
+            }
+            /* Botão Entrar com altura confortável */
+            div[data-testid="stForm"] button[kind="primary"] {
+                height: 44px;
+                font-weight: 600;
             }
         </style>
     """, unsafe_allow_html=True)
 
-    # Header: só o logo (sem subtitle)
-    st.markdown(f"""
-        <div class="bia-login-header">
-            {_get_logo_html()}
-        </div>
-    """, unsafe_allow_html=True)
+    # Centralização horizontal via columns — card no terço do meio
+    col_esq, col_meio, col_dir = st.columns([1, 1, 1])
+    with col_meio:
+        # Logo centralizado
+        st.markdown(f"""
+            <div class="bia-login-header">
+                {_get_logo_html()}
+            </div>
+        """, unsafe_allow_html=True)
 
-    # Form do Streamlit — o CSS aplica visual de card direto no <form>
-    with st.form("login_form", clear_on_submit=False):
-        senha = st.text_input("Senha", type="password", placeholder="Digite a senha")
-        lembrar = st.checkbox("Lembrar de mim neste dispositivo", value=True,
-            help="Se ativo, você fica logado mesmo depois de fechar o navegador.")
-        submit = st.form_submit_button("Entrar", type="primary", use_container_width=True)
+        # Form do Streamlit — CSS aplica visual de card
+        with st.form("login_form", clear_on_submit=False):
+            senha = st.text_input("Senha", type="password", placeholder="Digite a senha")
+            lembrar = st.checkbox("Lembrar de mim neste dispositivo", value=True,
+                help="Se ativo, você fica logado mesmo depois de fechar o navegador.")
+            submit = st.form_submit_button("Entrar", type="primary", use_container_width=True)
 
-    if submit:
-        if senha == st.secrets.get("DASHBOARD_PASSWORD", "maislaser"):
-            st.session_state["password_correct"] = True
-            if lembrar:
-                st.query_params["t"] = _expected_login_token()
-            st.rerun()
-        else:
-            st.error("❌ Senha incorreta")
+        if submit:
+            if senha == st.secrets.get("DASHBOARD_PASSWORD", "maislaser"):
+                st.session_state["password_correct"] = True
+                if lembrar:
+                    st.query_params["t"] = _expected_login_token()
+                st.rerun()
+            else:
+                st.error("❌ Senha incorreta")
 
     return False
 
