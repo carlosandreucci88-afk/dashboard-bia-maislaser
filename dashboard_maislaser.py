@@ -144,6 +144,25 @@ h3 { font-size: 18px !important; }
     border-color: rgba(255,255,255,0.5) !important;
 }
 
+/* Botão ATIVO da sidebar (kind="primary") — efeito afundado/pressionado */
+[data-testid="stSidebar"] .stButton button[kind="primary"] {
+    background: rgba(0, 0, 0, 0.18) !important;
+    color: white !important;
+    border: 1px solid rgba(255,255,255,0.45) !important;
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.28),
+                inset 0 -1px 0 rgba(255,255,255,0.1) !important;
+    transform: translateY(1px);
+}
+[data-testid="stSidebar"] .stButton button[kind="primary"]:hover {
+    background: rgba(0, 0, 0, 0.22) !important;
+    border-color: rgba(255,255,255,0.6) !important;
+}
+[data-testid="stSidebar"] .stButton button[kind="primary"]:focus {
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.28),
+                inset 0 -1px 0 rgba(255,255,255,0.1),
+                0 0 0 2px rgba(255,255,255,0.3) !important;
+}
+
 /* Info da sidebar — bloco de versão/modelo */
 .sidebar-info { background: rgba(255,255,255,0.15); border-radius: 10px; padding: 10px 14px; margin: 6px 0; backdrop-filter: blur(10px); }
 .sidebar-info-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; opacity: 0.85; margin-bottom: 2px; }
