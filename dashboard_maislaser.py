@@ -28,7 +28,7 @@ from aba_confirmacao import (
     tela_confirmacao_metricas,
 )
 from aba_disparador import render_aba_disparador
-from aba_zapi import render_aba_zapi_aguardando, render_aba_zapi_ranking, render_aba_zapi_indicacoes
+from aba_zapi import render_aba_zapi_aguardando, render_aba_zapi_ranking, render_aba_zapi_indicacoes, render_aba_zapi_metricas
 
 
 # ============================================================================
@@ -1833,13 +1833,7 @@ def main():
             render_aba_zapi_ranking()
 
         with tab_metr:
-            placeholder_aba(
-                "📊 Métricas Z-API",
-                "Funil completo (cadastrado → respondeu privacidade → mandou contatos → "
-                "validada → voucher liberado), conversão por etapa, tempo médio até voucher. "
-                "Próxima entrega da Fase Z.",
-                "Fase Z.2 — em breve"
-            )
+            render_aba_zapi_metricas()
 
     if auto_refresh:
         time.sleep(30)
