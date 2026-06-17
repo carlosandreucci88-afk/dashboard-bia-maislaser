@@ -29,6 +29,7 @@ from aba_confirmacao import (
 )
 from aba_disparador import render_aba_disparador
 from aba_zapi import render_aba_zapi_aguardando, render_aba_zapi_ranking, render_aba_zapi_indicacoes, render_aba_zapi_metricas, render_aba_zapi_clientes
+from aba_pendencias import render_aba_pendencias
 
 
 # ============================================================================
@@ -1749,7 +1750,8 @@ def main():
                 st.rerun()
             renderizar_conversa(st.session_state['conversa_selecionada'], df_conv, df_leads, df_agend, df_clientes_base)
         else:
-            tab1, tab2, tab3, tab_base, tab4, tab5 = st.tabs([
+            tab_pend, tab1, tab2, tab3, tab_base, tab4, tab5 = st.tabs([
+                "⚠️ Pendências",
                 "💬 Conversas",
                 "🔥 Transferências",
                 "📅 Agendamentos",
@@ -1757,6 +1759,9 @@ def main():
                 "📈 Métricas",
                 "⚙️ Configurações",
             ])
+
+            with tab_pend:
+                render_aba_pendencias()
 
             with tab1:
                 tela_conversas(df_conv, df_leads, df_agend, df_clientes_base)
