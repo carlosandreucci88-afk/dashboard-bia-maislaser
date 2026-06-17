@@ -62,7 +62,7 @@ def _carregar_pendencias_bia_disparos():
     try:
         result = sb.table("bia_disparos").select(
             "id, telefone, nome_indicado, nome_cadastrante, unidade, status, "
-            "desfecho_em, ultima_notif_recepcao, fila_em, criado_em"
+            "desfecho_em, ultima_notif_recepcao, fila_em, disparado_em"
         ).in_("status", ["HANDOFF", "HANDOFF_MED", "HANDOFF_MEDICO"]) \
          .is_("contatado_em", "null") \
          .order("desfecho_em", desc=True) \
@@ -73,12 +73,12 @@ def _carregar_pendencias_bia_disparos():
             return df
 
         # Parse timestamps tz-aware
-        for col in ('desfecho_em', 'ultima_notif_recepcao', 'fila_em', 'criado_em'):
+        for col in ('desfecho_em', 'ultima_notif_recepcao', 'fila_em', 'disparado_em'):
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors='coerce', utc=True)
 
         # Coluna unificada "quando virou pendência" (com fallback)
-        df['quando'] = df['desfecho_em'].fillna(df['fila_em']).fillna(df['criado_em'])
+        df['quando'] = df['desfecho_em'].fillna(df['fila_em']).fillna(df['disparado_em'])
         try:
             df['quando_sp'] = df['quando'].dt.tz_convert(TZ_SP)
         except Exception:
