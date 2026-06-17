@@ -310,6 +310,28 @@ hr { border-color: var(--border-light) !important; margin: 1.5rem 0 !important; 
 .conv-name { font-weight: 600; color: var(--text); }
 .conv-phone { font-size: 12px; color: var(--text-secondary); }
 .conv-meta { font-size: 12px; color: var(--text-muted); }
+
+/* ===== KILL SWITCH (sidebar) ===== */
+.kill-switch-box {
+    background: rgba(255,255,255,0.15);
+    border: 1px solid rgba(255,255,255,0.28);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin: 6px 0 10px 0;
+    backdrop-filter: blur(10px);
+}
+.kill-switch-box.paused {
+    background: rgba(239, 68, 68, 0.32);
+    border: 1px solid rgba(255,255,255,0.6);
+    animation: kspulse 1.8s ease-in-out infinite;
+}
+@keyframes kspulse {
+    0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.6); }
+    50%     { box-shadow: 0 0 0 6px rgba(239,68,68,0); }
+}
+.kill-switch-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; opacity: 0.85; margin-bottom: 4px; color: white !important; }
+.kill-switch-status { font-size: 15px; font-weight: 700; color: white !important; }
+.kill-switch-sub { font-size: 11px; opacity: 0.85; margin-top: 2px; color: white !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -566,6 +588,25 @@ def salvar_configuracoes(modo_manutencao,
         return True
     except Exception as e:
         st.error(f"Erro ao salvar: {e}")
+        return False
+
+
+def set_modo_manutencao(novo_estado: bool) -> bool:
+    """Toggle do kill switch — altera SÓ o campo modo_manutencao.
+
+    Usado pelo botão da sidebar. Mais leve que salvar_configuracoes (que faz
+    upsert com vários campos). UPDATE direto, sem mexer em coordenadora/recepção.
+    """
+    sb = get_supabase()
+    try:
+        sb.table("configuracoes").update({
+            "modo_manutencao": novo_estado,
+            "atualizado_em": datetime.now(TZ_SP).isoformat(),
+        }).eq("id", 1).execute()
+        carregar_configuracoes.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao alterar modo manutenção: {e}")
         return False
 
 
@@ -1706,6 +1747,39 @@ def main():
         auto_refresh = st.checkbox("Auto-refresh a cada 30s", value=False)
 
         st.markdown("<br>", unsafe_allow_html=True)
+
+        # ─── KILL SWITCH (só Bia) ───────────────────────────────
+        if robo == 'bia':
+            try:
+                _cfg_ks = carregar_configuracoes()
+                _bia_pausada = bool(_cfg_ks.get('modo_manutencao', False)) if _cfg_ks else False
+            except Exception:
+                _bia_pausada = False
+
+            _ks_class = "kill-switch-box paused" if _bia_pausada else "kill-switch-box"
+            _ks_status = "🔴 Bia PAUSADA" if _bia_pausada else "🟢 Bia ATIVA"
+            _ks_sub = "Crons e MVP parados" if _bia_pausada else "Recebendo mensagens"
+
+            st.markdown(f"""
+            <div class="{_ks_class}">
+                <div class="kill-switch-label">Status do robô</div>
+                <div class="kill-switch-status">{_ks_status}</div>
+                <div class="kill-switch-sub">{_ks_sub}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            _btn_label = "▶️ Reativar Bia" if _bia_pausada else "⏸️ Pausar Bia"
+            _btn_type = "primary" if _bia_pausada else "secondary"
+            if st.button(_btn_label, key="kill_switch_btn",
+                         type=_btn_type, use_container_width=True):
+                if set_modo_manutencao(not _bia_pausada):
+                    st.toast(
+                        "Bia reativada" if _bia_pausada else "Bia pausada",
+                        icon="✅" if _bia_pausada else "⏸️"
+                    )
+                    st.rerun()
+
+            st.markdown("<br>", unsafe_allow_html=True)
 
         # ─── Seletor de robô ────────────────────────────────────
         st.markdown(
