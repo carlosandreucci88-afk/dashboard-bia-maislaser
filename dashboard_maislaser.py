@@ -524,20 +524,34 @@ def carregar_configuracoes():
         return {}
 
 
-def salvar_configuracoes(mogi_telefone, mogi_nome, suzano_telefone, suzano_nome, modo_manutencao,
+def salvar_configuracoes(modo_manutencao,
                           recepcao_mogi_telefone=None, recepcao_mogi_nome=None,
-                          recepcao_suzano_telefone=None, recepcao_suzano_nome=None):
+                          recepcao_suzano_telefone=None, recepcao_suzano_nome=None,
+                          mogi_telefone=None, mogi_nome=None,
+                          suzano_telefone=None, suzano_nome=None):
+    """Salva configs no Supabase.
+
+    NOTA: os campos *mogi_telefone/_nome e suzano_telefone/_nome (coordenadoras)
+    são legado da Bia v3.x — nenhum workflow da Bia v5 lê eles. Mantidos como
+    opcionais pra não dropar a coluna do banco. O UI atual não os preenche mais.
+    """
     sb = get_supabase()
     try:
         dados = {
             "id": 1,
-            "mogi_telefone": mogi_telefone,
-            "mogi_nome": mogi_nome,
-            "suzano_telefone": suzano_telefone,
-            "suzano_nome": suzano_nome,
             "modo_manutencao": modo_manutencao,
             "atualizado_em": datetime.now(TZ_SP).isoformat(),
         }
+        # Coordenadoras (legado v3) — só grava se vier preenchido
+        if mogi_telefone is not None:
+            dados["mogi_telefone"] = mogi_telefone
+        if mogi_nome is not None:
+            dados["mogi_nome"] = mogi_nome
+        if suzano_telefone is not None:
+            dados["suzano_telefone"] = suzano_telefone
+        if suzano_nome is not None:
+            dados["suzano_nome"] = suzano_nome
+        # Recepção (Bia v5)
         if recepcao_mogi_telefone is not None:
             dados["recepcao_mogi_telefone"] = recepcao_mogi_telefone
         if recepcao_mogi_nome is not None:
@@ -1600,24 +1614,11 @@ def tela_configuracoes():
 
     st.success("✅ Configurações integradas ao Supabase — ao salvar, o n8n vai buscar os números automaticamente.")
 
-    st.markdown("### 📞 WhatsApp das coordenadoras de vendas")
-    st.caption("Quando a Bia disparar [TRANSFERIR_COORDENADORA], ela vai mandar um aviso pra esses números.")
-
-    col_c1, col_c2 = st.columns(2)
-    with col_c1:
-        st.markdown("**Mogi das Cruzes**")
-        coord_mogi = st.text_input("Número (com DDD, só dígitos)", value=cfg.get('mogi_telefone', ''),
-            key='input_coord_mogi', placeholder="11999999999")
-        nome_coord_mogi = st.text_input("Nome da coordenadora", value=cfg.get('mogi_nome', ''),
-            key='input_nome_coord_mogi', placeholder="Ex: Beatriz")
-    with col_c2:
-        st.markdown("**Suzano**")
-        coord_suzano = st.text_input("Número (com DDD, só dígitos)", value=cfg.get('suzano_telefone', ''),
-            key='input_coord_suzano', placeholder="11999999999")
-        nome_coord_suzano = st.text_input("Nome da coordenadora", value=cfg.get('suzano_nome', ''),
-            key='input_nome_coord_suzano', placeholder="Ex: Rafaela")
-
-    st.divider()
+    st.info(
+        "ℹ️ A Bia v5 não notifica mais a recepção por WhatsApp — a fila de casos "
+        "abertos fica na aba **⚠️ Pendências**. Os números abaixo são usados só "
+        "como fallback caso algum dia o nó *Notifica Recepção* seja reativado."
+    )
 
     st.markdown("### 🙋 WhatsApp das recepções")
     st.caption("Quando a Bia disparar [TRANSFERIR_HUMANO] (reagendamento, cliente confuso, restrição médica), o aviso vai pra esses números.")
@@ -1648,8 +1649,6 @@ def tela_configuracoes():
 
     if st.button("💾 Salvar no Supabase", type="primary"):
         ok = salvar_configuracoes(
-            mogi_telefone=coord_mogi, mogi_nome=nome_coord_mogi,
-            suzano_telefone=coord_suzano, suzano_nome=nome_coord_suzano,
             modo_manutencao=manutencao,
             recepcao_mogi_telefone=recep_mogi, recepcao_mogi_nome=nome_recep_mogi,
             recepcao_suzano_telefone=recep_suzano, recepcao_suzano_nome=nome_recep_suzano,
