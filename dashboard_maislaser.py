@@ -499,7 +499,7 @@ def carregar_conversas(dias_atras=7):
         result = sb.table("conversas").select("*").gte("criado_em", data_limite).order("criado_em", desc=True).limit(5000).execute()
         df = pd.DataFrame(result.data)
         if not df.empty:
-            df['criado_em'] = pd.to_datetime(df['criado_em'])
+            df['criado_em'] = pd.to_datetime(df['criado_em'], format='ISO8601')
         return df
     except Exception as e:
         st.error(f"Erro ao carregar conversas: {e}")
@@ -513,7 +513,7 @@ def carregar_leads():
         result = sb.table("leads").select("*").order("criado_em", desc=True).limit(1000).execute()
         df = pd.DataFrame(result.data)
         if not df.empty:
-            df['criado_em'] = pd.to_datetime(df['criado_em'])
+            df['criado_em'] = pd.to_datetime(df['criado_em'], format='ISO8601')
         return df
     except Exception as e:
         st.error(f"Erro ao carregar leads: {e}")
@@ -617,8 +617,8 @@ def carregar_agendamentos():
         result = sb.table("agendamentos").select("*").order("data_hora", desc=True).limit(500).execute()
         df = pd.DataFrame(result.data)
         if not df.empty:
-            df['data_hora'] = pd.to_datetime(df['data_hora'])
-            df['criado_em'] = pd.to_datetime(df['criado_em'])
+            df['data_hora'] = pd.to_datetime(df['data_hora'], format='ISO8601')
+            df['criado_em'] = pd.to_datetime(df['criado_em'], format='ISO8601')
         return df
     except Exception as e:
         st.error(f"Erro ao carregar agendamentos: {e}")
@@ -1196,15 +1196,6 @@ def tela_transferencias(df_leads, df_conv):
 
         st.markdown("---")
 
-
-# ─────────── ABA 3: 📅 AGENDAMENTOS (mantida) ───────────
-
-# ═══════════════════════════════════════════════════════════════════════════
-# PATCH — dashboard_maislaser.py
-# Substituir a função `tela_agendamentos` inteira por essa versão.
-# Localizar no arquivo original em torno da linha 712:
-#   def tela_agendamentos(df_agend, df_leads, df_conv):
-# ═══════════════════════════════════════════════════════════════════════════
 
 # ─────────── ABA 3: 📅 AGENDAMENTOS (status derivado dos campos reais) ───────────
 
