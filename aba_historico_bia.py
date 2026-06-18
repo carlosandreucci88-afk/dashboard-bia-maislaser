@@ -129,16 +129,20 @@ def _contar_disparos_por_status(campanha_ids_tuple):
             .in_("campanha_id", list(campanha_ids_tuple))
             .execute()
         )
+        STATUS_EFETIVAMENTE_DISPARADO = {"DISPARADO", "RESPONDEU", "IGNOROU", "SKIP_BASE",
+                                          "ERRO_NUMERO_INVALIDO", "BLOQUEADO_PELO_INDICADO"}
         contagem = {}
         for row in result.data or []:
             cid = row.get("campanha_id")
             if not cid:
                 continue
             if cid not in contagem:
-                contagem[cid] = {"_total": 0, "_respondeu": 0}
+                contagem[cid] = {"_total": 0, "_respondeu": 0, "_disparados_real": 0}
             status = (row.get("status") or "DESCONHECIDO").upper()
             contagem[cid][status] = contagem[cid].get(status, 0) + 1
             contagem[cid]["_total"] += 1
+            if status in STATUS_EFETIVAMENTE_DISPARADO:
+                contagem[cid]["_disparados_real"] += 1
             if row.get("respondeu_em"):
                 contagem[cid]["_respondeu"] += 1
         return contagem
@@ -205,7 +209,7 @@ def render_aba_historico_bia():
 
     # Enriquece o df com contagens
     df_lotes["total_disparados_supabase"] = df_lotes["campanha_id"].apply(
-        lambda cid: contagem.get(cid, {}).get("_total", 0)
+        lambda cid: contagem.get(cid, {}).get("_disparados_real", 0)
     )
     df_lotes["total_respondeu_supabase"] = df_lotes["campanha_id"].apply(
         lambda cid: contagem.get(cid, {}).get("_respondeu", 0)
