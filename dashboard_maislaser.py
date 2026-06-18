@@ -31,6 +31,7 @@ from aba_disparador import render_aba_disparador
 from aba_zapi import render_aba_zapi_aguardando, render_aba_zapi_ranking, render_aba_zapi_indicacoes, render_aba_zapi_metricas, render_aba_zapi_clientes
 from aba_pendencias import render_aba_pendencias
 from aba_historico_disparos import render_aba_historico_disparos
+from aba_historico_bia import render_aba_historico_bia
 
 
 # ============================================================================
@@ -1939,14 +1940,14 @@ def main():
         with tab_metr:
             tela_confirmacao_metricas()
 
-    elif robo == 'zapi':
+   elif robo == 'zapi':
         # ─── Tabs do Robô Z-API Indicações ──────────────────────
-        # v1 (08/06/2026): só 1 tab funcional — ⏳ Aguardando validação.
-        # As outras telas (clientes, indicações, ranking, métricas) virão depois.
-        tab_aguard, tab_clientes, tab_indic, tab_rank, tab_metr = st.tabs([
+        # v9.8 (18/06/2026): adicionada tab Histórico Bia entre Indicações e Ranking
+        tab_aguard, tab_clientes, tab_indic, tab_hist_bia, tab_rank, tab_metr = st.tabs([
             "⏳ Aguardando validação",
             "👥 Clientes no programa",
             "📨 Indicações",
+            "📜 Histórico Bia",
             "🏆 Ranking funcionárias",
             "📊 Métricas",
         ])
@@ -1960,12 +1961,15 @@ def main():
         with tab_indic:
             render_aba_zapi_indicacoes()
 
+        with tab_hist_bia:
+            render_aba_historico_bia()
+
         with tab_rank:
             render_aba_zapi_ranking()
 
         with tab_metr:
             render_aba_zapi_metricas()
-
+            
     if auto_refresh:
         time.sleep(30)
         st.cache_data.clear()
