@@ -1940,7 +1940,7 @@ def main():
         with tab_metr:
             tela_confirmacao_metricas()
 
-   elif robo == 'zapi':
+    elif robo == 'zapi':
         # ─── Tabs do Robô Z-API Indicações ──────────────────────
         # v9.8 (18/06/2026): adicionada tab Histórico Bia entre Indicações e Ranking
         tab_aguard, tab_clientes, tab_indic, tab_hist_bia, tab_rank, tab_metr = st.tabs([
@@ -1969,7 +1969,7 @@ def main():
 
         with tab_metr:
             render_aba_zapi_metricas()
-            
+
     if auto_refresh:
         time.sleep(30)
         st.cache_data.clear()
