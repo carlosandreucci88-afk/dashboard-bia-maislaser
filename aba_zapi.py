@@ -1,31 +1,44 @@
 """
 ==============================================================================
-ABA Z-API INDICAÇÕES — Robô Z-API (Apps Script v9.1)
+ABA Z-API INDICAÇÕES — Robô Z-API (Apps Script v9.8)
 ==============================================================================
-Conecta o dashboard aos endpoints read-only + ação do Apps Script do Z-API:
+Conecta o dashboard aos endpoints do Apps Script do Z-API:
 
   GET endpoints (leitura):
     /?endpoint=ping              → healthcheck
     /?endpoint=clientes          → todas as linhas de CLIENTES
     /?endpoint=indicacoes&limit  → últimas N indicações
     /?endpoint=validacao         → pendentes de validação enriquecidas
+                                    (v9.8: agora retorna modo + bia_puxou_em)
     /?endpoint=contatos_cliente&campanha_id=ID → 20 contatos da campanha
     /?endpoint=funcionarias      → ranking
+    /?endpoint=funcionarias_real → ranking calculado em tempo real
+    /?endpoint=metricas_funil    → funil completo
     /?endpoint=stats             → métricas agregadas leves
+    /?endpoint=get_default_modo  → v9.8: lê toggle bia_default_modo_auto
 
-  AÇÃO (também GET, com query params):
-    /?endpoint=marcar_validacao&tel=...&decisao=VALIDADO|INVALIDADO
-      → marca o dropdown na aba certa. O trigger processarValidacoes (5min)
-        que já existe no Apps Script é quem dispara voucher / mensagem.
+  AÇÕES (também GET, com query params):
+    /?endpoint=marcar_validacao&tel=...&decisao=VALIDADO|INVALIDADO&modo=AUTO|MANUAL
+      → marca o dropdown na aba certa. Trigger processarValidacoes (5min)
+        dispara voucher / mensagem.
+    /?endpoint=set_modo_campanha&tel=...&modo=AUTO|MANUAL  → v9.8
+    /?endpoint=set_default_modo&modo=AUTO|MANUAL           → v9.8
 
-v1 (08/06/2026): tela ⏳ Aguardando validação (operacional, com botões).
-                 Outras telas (clientes, indicações, ranking, métricas) vêm depois.
+v9.8 (18/06/2026): FEATURE MODO MANUAL/AUTO
+  • Toggle global "Default modo das próximas campanhas" no topo da aba
+  • Card de cada campanha com 4 estados:
+      - SEM DECISÃO → botões MANUAL / AUTO
+      - MANUAL → botões Validar/Invalidar + opção mudar pra AUTO
+      - AUTO (aguardando puxar) → mensagem informativa + mudar pra MANUAL
+      - AUTO (Bia rodando) → progresso X/Y + tempo restante, só visualização
+  • Progresso lido direto do Supabase (bia_disparos.respondeu_em)
 ==============================================================================
 """
 
 import streamlit as st
 import pandas as pd
 import requests
+from supabase import create_client
 from datetime import datetime, timedelta, timezone, date
 from io import BytesIO
 
@@ -67,7 +80,7 @@ def _zapi_get(endpoint: str, **params):
 
 def _zapi_action(endpoint: str, **params):
     """
-    Versão NÃO cacheada do _zapi_get, para AÇÕES (marcar_validacao).
+    Versão NÃO cacheada do _zapi_get, para AÇÕES (marcar_validacao, set_modo_campanha, etc).
     Cache não tem cabimento aqui porque cada clique precisa chegar no Apps Script.
     """
     try:
@@ -155,15 +168,147 @@ def _formatar_telefone(tel):
 
 
 # ============================================================================
-# TELA: ⏳ AGUARDANDO VALIDAÇÃO
+# v9.8 — HELPERS NOVOS (MODO MANUAL/AUTO)
+# ============================================================================
+
+@st.cache_resource
+def _get_supabase_zapi():
+    """
+    Cliente Supabase dedicado pro aba_zapi.py (segue padrão do
+    dashboard_maislaser.py: cached_resource, lê de st.secrets).
+    """
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _get_default_modo():
+    """
+    Lê o toggle global 'bia_default_modo_auto' do Apps Script.
+    Cache 60s — invalidado manualmente após _set_default_modo().
+    Retorna 'AUTO' ou 'MANUAL' (default 'MANUAL' se erro).
+    """
+    data = _zapi_get("get_default_modo")
+    if isinstance(data, dict) and data.get("_erro"):
+        return "MANUAL"  # fallback seguro
+    modo = str(data.get("modo", "MANUAL")).upper()
+    return modo if modo in ("AUTO", "MANUAL") else "MANUAL"
+
+
+def _set_default_modo(modo):
+    """
+    Grava o toggle global no Apps Script + invalida o cache da leitura.
+    Retorna True se OK, False se erro.
+    """
+    resp = _zapi_action("set_default_modo", modo=modo)
+    if resp.get("_erro") or resp.get("erro"):
+        st.error(f"❌ Falhou: {resp.get('_erro') or resp.get('erro')}")
+        return False
+    _get_default_modo.clear()
+    return True
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _get_progresso_campanhas_bia(campanha_ids_tuple):
+    """
+    Conta respostas no Supabase por campanha (bia_disparos.respondeu_em IS NOT NULL).
+    Recebe TUPLA (não lista — pra ser hasheável pro cache do Streamlit).
+    Retorna dict {campanha_id: total_respostas}.
+    Cache 30s.
+    """
+    if not campanha_ids_tuple:
+        return {}
+    try:
+        sb = _get_supabase_zapi()
+        result = (
+            sb.table("bia_disparos")
+            .select("campanha_id, respondeu_em")
+            .in_("campanha_id", list(campanha_ids_tuple))
+            .not_.is_("respondeu_em", "null")
+            .execute()
+        )
+        contagem = {}
+        for row in result.data or []:
+            cid = row.get("campanha_id")
+            if cid:
+                contagem[cid] = contagem.get(cid, 0) + 1
+        return contagem
+    except Exception as e:
+        # Falha silenciosa — UI mostra "—" no progresso
+        st.toast(f"⚠️ Não consegui ler progresso Bia: {e}", icon="⚠️")
+        return {}
+
+
+def _meta_respostas(total_contatos):
+    """30% arredondado pra cima. Ex: 20 → 6, 24 → 8, 82 → 25."""
+    import math
+    return max(1, math.ceil(0.3 * int(total_contatos or 0)))
+
+
+# ============================================================================
+# TELA: ⏳ AGUARDANDO VALIDAÇÃO (v9.8 — feature MODO MANUAL/AUTO)
 # ============================================================================
 
 def tela_zapi_aguardando_validacao():
     st.markdown("## ⏳ Aguardando validação")
-    st.caption("Clientes que enviaram os 20 contatos e estão esperando captadora ligar e validar. "
-               "Após marcar Validado/Invalidado aqui, o trigger do Apps Script (a cada 5min) "
-               "dispara o voucher ou a mensagem de invalidação automaticamente.")
+    st.caption(
+        "Coordenadora decide o **MODO** de cada campanha:  "
+        "**👤 MANUAL** = captadora liga e valida.  "
+        "**🤖 AUTO** = Bia v5 puxa o lote e dispara templates pros indicados; "
+        "valida sozinha ao atingir 30% de respostas em até 36h."
+    )
 
+    # ───────────────────────────────────────────────────────────────────
+    # TOGGLE GLOBAL — Default das próximas campanhas
+    # ───────────────────────────────────────────────────────────────────
+    modo_default_atual = _get_default_modo()
+
+    with st.container():
+        st.markdown(
+            """
+            <style>
+            .toggle-global-box {
+                background: linear-gradient(135deg, #f0f9ff 0%, #ecfeff 100%);
+                border: 1px solid #bae6fd;
+                border-radius: 12px;
+                padding: 14px 18px;
+                margin-bottom: 16px;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown('<div class="toggle-global-box">', unsafe_allow_html=True)
+
+        col_lbl, col_radio, _ = st.columns([3, 4, 1])
+        with col_lbl:
+            st.markdown(
+                "**🎛️ Modo padrão das próximas campanhas**  \n"
+                "<small>Vale só pra **visualização** — coordenadora decide cada uma abaixo.</small>",
+                unsafe_allow_html=True,
+            )
+        with col_radio:
+            modo_novo = st.radio(
+                "Modo padrão",
+                ["MANUAL", "AUTO"],
+                index=0 if modo_default_atual == "MANUAL" else 1,
+                horizontal=True,
+                key="toggle_default_modo",
+                label_visibility="collapsed",
+                format_func=lambda x: f"👤 {x} (captadora liga)" if x == "MANUAL" else f"🤖 {x} (Bia trabalha)",
+            )
+            if modo_novo != modo_default_atual:
+                with st.spinner("Atualizando default global..."):
+                    if _set_default_modo(modo_novo):
+                        st.toast(f"Default agora é {modo_novo}", icon="✅")
+                        st.rerun()
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # ───────────────────────────────────────────────────────────────────
+    # CARREGA DADOS DAS CAMPANHAS
+    # ───────────────────────────────────────────────────────────────────
     data = _zapi_get("validacao")
     if _mostrar_erro_e_parar(data, "(carregando pendências)"):
         return
@@ -173,72 +318,92 @@ def tela_zapi_aguardando_validacao():
         st.success("🎉 Nada na fila! Todas as validações estão em dia.")
         return
 
-    # Cards de resumo no topo
     df = pd.DataFrame(linhas)
     df["data_hora_dt"] = df["data_hora"].apply(_parse_iso)
     df["horas_parado"] = df["data_hora_dt"].apply(
         lambda d: ((datetime.now(TZ_SP) - d).total_seconds() / 3600) if d else 0
     )
+    df["bia_puxou_em_dt"] = df.get("bia_puxou_em", pd.Series([None] * len(df))).apply(_parse_iso)
+    df["modo"] = df.get("modo", pd.Series([""] * len(df))).fillna("").astype(str).str.upper().str.strip()
+    df["validacao_marcada"] = df["validacao_marcada"].fillna("").astype(str).str.upper().str.strip()
 
-    qtd_total = len(df)
-    # Separa quem já foi marcado (processando) de quem ainda precisa da captadora
-    _marcadas = df["validacao_marcada"].fillna("").astype(str).str.upper().isin(["VALIDADO", "INVALIDADO"])
+    # ───────────────────────────────────────────────────────────────────
+    # PROGRESSO BIA (Supabase) — só pra campanhas AUTO que Bia já puxou
+    # ───────────────────────────────────────────────────────────────────
+    camp_ids_bia = tuple(
+        df[(df["modo"] == "AUTO") & df["bia_puxou_em_dt"].notna()]["campanha_id"].dropna().tolist()
+    )
+    progresso_por_camp = _get_progresso_campanhas_bia(camp_ids_bia)
+
+    # ───────────────────────────────────────────────────────────────────
+    # CARDS DE RESUMO
+    # ───────────────────────────────────────────────────────────────────
+    _marcadas = df["validacao_marcada"].isin(["VALIDADO", "INVALIDADO", "AUTO_VALIDADO_BIA", "AUTO_INVALIDADO_BIA"])
     qtd_processando = int(_marcadas.sum())
-    df_para_contar = df[~_marcadas]
-    qtd_urgente = int((df_para_contar["horas_parado"] >= 24).sum())
-    qtd_atencao = int(((df_para_contar["horas_parado"] >= 12) & (df_para_contar["horas_parado"] < 24)).sum())
-    qtd_mogi = int((df_para_contar["unidade"].str.lower() == "mogi").sum())
-    qtd_suzano = int((df_para_contar["unidade"].str.lower() == "suzano").sum())
+    df_ativas = df[~_marcadas]
+
+    # Subdivisão por modo (entre as ativas)
+    qtd_sem_modo = int((df_ativas["modo"] == "").sum())
+    qtd_manual = int((df_ativas["modo"] == "MANUAL").sum())
+    qtd_auto_puxado = int(((df_ativas["modo"] == "AUTO") & df_ativas["bia_puxou_em_dt"].notna()).sum())
+    qtd_auto_aguardando = int(((df_ativas["modo"] == "AUTO") & df_ativas["bia_puxou_em_dt"].isna()).sum())
 
     col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-    col_m1.metric("📋 Aguardando captadora", len(df_para_contar),
-                  help=f"{qtd_total} no total ({qtd_processando} já marcadas, em processamento)")
-    col_m2.metric("🔴 Urgente (24h+)", qtd_urgente)
-    col_m3.metric("🟡 Atenção (12-24h)", qtd_atencao)
-    col_m4.metric("📍 Mogi / Suzano", f"{qtd_mogi} / {qtd_suzano}")
+    col_m1.metric(
+        "⚠️ Sem decisão", qtd_sem_modo,
+        help="Coordenadora ainda não escolheu MANUAL ou AUTO"
+    )
+    col_m2.metric(
+        "👤 Manual", qtd_manual,
+        help="Aguardando captadora ligar pros indicados"
+    )
+    col_m3.metric(
+        "🤖 AUTO (Bia rodando)", qtd_auto_puxado,
+        help="Bia já puxou o lote, contando respostas"
+    )
+    col_m4.metric(
+        "⏳ Em processamento", qtd_processando,
+        help="Já decididas (manual ou AUTO), aguardando trigger 5min disparar voucher/mensagem"
+    )
 
     st.markdown("---")
 
     # Filtro por unidade
-    unidades = ["Todas", "Mogi", "Suzano"]
     unid_filtro = st.radio(
         "Filtrar por unidade:",
-        unidades,
+        ["Todas", "Mogi", "Suzano"],
         horizontal=True,
         key="zapi_aguard_unidade",
     )
     if unid_filtro != "Todas":
         df = df[df["unidade"].str.lower() == unid_filtro.lower()]
+        df_ativas = df_ativas[df_ativas["unidade"].str.lower() == unid_filtro.lower()]
 
     if df.empty:
         st.info(f"Nada pendente em {unid_filtro}.")
         return
 
-    # Ordena: mais urgente primeiro
-    df = df.sort_values("horas_parado", ascending=False).reset_index(drop=True)
-
-    # Separa: já marcados (aguardando trigger processar) × ainda precisam de captadora
-    df["validacao_marcada"] = df["validacao_marcada"].fillna("").astype(str).str.upper()
-    df_processando = df[df["validacao_marcada"].isin(["VALIDADO", "INVALIDADO"])].copy()
-    df_aguardando = df[~df["validacao_marcada"].isin(["VALIDADO", "INVALIDADO"])].copy()
-
-    # Banner em cima se tem alguém processando
-    if not df_processando.empty:
-        nomes_proc = ", ".join(df_processando["nome"].tolist()[:5])
-        extras = f" e mais {len(df_processando) - 5}" if len(df_processando) > 5 else ""
+    # ───────────────────────────────────────────────────────────────────
+    # BANNER DE "PROCESSANDO" (já marcadas, aguardando trigger 5min)
+    # ───────────────────────────────────────────────────────────────────
+    df_proc = df[df["validacao_marcada"].isin(["VALIDADO", "INVALIDADO", "AUTO_VALIDADO_BIA", "AUTO_INVALIDADO_BIA"])]
+    if not df_proc.empty:
+        nomes_proc = ", ".join(df_proc["nome"].tolist()[:5])
+        extras = f" e mais {len(df_proc) - 5}" if len(df_proc) > 5 else ""
         st.info(
-            f"⏳ **{len(df_processando)} cliente(s) processando:** {nomes_proc}{extras}. "
-            f"O trigger do Apps Script vai disparar voucher/mensagem em até 5min e elas saem desta lista."
+            f"⏳ **{len(df_proc)} campanha(s) processando:** {nomes_proc}{extras}. "
+            f"Trigger do Apps Script vai disparar voucher/mensagem em até 5min."
         )
 
-    if df_aguardando.empty:
-        st.success("🎉 Sem pendências pra captadora atuar agora.")
+    if df_ativas.empty:
+        st.success("🎉 Sem campanhas aguardando ação.")
         return
 
-    st.markdown(f"### {len(df_aguardando)} cliente(s) aguardando captadora")
+    st.markdown(f"### {len(df_ativas)} campanha(s) na fila")
 
-    # CSS local pros badges
-    st.markdown("""
+    # CSS local pros badges e cards
+    st.markdown(
+        """
     <style>
     .urg-urgente { background: #fee2e2; color: #991b1b; padding: 2px 10px; border-radius: 12px; font-weight: 700; font-size: 12px; }
     .urg-atencao { background: #fef3c7; color: #92400e; padding: 2px 10px; border-radius: 12px; font-weight: 700; font-size: 12px; }
@@ -246,134 +411,375 @@ def tela_zapi_aguardando_validacao():
     .priv-anonimo      { background: #f3e8ff; color: #6b21a8; padding: 1px 8px; border-radius: 8px; font-size: 11px; }
     .priv-identificado { background: #dbeafe; color: #1e40af; padding: 1px 8px; border-radius: 8px; font-size: 11px; }
     .priv-vazia        { background: #f3f4f6; color: #6b7280; padding: 1px 8px; border-radius: 8px; font-size: 11px; }
+    .modo-manual { background: #fef3c7; color: #92400e; padding: 2px 10px; border-radius: 12px; font-weight: 700; font-size: 12px; }
+    .modo-auto-rodando { background: #dbeafe; color: #1e40af; padding: 2px 10px; border-radius: 12px; font-weight: 700; font-size: 12px; }
+    .modo-auto-aguarda { background: #e0e7ff; color: #3730a3; padding: 2px 10px; border-radius: 12px; font-weight: 700; font-size: 12px; }
+    .modo-vazio { background: #fee2e2; color: #991b1b; padding: 2px 10px; border-radius: 12px; font-weight: 700; font-size: 12px; }
+    .progress-bg { background: #e5e7eb; border-radius: 8px; height: 22px; overflow: hidden; margin-top: 4px; }
+    .progress-fill { background: linear-gradient(90deg, #5BC0BE 0%, #3D9991 100%); height: 100%; border-radius: 8px; transition: width 0.6s ease; }
+    .card-acao { background: #fafafa; border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px; margin-top: 8px; }
     </style>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
-    # Lista de cards (1 por cliente pendente — só os que ainda precisam de ação)
-    for _, row in df_aguardando.iterrows():
-        tel = row["telefone"]
-        nome = row["nome"] or "(sem nome)"
-        func = row["funcionaria"] or "—"
-        unid = row["unidade"] or "—"
-        contatos = int(row["contatos"] or 0)
-        priv = (row.get("privacidade") or "").upper()
-        camp_id = row["campanha_id"]
-        dt = row["data_hora_dt"]
-        tempo = _humanizar_tempo(dt)
-        urg = _classe_urgencia(dt)
+    # Ordena: sem decisão primeiro (mais urgente), depois por tempo parado
+    def _ordem_prioridade(row):
+        if row["modo"] == "":
+            return (0, -row["horas_parado"])  # sem decisão, mais antigos primeiro
+        if row["modo"] == "AUTO" and row["bia_puxou_em_dt"] is not None:
+            return (1, -row["horas_parado"])  # AUTO rodando
+        if row["modo"] == "AUTO":
+            return (2, -row["horas_parado"])  # AUTO aguardando puxar
+        return (3, -row["horas_parado"])  # MANUAL
+
+    df_ativas = df_ativas.assign(
+        _prio=df_ativas.apply(_ordem_prioridade, axis=1)
+    ).sort_values("_prio").reset_index(drop=True)
+
+    # ───────────────────────────────────────────────────────────────────
+    # RENDERIZA CADA CARD
+    # ───────────────────────────────────────────────────────────────────
+    for _, row in df_ativas.iterrows():
+        _renderizar_card_campanha(row, progresso_por_camp, modo_default_atual)
 
 
-        urg_label = {"urgente": "🔴 URGENTE", "atencao": "🟡 ATENÇÃO", "ok": "🟢 OK"}[urg]
-        priv_label = {"ANONIMO": "🤫 anônima", "IDENTIFICADO": "✨ identificada"}.get(priv, "— sem privacidade")
-        priv_class = {"ANONIMO": "priv-anonimo", "IDENTIFICADO": "priv-identificado"}.get(priv, "priv-vazia")
+# ============================================================================
+# RENDERIZA UM CARD INDIVIDUAL DE CAMPANHA
+# ============================================================================
 
-        with st.container():
-            st.markdown(
-                f"""
-                <div style="padding: 12px 14px; border: 1px solid #e5e7eb; border-radius: 10px; margin-bottom: 8px;">
-                  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                    <div>
-                      <span style="font-size: 16px; font-weight: 700;">{nome}</span>
-                      &nbsp;<span class="{priv_class}">{priv_label}</span>
-                    </div>
-                    <span class="urg-{urg}">{urg_label} · {tempo}</span>
-                  </div>
-                  <div style="color: #6b7280; font-size: 13px;">
-                    📱 {_formatar_telefone(tel)} &nbsp;·&nbsp;
-                    👩‍💼 {func} ({unid}) &nbsp;·&nbsp;
-                    📨 {contatos} contatos
-                  </div>
+def _renderizar_card_campanha(row, progresso_por_camp, modo_default_atual):
+    tel = row["telefone"]
+    nome = row["nome"] or "(sem nome)"
+    func = row["funcionaria"] or "—"
+    unid = row["unidade"] or "—"
+    contatos = int(row["contatos"] or 0)
+    priv = str(row.get("privacidade") or "").upper()
+    camp_id = row["campanha_id"]
+    dt = row["data_hora_dt"]
+    tempo = _humanizar_tempo(dt)
+    urg = _classe_urgencia(dt)
+    modo_atual = row["modo"]
+    bia_puxou = row["bia_puxou_em_dt"]
+
+    urg_label = {"urgente": "🔴 URGENTE", "atencao": "🟡 ATENÇÃO", "ok": "🟢 OK"}[urg]
+    priv_label = {"ANONIMO": "🤫 anônima", "IDENTIFICADO": "✨ identificada"}.get(priv, "— sem privacidade")
+    priv_class = {"ANONIMO": "priv-anonimo", "IDENTIFICADO": "priv-identificado"}.get(priv, "priv-vazia")
+
+    # Badge de modo
+    if modo_atual == "":
+        modo_html = '<span class="modo-vazio">⚠️ SEM DECISÃO</span>'
+    elif modo_atual == "MANUAL":
+        modo_html = '<span class="modo-manual">👤 MANUAL</span>'
+    elif modo_atual == "AUTO" and bia_puxou is not None:
+        modo_html = '<span class="modo-auto-rodando">🤖 AUTO · BIA RODANDO</span>'
+    else:
+        modo_html = '<span class="modo-auto-aguarda">🤖 AUTO · AGUARDANDO PUXAR</span>'
+
+    with st.container():
+        # Header do card
+        st.markdown(
+            f"""
+            <div style="padding: 12px 14px; border: 1px solid #e5e7eb; border-radius: 10px; margin-bottom: 8px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <div>
+                  <span style="font-size: 16px; font-weight: 700;">{nome}</span>
+                  &nbsp;<span class="{priv_class}">{priv_label}</span>
+                  &nbsp;{modo_html}
                 </div>
-                """,
-                unsafe_allow_html=True,
+                <span class="urg-{urg}">{urg_label} · {tempo}</span>
+              </div>
+              <div style="color: #6b7280; font-size: 13px;">
+                📱 {_formatar_telefone(tel)} &nbsp;·&nbsp;
+                👩‍💼 {func} ({unid}) &nbsp;·&nbsp;
+                📨 {contatos} contatos
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # ───────────────────────────────────────────────────────────────
+        # AÇÕES (variam conforme estado)
+        # ───────────────────────────────────────────────────────────────
+        estado = _detectar_estado_campanha(modo_atual, bia_puxou)
+
+        if estado == "sem_decisao":
+            _render_acao_sem_decisao(camp_id, tel, nome, modo_default_atual)
+
+        elif estado == "manual":
+            _render_acao_manual(camp_id, tel, nome, bia_puxou)
+
+        elif estado == "auto_aguardando":
+            _render_acao_auto_aguardando(camp_id, tel, nome)
+
+        elif estado == "auto_rodando":
+            _render_acao_auto_rodando(camp_id, contatos, bia_puxou, progresso_por_camp)
+
+        # ───────────────────────────────────────────────────────────────
+        # VER CONTATOS (toggle pra todos os estados)
+        # ───────────────────────────────────────────────────────────────
+        ver_contatos = st.toggle(
+            "👁️ Ver os 20 contatos enviados",
+            key=f"toggle_ver_{camp_id}",
+        )
+        if ver_contatos:
+            _render_lista_contatos(camp_id, nome)
+
+        st.markdown("")  # respiro entre cards
+
+
+# ============================================================================
+# HELPERS DE ESTADO + RENDERIZAÇÃO DE AÇÕES POR ESTADO
+# ============================================================================
+
+def _detectar_estado_campanha(modo, bia_puxou_dt):
+    """Retorna: 'sem_decisao' | 'manual' | 'auto_aguardando' | 'auto_rodando'"""
+    if modo == "":
+        return "sem_decisao"
+    if modo == "MANUAL":
+        return "manual"
+    if modo == "AUTO" and bia_puxou_dt is None:
+        return "auto_aguardando"
+    if modo == "AUTO" and bia_puxou_dt is not None:
+        return "auto_rodando"
+    return "sem_decisao"  # fallback
+
+
+def _render_acao_sem_decisao(camp_id, tel, nome, modo_default_atual):
+    """Estado: campanha nova, coordenadora precisa escolher MODO."""
+    sugestao = "AUTO" if modo_default_atual == "AUTO" else "MANUAL"
+
+    st.markdown(
+        f"""
+        <div class="card-acao">
+        <strong>⚠️ Coordenadora precisa escolher o modo:</strong>
+        <span style="color: #6b7280; font-size: 12px;">  (default global: <strong>{sugestao}</strong>)</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col_m, col_a, _ = st.columns([1.2, 1.2, 2])
+    with col_m:
+        if st.button(
+            "👤 MANUAL (captadora liga)",
+            key=f"set_manual_{camp_id}",
+            use_container_width=True,
+            help="Captadora liga pros indicados pra validar. Você aperta Validar/Invalidar depois.",
+        ):
+            _executar_set_modo(tel, "MANUAL", nome)
+    with col_a:
+        if st.button(
+            "🤖 AUTO (Bia trabalha)",
+            key=f"set_auto_{camp_id}",
+            type="primary",
+            use_container_width=True,
+            help="Bia v5 dispara templates pros 20 indicados. Auto-valida com 30% de respostas em até 36h.",
+        ):
+            _executar_set_modo(tel, "AUTO", nome)
+
+
+def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
+    """Estado: MANUAL clássico — captadora liga, coordenadora aperta Validar/Invalidar."""
+
+    st.markdown(
+        '<div class="card-acao"><strong>👤 Modo MANUAL:</strong> '
+        'captadora liga pros indicados. Após contato, aperte abaixo:</div>',
+        unsafe_allow_html=True,
+    )
+
+    col_a, col_b, col_c = st.columns([1, 1, 1])
+    with col_a:
+        btn_validar = st.button(
+            "✅ Validar",
+            key=f"btn_val_{camp_id}",
+            use_container_width=True,
+            help="Marca VALIDADO. Voucher dispara automático em até 5min.",
+        )
+    with col_b:
+        btn_invalidar = st.button(
+            "❌ Invalidar",
+            key=f"btn_inv_{camp_id}",
+            use_container_width=True,
+            help="Marca INVALIDADO. Mensagem de invalidação dispara em até 5min.",
+        )
+    with col_c:
+        # Mudar pra AUTO só se Bia ainda não puxou
+        if bia_puxou_dt is None:
+            if st.button(
+                "↩️ Mudar pra AUTO",
+                key=f"to_auto_{camp_id}",
+                use_container_width=True,
+                help="Cancela MANUAL e deixa a Bia trabalhar este lote.",
+            ):
+                _executar_set_modo(tel, "AUTO", nome)
+        else:
+            st.button(
+                "↩️ Mudar pra AUTO",
+                disabled=True,
+                use_container_width=True,
+                help="Não dá mais — Bia já trabalhou esse lote.",
             )
 
-            col_a, col_b, col_c = st.columns([1, 1, 1.6])
-            with col_a:
-                btn_validar = st.button(
-                    "✅ Validar",
-                    key=f"btn_val_{camp_id}",
-                    use_container_width=True,
-                    help="Marca VALIDADO na planilha. Voucher dispara automático em até 5min."
+    # Confirmação dupla pra Validar/Invalidar
+    if btn_validar or btn_invalidar:
+        decisao = "VALIDADO" if btn_validar else "INVALIDADO"
+        st.session_state[f"confirm_pending_{camp_id}"] = decisao
+
+    if st.session_state.get(f"confirm_pending_{camp_id}"):
+        decisao = st.session_state[f"confirm_pending_{camp_id}"]
+        cor_aviso = "#dc2626" if decisao == "VALIDADO" else "#f59e0b"
+        msg_aviso = (
+            f"⚠️ Confirmar **{decisao}** pra **{nome}**? "
+            + (
+                "Voucher de Revitalização Facial vai disparar."
+                if decisao == "VALIDADO"
+                else "Mensagem de invalidação vai disparar."
+            )
+        )
+        st.markdown(
+            f"<div style='padding: 10px; background: #fff7ed; border-left: 4px solid {cor_aviso}; border-radius: 6px; margin: 8px 0;'>{msg_aviso}</div>",
+            unsafe_allow_html=True,
+        )
+        col_sim, col_nao = st.columns([1, 1])
+        with col_sim:
+            confirmar = st.button(
+                "✔️ Confirmar",
+                key=f"confirm_{camp_id}",
+                type="primary",
+                use_container_width=True,
+            )
+        with col_nao:
+            cancelar = st.button(
+                "✖️ Cancelar", key=f"cancel_{camp_id}", use_container_width=True
+            )
+
+        if cancelar:
+            st.session_state.pop(f"confirm_pending_{camp_id}", None)
+            st.rerun()
+
+        if confirmar:
+            with st.spinner(f"Marcando {decisao}..."):
+                # Modo MANUAL explícito (mesmo sendo default no Apps Script)
+                resp = _zapi_action("marcar_validacao", tel=tel, decisao=decisao, modo="MANUAL")
+            if resp.get("_erro") or resp.get("erro"):
+                st.error(f"❌ Falhou: {resp.get('_erro') or resp.get('erro')}")
+            elif resp.get("ja_marcado"):
+                st.warning(f"ℹ️ Já estava marcado como {decisao} (alguém adiantou).")
+                st.session_state.pop(f"confirm_pending_{camp_id}", None)
+                _zapi_get.clear()
+            else:
+                st.success(
+                    f"✅ {decisao} marcado! Trigger vai processar em até 5min e disparar a mensagem pra cliente."
                 )
-            with col_b:
-                btn_invalidar = st.button(
-                    "❌ Invalidar",
-                    key=f"btn_inv_{camp_id}",
-                    use_container_width=True,
-                    help="Marca INVALIDADO. Mensagem de invalidação dispara em até 5min."
-                )
-            with col_c:
-                ver_contatos = st.toggle(
-                    "👁️ Ver os contatos",
-                    key=f"toggle_ver_{camp_id}",
-                )
+                st.session_state.pop(f"confirm_pending_{camp_id}", None)
+                _zapi_get.clear()
+                st.balloons()
+            st.rerun()
 
-            # Confirmação dupla: precisa marcar checkbox antes de o botão funcionar
-            # (evita clique acidental que libera voucher real)
-            if btn_validar or btn_invalidar:
-                decisao = "VALIDADO" if btn_validar else "INVALIDADO"
-                st.session_state[f"confirm_pending_{camp_id}"] = decisao
 
-            if st.session_state.get(f"confirm_pending_{camp_id}"):
-                decisao = st.session_state[f"confirm_pending_{camp_id}"]
-                cor_aviso = "#dc2626" if decisao == "VALIDADO" else "#f59e0b"
-                msg_aviso = (
-                    f"⚠️ Confirmar **{decisao}** pra **{nome}**? "
-                    + ("Voucher de Revitalização Facial vai disparar." if decisao == "VALIDADO"
-                       else "Mensagem de invalidação vai disparar.")
-                )
-                st.markdown(
-                    f"<div style='padding: 10px; background: #fff7ed; border-left: 4px solid {cor_aviso}; border-radius: 6px; margin: 8px 0;'>{msg_aviso}</div>",
-                    unsafe_allow_html=True,
-                )
-                col_sim, col_nao = st.columns([1, 1])
-                with col_sim:
-                    confirmar = st.button("✔️ Confirmar", key=f"confirm_{camp_id}", type="primary", use_container_width=True)
-                with col_nao:
-                    cancelar = st.button("✖️ Cancelar", key=f"cancel_{camp_id}", use_container_width=True)
+def _render_acao_auto_aguardando(camp_id, tel, nome):
+    """Estado: MODO=AUTO mas Bia ainda não puxou o lote."""
+    st.markdown(
+        '<div class="card-acao">'
+        '<strong>🤖 Modo AUTO selecionado.</strong> '
+        'Bia v5 vai puxar este lote no próximo ciclo do Cron 6 v2 '
+        '(a cada 20min entre 10h e 19h). '
+        '<br><br>'
+        '<small>Você ainda pode voltar pra MANUAL enquanto Bia não puxar.</small>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
-                if cancelar:
-                    st.session_state.pop(f"confirm_pending_{camp_id}", None)
-                    st.rerun()
+    col_a, _ = st.columns([1.5, 3])
+    with col_a:
+        if st.button(
+            "↩️ Mudar pra MANUAL",
+            key=f"to_manual_{camp_id}",
+            use_container_width=True,
+            help="Cancela AUTO. Captadora vai ter que ligar manualmente.",
+        ):
+            _executar_set_modo(tel, "MANUAL", nome)
 
-                if confirmar:
-                    with st.spinner(f"Marcando {decisao}..."):
-                        resp = _zapi_action("marcar_validacao", tel=tel, decisao=decisao)
-                    if resp.get("_erro") or resp.get("erro"):
-                        st.error(f"❌ Falhou: {resp.get('_erro') or resp.get('erro')}")
-                    elif resp.get("ja_marcado"):
-                        st.warning(f"ℹ️ Já estava marcado como {decisao} (alguém adiantou).")
-                        st.session_state.pop(f"confirm_pending_{camp_id}", None)
-                        _zapi_get.clear()
-                    else:
-                        st.success(f"✅ {decisao} marcado! Trigger vai processar em até 5min e disparar a mensagem pra cliente.")
-                        st.session_state.pop(f"confirm_pending_{camp_id}", None)
-                        _zapi_get.clear()
-                        st.balloons()
-                    # Pequena pausa visual e refresh
-                    st.rerun()
 
-            # Bloco expansível com os 20 contatos
-            if ver_contatos:
-                with st.spinner(f"Carregando contatos da {nome}..."):
-                    contatos_data = _zapi_get("contatos_cliente", campanha_id=camp_id)
-                if _mostrar_erro_e_parar(contatos_data, "(carregando contatos)"):
-                    pass
-                else:
-                    contatos_lista = contatos_data.get("linhas", [])
-                    if not contatos_lista:
-                        st.info("Nenhum contato encontrado nessa campanha (estranho).")
-                    else:
-                        df_c = pd.DataFrame(contatos_lista)
-                        df_c["telefone_formatado"] = df_c["telefone_indicado"].apply(_formatar_telefone)
-                        df_c = df_c[["nome_indicado", "telefone_formatado"]].rename(
-                            columns={"nome_indicado": "Nome", "telefone_formatado": "Telefone"}
-                        )
-                        st.dataframe(df_c, use_container_width=True, hide_index=True)
-                        st.caption(f"📋 {len(contatos_lista)} contatos indicados pela cliente")
+def _render_acao_auto_rodando(camp_id, contatos, bia_puxou_dt, progresso_por_camp):
+    """Estado: MODO=AUTO, Bia já puxou o lote. Mostra progresso, sem botões."""
+    respostas = progresso_por_camp.get(camp_id, 0)
+    meta = _meta_respostas(contatos)
+    pct = int(min(100, (respostas / meta * 100) if meta > 0 else 0))
 
-            st.markdown("")  # respiro entre cards
+    # Tempo desde Bia puxar
+    agora = datetime.now(TZ_SP)
+    horas_rodando = (agora - bia_puxou_dt).total_seconds() / 3600
+    horas_restantes = max(0, 36 - horas_rodando)
+    timeout_iminente = horas_restantes < 6
+
+    cor_timeout = "#ef4444" if timeout_iminente else "#6b7280"
+
+    st.markdown(
+        f"""
+        <div class="card-acao">
+        <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+            <div>
+                🤖 <strong>Bia trabalhando há {horas_rodando:.1f}h</strong>
+            </div>
+            <div style="color: {cor_timeout}; font-weight: 600;">
+                ⏰ {horas_restantes:.1f}h até timeout
+            </div>
+        </div>
+        <div style="margin-top: 8px;">
+            📊 <strong>Progresso:</strong> {respostas} / {meta} respostas ({pct}%)
+            <div class="progress-bg">
+                <div class="progress-fill" style="width: {pct}%;"></div>
+            </div>
+        </div>
+        <div style="margin-top: 10px; font-size: 12px; color: #6b7280;">
+            ℹ️ Bia auto-valida ao bater {meta} respostas, ou auto-invalida após 36h.
+            Coordenadora não precisa fazer nada.
+        </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ============================================================================
+# AÇÕES AUXILIARES
+# ============================================================================
+
+def _executar_set_modo(tel, modo, nome):
+    """Chama set_modo_campanha no Apps Script + trata resposta + rerun."""
+    with st.spinner(f"Definindo modo {modo} pra {nome}..."):
+        resp = _zapi_action("set_modo_campanha", tel=tel, modo=modo)
+    if resp.get("_erro") or resp.get("erro"):
+        st.error(f"❌ Falhou: {resp.get('_erro') or resp.get('erro')}")
+    else:
+        st.toast(f"Modo {modo} aplicado pra {nome}", icon="✅")
+        _zapi_get.clear()
+        _get_progresso_campanhas_bia.clear()
+        st.rerun()
+
+
+def _render_lista_contatos(camp_id, nome):
+    """Bloco expansível com os 20 contatos da campanha."""
+    with st.spinner(f"Carregando contatos da {nome}..."):
+        contatos_data = _zapi_get("contatos_cliente", campanha_id=camp_id)
+    if _mostrar_erro_e_parar(contatos_data, "(carregando contatos)"):
+        return
+
+    contatos_lista = contatos_data.get("linhas", [])
+    if not contatos_lista:
+        st.info("Nenhum contato encontrado nessa campanha (estranho).")
+        return
+
+    df_c = pd.DataFrame(contatos_lista)
+    df_c["telefone_formatado"] = df_c["telefone_indicado"].apply(_formatar_telefone)
+    df_c = df_c[["nome_indicado", "telefone_formatado"]].rename(
+        columns={"nome_indicado": "Nome", "telefone_formatado": "Telefone"}
+    )
+    st.dataframe(df_c, use_container_width=True, hide_index=True)
+    st.caption(f"📋 {len(contatos_lista)} contatos indicados pela cliente")
 
 
 # ============================================================================
