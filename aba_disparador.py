@@ -4,6 +4,7 @@ import requests
 import json
 import time
 import re
+from supabase import create_client
 
 # ============================================================
 # CONFIGURAÇÕES DO MÓDULO
@@ -524,6 +525,32 @@ def render_aba_disparador():
                             f"**Clientes afetados:** {', '.join(clientes_sem_contexto)}\n\n"
                             f"💡 Solução: re-dispare só para essas clientes."
                         )
+
+                    # ─── Grava registro no histórico de disparos ───
+                    try:
+                        _sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+                        # Extrai data das sessões (primeiro horário encontrado)
+                        _data_sessoes = ""
+                        if not df_agrupado.empty and "Horario" in df_agrupado.columns:
+                            _primeiro = str(df_agrupado.iloc[0]["Horario"])
+                            _partes = _primeiro.split(" às ")
+                            if _partes:
+                                _data_sessoes = _partes[0]
+
+                        _sb.table("disparos_historico").insert({
+                            "unidade": unidade_selecionada,
+                            "arquivo": arquivo_upload.name if arquivo_upload else "—",
+                            "data_sessoes": _data_sessoes,
+                            "total_clientes": total_linhas,
+                            "whatsapp_ok": sucessos,
+                            "contexto_ok": sucessos - falhas_contexto,
+                            "falhas_contexto": falhas_contexto,
+                            "clientes_falha": ", ".join(clientes_sem_contexto) if clientes_sem_contexto else None,
+                            "erros_envio": erros,
+                            "numero_alerta": numero_alerta_formatado,
+                        }).execute()
+                    except Exception as e_hist:
+                        st.caption(f"⚠️ Não salvou no histórico: {e_hist}")
 
         except Exception as erro_geral:
             st.error(f"❌ Erro ao processar o arquivo: {erro_geral}")
