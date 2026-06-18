@@ -417,6 +417,8 @@ def render_aba_disparador():
 
                     sucessos = 0
                     erros = 0
+                    falhas_contexto = 0
+                    clientes_sem_contexto = []
                     total_linhas = len(df_agrupado)
 
                     for i, (_, linha) in enumerate(df_agrupado.iterrows()):
@@ -453,23 +455,41 @@ def render_aba_disparador():
 
                             if code in (200, 201):
                                 sucessos += 1
-                                # Salva contexto no webhook para processar respostas dos clientes
+                                # FIX: salvar contexto com retry + timeout maior
+                                # ANTES: timeout=5, except:pass (perdia contextos em lotes grandes)
+                                # AGORA: timeout=15, 2 tentativas, warning se falhar
                                 webhook_url = st.secrets.get("URL_WEBHOOK_CONTEXTO", "")
                                 if webhook_url:
-                                    try:
-                                        requests.post(webhook_url, json={
-                                            "acao": "salvar_contexto",
-                                            "telefone": telefone_formatado,
-                                            "nome": nome_cliente,
-                                            "servico": procedimento,
-                                            "unidade": unidade_selecionada,
-                                            "horario": horario_cliente,
-                                            "horario2": horario2_cliente,
-                                            "servico2": servico2_cliente,
-                                            "numero_alerta": numero_alerta_formatado
-                                        }, timeout=5)
-                                    except Exception:
-                                        pass
+                                    ctx_payload = {
+                                        "acao": "salvar_contexto",
+                                        "telefone": telefone_formatado,
+                                        "nome": nome_cliente,
+                                        "servico": procedimento,
+                                        "unidade": unidade_selecionada,
+                                        "horario": horario_cliente,
+                                        "horario2": horario2_cliente,
+                                        "servico2": servico2_cliente,
+                                        "numero_alerta": numero_alerta_formatado
+                                    }
+                                    ctx_ok = False
+                                    for tentativa in range(2):
+                                        try:
+                                            r_ctx = requests.post(webhook_url, json=ctx_payload, timeout=15)
+                                            if r_ctx.status_code == 200:
+                                                ctx_ok = True
+                                                break
+                                        except requests.exceptions.Timeout:
+                                            if tentativa == 0:
+                                                time.sleep(2)
+                                        except Exception:
+                                            break
+                                    if not ctx_ok:
+                                        falhas_contexto += 1
+                                        clientes_sem_contexto.append(nome_cliente)
+                                        st.warning(
+                                            f"⚠️ Contexto NÃO salvo: {nome_cliente} ({telefone_formatado}) "
+                                            f"— WhatsApp enviado mas robô NÃO vai reconhecer a resposta"
+                                        )
                             else:
                                 erros += 1
                                 st.error(
@@ -490,12 +510,20 @@ def render_aba_disparador():
                         progresso.progress((i + 1) / total_linhas)
 
                     status_texto.text("✅ Processamento concluído!")
-                    if sucessos > 0:
+                    if sucessos > 0 and falhas_contexto == 0:
                         st.balloons()
                     st.success(
                         f"🎉 Disparos finalizados! "
                         f"✅ Sucessos: {sucessos} | ❌ Erros/Falhas: {erros}"
                     )
+                    if falhas_contexto > 0:
+                        st.error(
+                            f"🚨 **ATENÇÃO: {falhas_contexto} cliente(s) receberam o WhatsApp "
+                            f"mas o contexto NÃO foi salvo na planilha!**\n\n"
+                            f"O robô NÃO vai reconhecer as respostas dessas clientes.\n\n"
+                            f"**Clientes afetados:** {', '.join(clientes_sem_contexto)}\n\n"
+                            f"💡 Solução: re-dispare só para essas clientes."
+                        )
 
         except Exception as erro_geral:
             st.error(f"❌ Erro ao processar o arquivo: {erro_geral}")
