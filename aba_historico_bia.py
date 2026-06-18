@@ -129,20 +129,22 @@ def _contar_disparos_por_status(campanha_ids_tuple):
             .in_("campanha_id", list(campanha_ids_tuple))
             .execute()
         )
-        STATUS_EFETIVAMENTE_DISPARADO = {"DISPARADO", "RESPONDEU", "IGNOROU", "SKIP_BASE",
-                                          "ERRO_NUMERO_INVALIDO", "BLOQUEADO_PELO_INDICADO"}
+        STATUS_EFETIVAMENTE_ENVIADO = {"DISPARADO", "RESPONDEU", "IGNOROU",
+                                        "ERRO_NUMERO_INVALIDO", "BLOQUEADO_PELO_INDICADO"}
         contagem = {}
         for row in result.data or []:
             cid = row.get("campanha_id")
             if not cid:
                 continue
             if cid not in contagem:
-                contagem[cid] = {"_total": 0, "_respondeu": 0, "_disparados_real": 0}
+                contagem[cid] = {"_total": 0, "_respondeu": 0, "_disparados_real": 0, "_skip_base": 0}
             status = (row.get("status") or "DESCONHECIDO").upper()
             contagem[cid][status] = contagem[cid].get(status, 0) + 1
             contagem[cid]["_total"] += 1
-            if status in STATUS_EFETIVAMENTE_DISPARADO:
+            if status in STATUS_EFETIVAMENTE_ENVIADO:
                 contagem[cid]["_disparados_real"] += 1
+            if status == "SKIP_BASE":
+                contagem[cid]["_skip_base"] += 1
             if row.get("respondeu_em"):
                 contagem[cid]["_respondeu"] += 1
         return contagem
@@ -210,6 +212,9 @@ def render_aba_historico_bia():
     # Enriquece o df com contagens
     df_lotes["total_disparados_supabase"] = df_lotes["campanha_id"].apply(
         lambda cid: contagem.get(cid, {}).get("_disparados_real", 0)
+    )
+    df_lotes["total_skip_base"] = df_lotes["campanha_id"].apply(
+        lambda cid: contagem.get(cid, {}).get("_skip_base", 0)
     )
     df_lotes["total_respondeu_supabase"] = df_lotes["campanha_id"].apply(
         lambda cid: contagem.get(cid, {}).get("_respondeu", 0)
@@ -338,6 +343,7 @@ def _render_resumo_lotes(df_lotes, contagem):
         unid = row["unidade"] or "?"
         ind = int(row["contatos"])
         disp = int(row["total_disparados_supabase"])
+        skip = int(row["total_skip_base"])
         resp = int(row["total_respondeu_supabase"])
         meta = int(row["meta_30pct"])
         taxa = row["taxa_resposta_pct"]
@@ -371,7 +377,7 @@ def _render_resumo_lotes(df_lotes, contagem):
               </div>
               <div style="margin-top: 10px;">
                 <div style="display: flex; justify-content: space-between; font-size: 12px; color: #374151;">
-                  <span>📨 {disp}/{ind} disparados · 💬 {resp} responderam · meta {meta} (30%)</span>
+                  <span>📨 {disp}/{ind} enviados · 🛡️ {skip} skip · 💬 {resp} responderam · meta {meta} (30%)</span>
                   <strong style="color: {'#059669' if pct_progresso >= 100 else '#5BC0BE'};">{taxa:.1f}%</strong>
                 </div>
                 <div class="progress-mini">
