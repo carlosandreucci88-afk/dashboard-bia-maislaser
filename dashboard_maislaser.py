@@ -30,6 +30,7 @@ from aba_confirmacao import (
 from aba_disparador import render_aba_disparador
 from aba_zapi import render_aba_zapi_aguardando, render_aba_zapi_ranking, render_aba_zapi_indicacoes, render_aba_zapi_metricas, render_aba_zapi_clientes
 from aba_pendencias import render_aba_pendencias
+from aba_historico_disparos import render_aba_historico_disparos
 
 
 # ============================================================================
@@ -1911,8 +1912,9 @@ def main():
         # ─── Tabs do Robô Confirmação Agenda ────────────────────
         # Fase C: 4 abas conectadas aos endpoints read-only do Apps Script.
         # Disparar agenda continua placeholder até a Fase D (porta o app.py).
-        tab_disp, tab_dia, tab_hist, tab_indic, tab_metr = st.tabs([
+        tab_disp, tab_hist_disp, tab_dia, tab_hist, tab_indic, tab_metr = st.tabs([
             "🚀 Disparar agenda",
+            "📋 Histórico de disparos",
             "📅 Disparos do dia",
             "💬 Histórico de respostas",
             "🎁 Programa de indicações",
@@ -1921,6 +1923,9 @@ def main():
 
         with tab_disp:
             render_aba_disparador()
+
+        with tab_hist_disp:
+            render_aba_historico_disparos()
 
         with tab_dia:
             tela_confirmacao_disparos_dia()
