@@ -24,6 +24,14 @@
 # REQUISITOS:
 #   pip install pandas openpyxl
 #   (supabase, streamlit e datetime já devem estar no requirements)
+#
+# CHANGELOG:
+#   v1.1 (18/06/2026): Fix bug "Resumo mostra só 1.000 linhas"
+#                      Adicionado helper _fetch_all_paginado() que pagina
+#                      automaticamente via .range() em batches de 1000 até
+#                      retornar tudo. Aplicado em _render_resumo_base
+#                      (conta TODOS os 50k) e _render_visualizar_clientes
+#                      (suporte a até 5000 resultados de filtro).
 # ============================================================
 
 import io
@@ -74,6 +82,67 @@ PALAVRAS_LIMPAVEIS = [
     r'\bobs\b', r'\bnota\b', r'\batenção\b', r'\balerta\b',
     r'\bpl\b', r'\bfinan', r'\baniversariante\b', r'\baniversário\b',
 ]
+
+
+# ============================================================
+# HELPER — PAGINAÇÃO AUTOMÁTICA (v1.1)
+# ============================================================
+# O cliente Python do Supabase tem um LIMITE PADRÃO de 1000 linhas por
+# response (mesmo sem .limit() explícito). Pra tabelas grandes (50k+) é
+# necessário paginar manualmente via .range(start, end).
+#
+# Este helper faz isso transparentemente: roda em loop até pegar tudo.
+
+def _fetch_all_paginado(query_builder_factory, page_size: int = 1000,
+                        max_pages: int = 100) -> list:
+    """
+    Pagina uma query do Supabase em batches de `page_size`.
+
+    Args:
+        query_builder_factory: callable que retorna uma query FRESCA
+                                (não reutilizável). Necessário porque
+                                cada call a .range() consome o builder.
+        page_size: tamanho de cada página (max 1000 no Supabase).
+        max_pages: limite de segurança (100k linhas no default).
+
+    Returns:
+        Lista plana de dicts (todos os resultados concatenados).
+
+    Exemplo de uso:
+        def make_query():
+            q = sb.table('clientes_base').select('tipo, unidade')
+            if filtro:
+                q = q.eq('unidade', filtro)
+            return q
+
+        registros = _fetch_all_paginado(make_query, page_size=1000)
+    """
+    todos = []
+    for pagina in range(max_pages):
+        start = pagina * page_size
+        end = start + page_size - 1  # range é INCLUSIVO no Supabase
+        try:
+            query = query_builder_factory().range(start, end)
+            res = query.execute()
+        except Exception as e:
+            # Aborta paginação em caso de erro mas mantém o que já pegou
+            st.warning(f'⚠️ Paginação interrompida na página {pagina + 1}: {str(e)[:200]}')
+            break
+
+        batch = res.data or []
+        todos.extend(batch)
+
+        # Última página: veio menos que o page_size (ou veio zero)
+        if len(batch) < page_size:
+            break
+    else:
+        # Atingiu max_pages sem parar — aviso defensivo
+        st.warning(
+            f'⚠️ Atingido limite de {max_pages} páginas ({max_pages * page_size} linhas). '
+            f'Pode haver dados não exibidos. Aumente `max_pages` se necessário.'
+        )
+
+    return todos
 
 
 # ============================================================
@@ -409,7 +478,13 @@ CATEGORIA_LABELS = {
 
 
 def _render_resumo_base(supabase):
-    """Sub-aba: resumo do que já está importado no banco."""
+    """Sub-aba: resumo do que já está importado no banco.
+
+    FIX v1.1: Antes usava `query.execute()` direto, que retornava no MÁXIMO
+    1000 linhas (limite padrão do Supabase Python client). Pra base com
+    50k+ clientes, mostrava 'Total: 1000' incorretamente. Agora pagina
+    automaticamente via _fetch_all_paginado() — pega TUDO.
+    """
     st.subheader('📊 Resumo da base importada')
 
     col_unid, _ = st.columns([2, 3])
@@ -418,11 +493,19 @@ def _render_resumo_base(supabase):
             'Unidade', ['Todas'] + UNIDADES_VALIDAS, key='base_filtro_unid'
         )
 
-    query = supabase.table('clientes_base').select('tipo, categoria_nome, unidade')
-    if filtro_unidade != 'Todas':
-        query = query.eq('unidade', filtro_unidade)
-    res = query.execute()
-    df = pd.DataFrame(res.data)
+    # ─── Paginação automática (v1.1) ──────────────────────────
+    # Como Supabase tem limite 1000/response, paginamos em loop até pegar tudo.
+    # Função factory cria query FRESCA a cada página (range() consome builder).
+    def _query_resumo():
+        q = supabase.table('clientes_base').select('tipo, categoria_nome, unidade')
+        if filtro_unidade != 'Todas':
+            q = q.eq('unidade', filtro_unidade)
+        return q
+
+    with st.spinner('Carregando resumo da base completa...'):
+        registros = _fetch_all_paginado(_query_resumo, page_size=1000, max_pages=100)
+
+    df = pd.DataFrame(registros)
 
     if df.empty:
         st.info('Nenhum cliente na base ainda. Use a aba "📥 Importar" pra começar.')
@@ -455,7 +538,13 @@ def _render_resumo_base(supabase):
 
 
 def _render_visualizar_clientes(supabase):
-    """Sub-aba: navegar nos clientes importados com filtros."""
+    """Sub-aba: navegar nos clientes importados com filtros.
+
+    FIX v1.1: Antes tinha .limit(500) hardcoded e response truncado em 1000.
+    Agora pagina até max_pages=5 (5000 resultados — suficiente pra navegação
+    com filtros). Pra busca específica, recomenda usar campo 'Buscar' que
+    filtra no banco e retorna pouco.
+    """
     st.subheader('🔍 Navegar pelos clientes')
 
     c1, c2, c3, c4 = st.columns(4)
@@ -468,27 +557,41 @@ def _render_visualizar_clientes(supabase):
     )
     f_busca = c4.text_input('Buscar nome/telefone', '', key='nav_busca')
 
-    query = supabase.table('clientes_base').select(
-        'telefone, nome, nome_original, genero, tipo, categoria_nome, '
-        'unidade, data_cadastro, ultima_compra, ultimo_agendamento'
-    ).limit(500)
-    if f_unid != 'Todas':
-        query = query.eq('unidade', f_unid)
-    if f_tipo != 'Todos':
-        query = query.eq('tipo', f_tipo)
-    if f_cat != 'Todas':
-        query = query.eq('categoria_nome', f_cat)
-    if f_busca:
-        query = query.or_(f'nome.ilike.%{f_busca}%,telefone.ilike.%{f_busca}%')
+    # ─── Paginação automática (v1.1) ──────────────────────────
+    def _query_navegar():
+        q = supabase.table('clientes_base').select(
+            'telefone, nome, nome_original, genero, tipo, categoria_nome, '
+            'unidade, data_cadastro, ultima_compra, ultimo_agendamento'
+        )
+        if f_unid != 'Todas':
+            q = q.eq('unidade', f_unid)
+        if f_tipo != 'Todos':
+            q = q.eq('tipo', f_tipo)
+        if f_cat != 'Todas':
+            q = q.eq('categoria_nome', f_cat)
+        if f_busca:
+            q = q.or_(f'nome.ilike.%{f_busca}%,telefone.ilike.%{f_busca}%')
+        return q
 
-    res = query.execute()
-    df = pd.DataFrame(res.data)
+    # Limita a 5000 resultados pra não travar o browser com tabela enorme
+    with st.spinner('Carregando clientes...'):
+        registros = _fetch_all_paginado(_query_navegar, page_size=1000, max_pages=5)
+
+    df = pd.DataFrame(registros)
 
     if df.empty:
         st.info('Nenhum cliente encontrado com esses filtros.')
         return
 
-    st.caption(f'Mostrando {len(df)} clientes (limite 500 por consulta)')
+    # Aviso se atingiu o limite (mostra que pode ter mais)
+    if len(df) >= 5000:
+        st.warning(
+            f'⚠️ Mostrando os primeiros 5.000 resultados. '
+            f'Use os filtros (unidade, tipo, categoria, busca) pra refinar.'
+        )
+    else:
+        st.caption(f'📊 {len(df):,} cliente(s) encontrado(s)'.replace(',', '.'))
+
     st.dataframe(df, hide_index=True, width='stretch')
 
 
