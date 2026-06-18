@@ -617,6 +617,7 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
         else:
             st.button(
                 "↩️ Mudar pra AUTO",
+                key=f"to_auto_disabled_{camp_id}",
                 disabled=True,
                 use_container_width=True,
                 help="Não dá mais — Bia já trabalhou esse lote.",
