@@ -1199,9 +1199,57 @@ def tela_transferencias(df_leads, df_conv):
 
 # ─────────── ABA 3: 📅 AGENDAMENTOS (mantida) ───────────
 
+# ═══════════════════════════════════════════════════════════════════════════
+# PATCH — dashboard_maislaser.py
+# Substituir a função `tela_agendamentos` inteira por essa versão.
+# Localizar no arquivo original em torno da linha 712:
+#   def tela_agendamentos(df_agend, df_leads, df_conv):
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ─────────── ABA 3: 📅 AGENDAMENTOS (status derivado dos campos reais) ───────────
+
+def _derivar_status_agendamento(row):
+    """
+    Status real do agendamento, derivado dos campos preenchidos pelos botões
+    dos templates D-1 (CONFIRMAR/REAGENDAR) e do dia (ESTOU INDO/NÃO VOU).
+
+    Prioridade (decrescente): NÃO VOU > REAGENDAR > ESTOU INDO > CONFIRMADO >
+    status do banco (realizado/cancelado/faltou) > agendado pendente.
+
+    Retorna: (chave, texto_badge, classe_css)
+    """
+    # 1) Cliente disse que NÃO VAI
+    if pd.notna(row.get('nao_vou_conseguir_em')):
+        return ('nao_vai', '❌ Não vai', 'badge-alerta')
+
+    # 2) Cliente pediu pra REAGENDAR
+    if pd.notna(row.get('reagendamento_solicitado_em')):
+        return ('reagendar', '🔄 Pediu reagendar', 'badge-amber')
+
+    # 3) Cliente disse que está A CAMINHO (botão "ESTOU INDO" do template do dia)
+    if pd.notna(row.get('estou_indo_em')):
+        return ('a_caminho', '🚗 A caminho', 'badge-ok')
+
+    # 4) Cliente CONFIRMOU presença (botão "CONFIRMAR PRESENÇA" do D-1)
+    status_banco = str(row.get('status') or 'agendado').lower()
+    if pd.notna(row.get('confirmado_em')) or status_banco == 'confirmado':
+        return ('confirmado', '✅ Confirmado', 'badge-ok')
+
+    # 5+) Status terminal vindo do banco
+    if status_banco == 'realizado':
+        return ('realizado', '🎉 Realizado', 'badge-ok')
+    if status_banco == 'cancelado':
+        return ('cancelado', '❌ Cancelado', 'badge-alerta')
+    if status_banco in ('faltou', 'no_show'):
+        return ('faltou', '😶 Faltou', 'badge-amber')
+
+    # default: agendado pendente (nenhum botão clicado ainda)
+    return ('pendente', '⏳ Pendente', 'badge-info')
+
+
 def tela_agendamentos(df_agend, df_leads, df_conv):
     st.markdown("# 📅 Agendamentos")
-    st.caption("Sessões de cortesia agendadas pela Bia via Google Calendar")
+    st.caption("Sessões de cortesia agendadas pela Bia")
 
     if df_agend is None or df_agend.empty:
         st.info("📭 Nenhum agendamento registrado ainda. Quando a Bia agendar a primeira cortesia, ela aparecerá aqui.")
@@ -1225,6 +1273,12 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
         return u
 
     df['unidade_norm'] = df['unidade'].apply(_norm_unidade)
+
+    # ─── Status derivado (combina status do banco com campos confirmado_em,
+    # estou_indo_em, reagendamento_solicitado_em, nao_vou_conseguir_em) ───
+    df['_status_chave'] = df.apply(lambda r: _derivar_status_agendamento(r)[0], axis=1)
+    df['_status_texto'] = df.apply(lambda r: _derivar_status_agendamento(r)[1], axis=1)
+    df['_status_classe'] = df.apply(lambda r: _derivar_status_agendamento(r)[2], axis=1)
 
     if 'agend_unidade_btn' not in st.session_state:
         st.session_state['agend_unidade_btn'] = "Todas"
@@ -1266,11 +1320,19 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
             ["Próximos (hoje em diante)", "Hoje", "Próximos 7 dias", "Últimos 30 dias", "Tudo"],
             index=0, key="agend_periodo")
     with col_f2:
-        if 'status' in df.columns:
-            status_opcoes = ["Todos"] + sorted(df['status'].dropna().unique().tolist())
-        else:
-            status_opcoes = ["Todos"]
-        status_filtro = st.selectbox("Status", status_opcoes, key="agend_status")
+        # Opções de status agora vêm do status DERIVADO, não do banco
+        opcoes_status_derivado = [
+            "Todos",
+            "⏳ Pendente",
+            "✅ Confirmado",
+            "🚗 A caminho",
+            "🔄 Pediu reagendar",
+            "❌ Não vai",
+            "🎉 Realizado",
+            "❌ Cancelado",
+            "😶 Faltou",
+        ]
+        status_filtro = st.selectbox("Status", opcoes_status_derivado, key="agend_status")
 
     agora = datetime.now(TZ_SP)
     hoje_inicio = agora.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1286,8 +1348,9 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
     elif periodo == "Últimos 30 dias":
         df_filt = df_filt[(df_filt['data_hora_sp'] >= agora - timedelta(days=30)) & (df_filt['data_hora_sp'] <= agora)]
 
-    if status_filtro != "Todos" and 'status' in df_filt.columns:
-        df_filt = df_filt[df_filt['status'] == status_filtro]
+    # Filtro por status DERIVADO
+    if status_filtro != "Todos":
+        df_filt = df_filt[df_filt['_status_texto'] == status_filtro]
 
     if unidade_filtro != "Todas":
         df_filt = df_filt[df_filt['unidade_norm'] == unidade_filtro]
@@ -1298,13 +1361,19 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
         df_filt = df_filt.sort_values('data_hora', ascending=False)
 
     st.divider()
-    if 'status' in df_filt.columns and not df_filt.empty:
-        status_lower = df_filt['status'].astype(str).str.lower()
-        confirmados = int((status_lower == 'confirmado').sum())
-        pendentes = int((status_lower == 'agendado').sum())
-    else:
-        confirmados = 0
-        pendentes = 0
+
+    # ─── Métricas BASEADAS NO STATUS DERIVADO ───
+    chaves = df_filt['_status_chave'] if not df_filt.empty else pd.Series(dtype=str)
+
+    # "Confirmados" = cliente respondeu de qualquer jeito positivo
+    # (confirmou D-1, disse que está indo, ou ja foi marcado realizado)
+    confirmados = int(chaves.isin(['confirmado', 'a_caminho', 'realizado']).sum())
+
+    # "Pendente confirmar" = status='agendado' sem nenhum botão clicado
+    pendentes = int((chaves == 'pendente').sum())
+
+    # "Cancelados/Reagendar" = cliente pediu reagendar ou disse que não vai
+    cancelados = int(chaves.isin(['nao_vai', 'reagendar', 'cancelado']).sum())
 
     try:
         proximos_7 = int(((df_filt['data_hora_sp'] >= hoje_inicio) &
@@ -1316,11 +1385,15 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
     with col1:
         st.markdown(render_metric_card("📅", len(df_filt), "Total no filtro", "primary"), unsafe_allow_html=True)
     with col2:
-        st.markdown(render_metric_card("✅", confirmados, "Confirmados", "green"), unsafe_allow_html=True)
+        st.markdown(render_metric_card("✅", confirmados, "Confirmados", "green",
+                                       sub="confirmou D-1 ou disse que tá indo"), unsafe_allow_html=True)
     with col3:
-        st.markdown(render_metric_card("⏳", pendentes, "Pendente confirmar", "amber"), unsafe_allow_html=True)
+        cor_pend = "red" if pendentes > 0 else "amber"
+        st.markdown(render_metric_card("⏳", pendentes, "Pendente confirmar", cor_pend), unsafe_allow_html=True)
     with col4:
-        st.markdown(render_metric_card("⏭️", proximos_7, "Próximos 7 dias", "blue"), unsafe_allow_html=True)
+        cor_canc = "red" if cancelados > 0 else "blue"
+        st.markdown(render_metric_card("🔄", cancelados, "Reagendar/Cancelar", cor_canc,
+                                       sub="precisam de atenção da recepção"), unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
 
     st.markdown(f"### 📋 Lista — {len(df_filt)} agendamento(s)")
@@ -1329,7 +1402,7 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
         st.info("Nenhum agendamento com esses filtros.")
         return
 
-    h1, h2, h3, h4, h5, h6, h7 = st.columns([1.6, 1.4, 0.9, 1.2, 1.4, 1.1, 0.9])
+    h1, h2, h3, h4, h5, h6, h7 = st.columns([1.6, 1.4, 0.9, 1.2, 1.4, 1.3, 0.9])
     h1.markdown("**Cliente**")
     h2.markdown("**Telefone**")
     h3.markdown("**Unidade**")
@@ -1339,25 +1412,14 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
     h7.markdown("**Ação**")
     st.divider()
 
-    # Mapeamento status → (texto, classe CSS badge)
-    status_badge_map = {
-        'agendado':   ('📅 Agendado',   'badge-info'),
-        'confirmado': ('✅ Confirmado', 'badge-ok'),
-        'cancelado':  ('❌ Cancelado',  'badge-alerta'),
-        'realizado':  ('🎉 Realizado',  'badge-ok'),
-        'faltou':     ('😶 Faltou',     'badge-amber'),
-        'no_show':    ('😶 Faltou',     'badge-amber'),
-    }
-
     for _, ag in df_filt.iterrows():
-        c1, c2, c3, c4, c5, c6, c7 = st.columns([1.6, 1.4, 0.9, 1.2, 1.4, 1.1, 0.9])
+        c1, c2, c3, c4, c5, c6, c7 = st.columns([1.6, 1.4, 0.9, 1.2, 1.4, 1.3, 0.9])
 
         nome = ag.get('nome') or '—'
         telefone = str(ag.get('telefone', '—'))
         unidade = ag.get('unidade_norm') or '—'
         area = ag.get('area') or '—'
         fazer = bool(ag.get('fazer_na_hora', False))
-        status = str(ag.get('status') or 'agendado').lower()
 
         try:
             quando = ag['data_hora_sp'].strftime('%d/%m %H:%M')
@@ -1374,15 +1436,15 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
         c1.write(f"{prefixo}{nome}")
         c2.write(f"+{telefone}" if not telefone.startswith('+') else telefone)
         c3.write(unidade)
-        # Área com badge "na hora" caso aplicável
         if fazer:
             c4.markdown(f"{area} <span class='badge-amber'>⚡ na hora</span>", unsafe_allow_html=True)
         else:
             c4.write(area)
         c5.write(quando)
-        # Status como badge colorido
-        texto_status, classe_status = status_badge_map.get(status, (status, 'badge-neutral'))
-        c6.markdown(f"<span class='{classe_status}'>{texto_status}</span>", unsafe_allow_html=True)
+
+        # Badge usando o STATUS DERIVADO
+        c6.markdown(f"<span class='{ag['_status_classe']}'>{ag['_status_texto']}</span>",
+                    unsafe_allow_html=True)
 
         if c7.button("Ver", key=f"ver_agend_{telefone}_{ag.name}"):
             st.session_state['conversa_selecionada'] = telefone
@@ -1390,7 +1452,7 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
 
         st.markdown("---")
 
-    st.caption("⏭️ = agendamento futuro  ·  badges coloridos indicam o status")
+    st.caption("⏭️ = agendamento futuro  ·  badges coloridos refletem a última resposta do cliente aos templates de lembrete")
 
 
 # ─────────── ABA 4: 📈 MÉTRICAS (mantida, fix de funil vem na Entrega 2) ───────────
