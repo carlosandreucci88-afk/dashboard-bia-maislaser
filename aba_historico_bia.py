@@ -519,6 +519,31 @@ def _render_drilldown(df_lotes, contagem):
             ).dt.tz_convert(TZ_SP).dt.strftime("%d/%m %H:%M")
             df_display[col_label] = df_display[col_label].fillna("—")
 
+    # 🔔 Último Lembrete (R1 ou R2) — baseado em tentativas_envio + ultima_notif_recepcao
+    if "tentativas_envio" in df_display.columns and "ultima_notif_recepcao" in df_display.columns:
+        notif_fmt = pd.to_datetime(
+            df_display["ultima_notif_recepcao"], errors="coerce", utc=True
+        ).dt.tz_convert(TZ_SP).dt.strftime("%d/%m %H:%M")
+
+        def _format_lembrete(row, hora):
+            tent = row.get("tentativas_envio") or 0
+            try:
+                tent = int(tent)
+            except (ValueError, TypeError):
+                tent = 0
+            if tent <= 1 or not hora or pd.isna(hora):
+                return "—"
+            if tent == 2:
+                return f"🔔 R1 · {hora}"
+            if tent == 3:
+                return f"🔔 R2 · {hora}"
+            return f"🔔 R{tent - 1} · {hora}"
+
+        df_display["🔔 Último Lembrete"] = [
+            _format_lembrete(df_display.iloc[i], notif_fmt.iloc[i])
+            for i in range(len(df_display))
+        ]
+
     # Status com emoji
     if "status" in df_display.columns:
         df_display["🚦 Status"] = df_display["status"].fillna("DESCONHECIDO")
@@ -544,6 +569,7 @@ def _render_drilldown(df_lotes, contagem):
         "📱 Telefone",
         "🚦 Status",
         "🚀 Disparado em",
+        "🔔 Último Lembrete",
         "💬 Respondeu em",
         "💬 Primeira msg",
     ]
