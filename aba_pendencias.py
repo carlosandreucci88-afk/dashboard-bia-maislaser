@@ -5,20 +5,25 @@ ABA PENDÊNCIAS BIA — Casos abertos esperando contato da recepção
 Substitui a notificação WhatsApp avulsa (que sofria com janela 24h da Meta)
 por um painel persistente onde a recepção entra e vê o que precisa atender.
 
-Lê 2 fontes do Supabase:
+Lê 3 fontes do Supabase:
   • bia_disparos      → status IN ['HANDOFF', 'HANDOFF_MED', 'HANDOFF_MEDICO']
   • agendamentos      → reagendamento_solicitado_em OR nao_vou_conseguir_em
+  • bia_disparos      → status='AGENDADA' com pergunta pós-agendamento
+                        (ultima_notif_recepcao > desfecho_em)
 
-Ambas filtradas por contatado_em IS NULL (pendência aberta).
+Todas filtradas por contatado_em IS NULL (pendência aberta), EXCETO a de
+pós-agendamento que usa lógica especial: aparece se cliente voltou a perguntar
+DEPOIS do contato (ultima_notif_recepcao > contatado_em).
 
 Ação principal: botão "✓ Marcar contatado" grava timestamp em contatado_em.
 Não muda o status original (preserva audit trail: "isso foi um HANDOFF_MED
 que foi atendido em XX/YY").
 
-Sub-abas (escopo Fase 4):
+Sub-abas:
   💬 HANDOFF              — cliente confuso / preço / fora do script
   🩺 HANDOFF Médico       — triagem médica positiva
   🔄 Reagendar/Não vai    — clicou PRECISO REAGENDAR ou NÃO VOU CONSEGUIR
+  💭 Pergunta pós-agend.  — AGENDADA com dúvida (preparo, local, etc)
 
 SKIP_BASE, ERRO_NUMERO_INVALIDO, BLOQUEADO_PELO_INDICADO → fora de escopo
 (virão em fase posterior conforme decisão do dono do projeto).
@@ -52,7 +57,7 @@ def _get_sb():
 
 
 # ============================================================================
-# CARGAS DE DADOS — 2 queries no Supabase com cache 30s
+# CARGAS DE DADOS — 3 queries no Supabase com cache 30s
 # ============================================================================
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -142,6 +147,60 @@ def _carregar_pendencias_agendamentos():
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def _carregar_pendencias_pos_agendamento():
+    """AGENDADA com pergunta pós-agendamento ainda não respondida pela recepção.
+
+    Filtro: cliente já agendou (desfecho_em preenchido), depois mandou msg que
+    disparou notif (ultima_notif_recepcao > desfecho_em), e recepção não marcou
+    contatado_em OU cliente voltou a mandar msg depois do contato 
+    (ultima_notif_recepcao > contatado_em)."""
+    sb = _get_sb()
+    try:
+        # Carrega todos AGENDADA com ultima_notif_recepcao preenchida
+        result = sb.table("bia_disparos").select(
+            "id, telefone, nome_indicado, nome_cadastrante, unidade, status, "
+            "desfecho_em, ultima_notif_recepcao, contatado_em, slot_area, slot_dia, slot_hora"
+        ).eq("status", "AGENDADA") \
+         .not_.is_("ultima_notif_recepcao", "null") \
+         .limit(500).execute()
+
+        df = pd.DataFrame(result.data)
+        if df.empty:
+            return df
+
+        # Parse timestamps tz-aware
+        for col in ('desfecho_em', 'ultima_notif_recepcao', 'contatado_em', 'slot_dia'):
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors='coerce', utc=True)
+
+        # Filtro Python: msg veio DEPOIS do agendamento (pergunta pós-fechamento)
+        df = df[df['ultima_notif_recepcao'] > df['desfecho_em']].copy()
+        if df.empty:
+            return df
+
+        # Pendente se: contatado_em null OU cliente voltou (ultima_notif > contatado)
+        mask_pendente = df['contatado_em'].isna() | (df['ultima_notif_recepcao'] > df['contatado_em'])
+        df = df[mask_pendente].copy()
+        if df.empty:
+            return df
+
+        # Coluna "quando virou pendência" = ultima_notif_recepcao
+        try:
+            df['quando_sp'] = df['ultima_notif_recepcao'].dt.tz_convert(TZ_SP)
+            df['sessao_sp'] = df['slot_dia'].dt.tz_convert(TZ_SP) if 'slot_dia' in df.columns else None
+        except Exception:
+            df['quando_sp'] = df['ultima_notif_recepcao']
+            df['sessao_sp'] = df.get('slot_dia')
+
+        df['nome'] = df['nome_indicado'].fillna('Sem nome')
+
+        return df.sort_values('quando_sp', ascending=False)
+    except Exception as e:
+        st.error(f"Erro ao carregar perguntas pós-agendamento: {e}")
+        return pd.DataFrame()
+
+
 # ============================================================================
 # AÇÕES (mutações) — marcar contatado
 # ============================================================================
@@ -156,6 +215,7 @@ def _marcar_contatado(tabela, registro_id):
         # Invalida cache pra remover o item da lista no próximo rerun
         _carregar_pendencias_bia_disparos.clear()
         _carregar_pendencias_agendamentos.clear()
+        _carregar_pendencias_pos_agendamento.clear()
         return True
     except Exception as e:
         st.error(f"Erro ao marcar contatado: {e}")
@@ -335,6 +395,80 @@ def _render_lista_reagendar(df, key_prefix):
         st.caption(f"Mostrando 100 de {len(df_f)}. Use os filtros pra refinar.")
 
 
+def _render_lista_pos_agendamento(df, key_prefix):
+    """Renderiza lista de AGENDADA com pergunta pós-agendamento."""
+    if df.empty:
+        st.success("🎉 Nenhuma pergunta pós-agendamento aberta!")
+        return
+
+    df_f = _filtros_periodo_unidade(df, "quando_sp", "unidade", key_prefix, default_periodo="Tudo")
+
+    if df_f.empty:
+        st.info("Nenhum caso nos filtros selecionados.")
+        return
+
+    col_t, col_e = st.columns([4, 1.4])
+    with col_t:
+        st.markdown(f"### {len(df_f)} pergunta(s) aberta(s)")
+    with col_e:
+        _botao_export_xlsx(df_f, "pendencias_pos_agend", key_prefix)
+
+    h1, h2, h3, h4, h5, h6, h7 = st.columns([1.7, 1.2, 0.8, 1.2, 1.0, 0.9, 1.5])
+    h1.markdown("**Cliente**")
+    h2.markdown("**Telefone**")
+    h3.markdown("**Unidade**")
+    h4.markdown("**Sessão**")
+    h5.markdown("**Área**")
+    h6.markdown("**Perguntou há**")
+    h7.markdown("**Ação**")
+    st.markdown('<hr style="margin: 4px 0 8px 0;">', unsafe_allow_html=True)
+
+    for _, row in df_f.head(100).iterrows():
+        c1, c2, c3, c4, c5, c6, c7 = st.columns([1.7, 1.2, 0.8, 1.2, 1.0, 0.9, 1.5])
+
+        nome = row.get('nome') or '—'
+        tel = str(row.get('telefone', '—'))
+        unid = _norm_unidade_display(row.get('unidade'))
+        area = row.get('slot_area') or '—'
+        quando_str = _tempo_relativo(row.get('quando_sp'))
+
+        # Sessão agendada (slot_dia + slot_hora)
+        sessao = '—'
+        if pd.notna(row.get('sessao_sp')):
+            try:
+                hora = row.get('slot_hora') or ''
+                hora_str = str(hora)[:5] if hora else ''
+                sessao = row['sessao_sp'].strftime('%d/%m') + (f' {hora_str}' if hora_str else '')
+            except Exception:
+                sessao = '—'
+
+        # Badge: cliente nova vs já contatado mas voltou
+        if pd.notna(row.get('contatado_em')):
+            tipo_badge = '<span class="badge-amber">🔁 Voltou a perguntar</span>'
+        else:
+            tipo_badge = '<span class="badge-info">💭 Pergunta nova</span>'
+
+        c1.markdown(f"<div style='font-weight: 600;'>{nome}</div>{tipo_badge}", unsafe_allow_html=True)
+        c2.markdown(f"<div style='font-size: 12px; color: #6B7280;'>+{tel}</div>", unsafe_allow_html=True)
+        c3.write(unid)
+        c4.markdown(f"<div style='font-size: 12px; color: #4B5563;'>{sessao}</div>", unsafe_allow_html=True)
+        c5.markdown(f"<div style='font-size: 12px; color: #6B7280;'>{area}</div>", unsafe_allow_html=True)
+        c6.markdown(f"<div style='font-size: 12px; color: #9CA3AF;'>{quando_str}</div>", unsafe_allow_html=True)
+
+        with c7:
+            sub_wa, sub_ok = st.columns([1, 1])
+            with sub_wa:
+                st.link_button("💬 WA", url=f"https://wa.me/{tel}", use_container_width=True)
+            with sub_ok:
+                if st.button("✓", key=f"contat_pa_{row['id']}", help="Marcar contatado", use_container_width=True):
+                    if _marcar_contatado("bia_disparos", row['id']):
+                        st.toast(f"✅ {nome} marcado como contatado", icon="✅")
+                        st.rerun()
+
+    if len(df_f) > 100:
+        st.caption(f"Mostrando 100 de {len(df_f)}. Use os filtros pra refinar.")
+
+
 # ============================================================================
 # ENTRYPOINT — chamado de dashboard_maislaser.py
 # ============================================================================
@@ -347,38 +481,42 @@ def render_aba_pendencias():
         "Quando você ligar/atender, marque com ✓ pra remover da fila."
     )
 
-    # Carga das 2 fontes
+    # Carga das 3 fontes
     df_bd = _carregar_pendencias_bia_disparos()
     df_ag = _carregar_pendencias_agendamentos()
+    df_pa = _carregar_pendencias_pos_agendamento()
 
     # Contagens pra badges das sub-abas
     qtd_handoff = int((df_bd['tipo'] == 'HANDOFF').sum()) if not df_bd.empty else 0
     qtd_med     = int((df_bd['tipo'] == 'HANDOFF_MED').sum()) if not df_bd.empty else 0
     qtd_reag    = len(df_ag)
-    qtd_total   = qtd_handoff + qtd_med + qtd_reag
+    qtd_pos     = len(df_pa)
+    qtd_total   = qtd_handoff + qtd_med + qtd_reag + qtd_pos
 
     if qtd_total == 0:
         st.success("🎉 **Nenhuma pendência aberta!** A recepção tá em dia.")
         st.caption(
-            "Quando aparecer cliente HANDOFF, HANDOFF_MED ou REAGENDAR, "
+            "Quando aparecer cliente HANDOFF, HANDOFF_MED, REAGENDAR ou pergunta pós-agendamento, "
             "vai listar aqui automaticamente. Atualiza a cada 30s."
         )
         return
 
-    # KPIs no topo
-    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+    # KPIs no topo (5 cards agora)
+    col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
     col_m1.markdown(_render_metric_card_local("📋", qtd_total, "Total aberto", "primary"), unsafe_allow_html=True)
     col_m2.markdown(_render_metric_card_local("💬", qtd_handoff, "HANDOFF", "blue"), unsafe_allow_html=True)
     col_m3.markdown(_render_metric_card_local("🩺", qtd_med, "HANDOFF Médico", "purple"), unsafe_allow_html=True)
     col_m4.markdown(_render_metric_card_local("🔄", qtd_reag, "Reagendar / Não vai", "amber"), unsafe_allow_html=True)
+    col_m5.markdown(_render_metric_card_local("💭", qtd_pos, "Pergunta pós-agend", "green"), unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Sub-abas com contadores no título
-    tab_h, tab_m, tab_r = st.tabs([
+    # Sub-abas com contadores no título (4 abas agora)
+    tab_h, tab_m, tab_r, tab_p = st.tabs([
         f"💬 HANDOFF ({qtd_handoff})",
         f"🩺 HANDOFF Médico ({qtd_med})",
         f"🔄 Reagendar / Não vai ({qtd_reag})",
+        f"💭 Pergunta pós-agendamento ({qtd_pos})",
     ])
 
     with tab_h:
@@ -391,3 +529,6 @@ def render_aba_pendencias():
 
     with tab_r:
         _render_lista_reagendar(df_ag, "pend_r")
+
+    with tab_p:
+        _render_lista_pos_agendamento(df_pa, "pend_p")
