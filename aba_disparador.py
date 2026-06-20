@@ -363,36 +363,52 @@ def render_aba_disparador():
                 df = df[df['Serviço'] != '']
 
                 # --------------------------------------------------
-                # AGRUPAMENTO: Serviços agrupados POR HORÁRIO
-                # Cada linha = 1 cliente com seus horários e serviços corretos
+                # AGRUPAMENTO: Serviços agrupados POR TELEFONE
+                # FIX v2: usa Telefone como chave única (não Cliente+Telefone)
+                # Evita duplicatas quando o mesmo telefone aparece com
+                # variações de nome entre comandas diferentes do UNO.
                 # --------------------------------------------------
 
-                # Agrupa serviços por Cliente + Telefone + Horario (respeita sessões diferentes)
-                df_srv_horario = df.groupby(['Cliente', 'Telefone', 'Horario'])['Serviço'].apply(
+                # Nome canônico: primeiro nome encontrado por telefone
+                df_nomes = df.groupby('Telefone')['Cliente'].first().reset_index()
+
+                # Agrupa serviços por Telefone + Horario (respeita sessões diferentes)
+                df_srv_horario = df.groupby(['Telefone', 'Horario'])['Serviço'].apply(
                     lambda x: ', '.join(sorted(set(x)))
                 ).reset_index()
 
-                # Pega horários distintos ordenados por cliente
-                df_horarios = df.groupby(['Cliente', 'Telefone'])['Horario'].apply(
+                # Pega horários distintos ordenados por telefone
+                df_horarios = df.groupby('Telefone')['Horario'].apply(
                     lambda x: sorted(set(x))
                 ).reset_index()
                 df_horarios['Horario2'] = df_horarios['Horario'].apply(lambda x: x[1] if len(x) > 1 else "")
                 df_horarios['Horario']  = df_horarios['Horario'].apply(lambda x: x[0])
 
                 # Serviços da sessão 1 (primeiro horário)
-                df_srv_h1 = df_srv_horario.groupby(['Cliente', 'Telefone']).first().reset_index()[['Cliente', 'Telefone', 'Serviço']]
+                df_srv_h1 = df_srv_horario.groupby('Telefone').first().reset_index()[['Telefone', 'Serviço']]
 
                 # Serviços da sessão 2 (segundo horário, se existir)
-                df_srv_h2 = df_srv_horario.groupby(['Cliente', 'Telefone']).apply(
+                df_srv_h2 = df_srv_horario.groupby('Telefone').apply(
                     lambda x: x.iloc[1]['Serviço'] if len(x) > 1 else ""
                 ).reset_index().rename(columns={0: 'Servico2'})
 
-                # Monta dataframe final com serviços corretos por sessão
-                df_agrupado = df_srv_h1.merge(df_horarios[['Cliente', 'Telefone', 'Horario', 'Horario2']], on=['Cliente', 'Telefone'])
-                df_agrupado = df_agrupado.merge(df_srv_h2, on=['Cliente', 'Telefone'], how='left')
+                # Monta dataframe final — junta nome, serviços e horários por telefone
+                df_agrupado = df_srv_h1.merge(df_nomes, on='Telefone')
+                df_agrupado = df_agrupado.merge(df_horarios[['Telefone', 'Horario', 'Horario2']], on='Telefone')
+                df_agrupado = df_agrupado.merge(df_srv_h2, on='Telefone', how='left')
                 df_agrupado['Servico2'] = df_agrupado['Servico2'].fillna("")
                 df_agrupado = df_agrupado[['Cliente', 'Serviço', 'Telefone', 'Horario', 'Horario2', 'Servico2']]
                 total_agrupado = len(df_agrupado)
+
+                # Mostra quantos telefones duplicados foram unificados
+                total_linhas_pre = len(df)
+                if total_agrupado < total_linhas_pre:
+                    dedup = total_linhas_pre - total_agrupado
+                    # Conta apenas deduplicações reais (mesmo tel, nomes diferentes)
+                    tels_com_nomes_diff = df.groupby('Telefone')['Cliente'].nunique()
+                    tels_dedup = (tels_com_nomes_diff > 1).sum()
+                    if tels_dedup > 0:
+                        st.info(f"🔄 {tels_dedup} telefone(s) tinham nomes diferentes entre comandas — unificados.")
 
                 # --------------------------------------------------
                 # EXIBIÇÃO DOS DADOS NA TELA
