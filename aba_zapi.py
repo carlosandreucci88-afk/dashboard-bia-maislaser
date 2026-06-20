@@ -838,19 +838,29 @@ def _zapi_get_ranking(data_inicio: str = "", data_fim: str = ""):
         return {"_erro": "Resposta do Apps Script não é JSON válido."}
 
 
+# ============================================================================
+# PATCH — função tela_zapi_ranking (corrige mismatch com endpoint funcionarias_real)
+# ----------------------------------------------------------------------------
+# COMO APLICAR (GitHub web UI):
+#   1) Abre https://github.com/carlosandreucci88-afk/dashboard-bia-maislaser
+#   2) Clica em `aba_zapi.py`
+#   3) Clica no ícone de lápis (Edit this file)
+#   4) Ctrl+F → busca: `def tela_zapi_ranking():`
+#   5) Seleciona desde `def tela_zapi_ranking():` até o final dessa função
+#      (a próxima função após ela é `tela_zapi_indicacoes` ou outra parecida)
+#   6) Substitui pelo código abaixo
+#   7) Commit pra branch `main` (o Railway redeploya em ~1min)
+# ============================================================================
+
 def tela_zapi_ranking():
     st.markdown("## 🏆 Ranking de funcionárias")
     st.caption(
         "Calculado em tempo real a partir de CLIENTES + arquivo + INDICACOES + arquivo. "
-        "Conta como **cliente** quem enviou pelo menos 1 contato (Total Indicacoes > 0). "
-        "Conta como **indicação** cada contato com status VALIDO."
+        "Conta como **cliente** quem bateu meta (enviou os 20 contatos válidos). "
+        "Conta como **indicação** cada contato indicado por essas clientes."
     )
 
-    # ─── Seletor de período (v9.4) ───────────────────────────────────────
-    # Filtra DATA BATEU META (clientes) e DATA da indicação (indicações).
-    # Filtros independentes — cliente que bateu meta em maio com indicações
-    # que entraram em junho conta nas duas métricas separadamente.
-    # ───────────────────────────────────────────────────────────────────
+    # ─── Seletor de período ──────────────────────────────────────────────
     from datetime import date, timedelta
 
     hoje = date.today()
@@ -865,7 +875,7 @@ def tela_zapi_ranking():
         "🗓️ Últimos 30 dias": (hoje - timedelta(days=29), hoje),
         "📅 Este mês": (primeiro_dia_mes, hoje),
         "📆 Mês passado": (primeiro_dia_mes_passado, ultimo_dia_mes_passado),
-        "🎯 Personalizado": (None, None),  # vai abrir date_input
+        "🎯 Personalizado": (None, None),
     }
 
     col_preset, col_atualizar = st.columns([4, 1])
@@ -882,7 +892,6 @@ def tela_zapi_ranking():
             _zapi_get_ranking.clear()
             st.rerun()
 
-    # Resolve as datas finais (string ISO ou vazio)
     data_inicio_str = ""
     data_fim_str = ""
 
@@ -932,15 +941,31 @@ def tela_zapi_ranking():
     if _mostrar_erro_e_parar(data, "(carregando ranking)"):
         return
 
-    ranking = data.get("ranking", [])
-    totais = data.get("totais", {})
-    if not ranking:
+    # ─── FIX v9.9: endpoint retorna `linhas`, não `ranking`. ──────────────
+    # Antes: data.get("ranking", []) sempre retornava []
+    # Agora: lê data["linhas"] que é o formato real do endpoint
+    # ─────────────────────────────────────────────────────────────────────
+    linhas = data.get("linhas", [])
+    if not linhas:
         st.warning("Nenhum dado no ranking ainda.")
         return
 
-    df = pd.DataFrame(ranking)
+    df = pd.DataFrame(linhas)
 
-    # ─── Filtro por unidade (vem ANTES dos cards pra que eles reflitam o filtro) ───
+    # ─── FIX v9.9: adaptar nomes de campos ──────────────────────────────
+    # Endpoint retorna: disparos, indicacoes_validas, vouchers_validados, taxa_conversao
+    # Dashboard usa internamente: clientes_com_indicacoes, indic_por_cliente
+    # Renomear pra manter compat com o resto do código:
+    if "disparos" in df.columns:
+        df = df.rename(columns={"disparos": "clientes_com_indicacoes"})
+    # Calcular indic_por_cliente (não vem do endpoint)
+    df["indic_por_cliente"] = df.apply(
+        lambda r: round(r["indicacoes_validas"] / r["clientes_com_indicacoes"], 1)
+                  if r["clientes_com_indicacoes"] > 0 else 0,
+        axis=1,
+    )
+
+    # ─── Filtro por unidade ───
     unid_filtro = st.radio(
         "Filtrar por unidade:",
         ["Todas", "Mogi", "Suzano"],
@@ -951,34 +976,20 @@ def tela_zapi_ranking():
     if unid_filtro != "Todas":
         df_filtrado = df_filtrado[df_filtrado["unidade"].str.lower() == unid_filtro.lower()]
 
-    # ─── Cards de resumo — recalculados a partir do DF FILTRADO ───
-    fontes = totais.get("fontes", {})
-    if unid_filtro == "Todas":
-        # Usa totais do API direto (mais preciso, vem do Apps Script)
-        n_func = totais.get("funcionarias_distintas", 0)
-        n_cli = totais.get("clientes_com_indicacoes", 0)
-        n_ind = totais.get("indicacoes_validas", 0)
-    else:
-        # Calcula a partir do DF filtrado
-        n_func = len(df_filtrado)
-        n_cli = int(df_filtrado["clientes_com_indicacoes"].sum())
-        n_ind = int(df_filtrado["indicacoes_validas"].sum())
+    # ─── Cards de resumo — calculados a partir do DF filtrado ───
+    n_func = len(df_filtrado)
+    n_cli = int(df_filtrado["clientes_com_indicacoes"].sum())
+    n_ind = int(df_filtrado["indicacoes_validas"].sum())
+    n_vouch = int(df_filtrado["vouchers_validados"].sum()) if "vouchers_validados" in df_filtrado.columns else 0
 
     col_a, col_b, col_c, col_d = st.columns(4)
-    col_a.metric("👥 Funcionárias distintas", n_func)
-    col_b.metric("✅ Clientes que indicaram", n_cli)
-    col_c.metric("📨 Indicações válidas", f"{n_ind:,}".replace(",", "."))
-    col_d.metric(
-        "📚 Fonte de dados",
-        f"{fontes.get('clientes_ativos', 0) + fontes.get('clientes_arquivo', 0)} clientes",
-        help=(
-            f"CLIENTES: {fontes.get('clientes_ativos', 0)} ativos + "
-            f"{fontes.get('clientes_arquivo', 0)} arquivados.\n"
-            f"INDICACOES: {fontes.get('indicacoes_ativas', 0)} ativas + "
-            f"{fontes.get('indicacoes_arquivo', 0)} arquivadas.\n"
-            f"(Não filtra por unidade — é a base completa de dados.)"
-        ),
-    )
+    col_a.metric("👥 Funcionárias", n_func, help="Funcionárias com pelo menos 1 cliente ou indicação no período")
+    col_b.metric("🎯 Bateram meta", n_cli,
+        help="Clientes que enviaram 20 contatos válidos (= 'disparos' no endpoint)")
+    col_c.metric("📨 Indicações", f"{n_ind:,}".replace(",", "."),
+        help="Total de contatos indicados pelas clientes que bateram meta")
+    col_d.metric("🎁 Vouchers", n_vouch,
+        help="Clientes que tiveram voucher liberado (status FINALIZADO)")
 
     st.markdown("---")
 
@@ -1012,7 +1023,7 @@ def tela_zapi_ranking():
                   </div>
                   <div style="color: #6b7280; font-size: 11px;">indicações</div>
                   <div style="margin-top: 4px; font-size: 12px; color: #374151;">
-                    {int(r['clientes_com_indicacoes'])} cliente(s)
+                    {int(r['clientes_com_indicacoes'])} cliente(s) c/ meta
                   </div>
                 </div>
                 """.replace(",", "."),
@@ -1025,33 +1036,51 @@ def tela_zapi_ranking():
     st.markdown("### 📋 Ranking completo")
     df_tabela = df.copy()
     df_tabela.insert(0, "#", range(1, len(df_tabela) + 1))
+
+    # Inclui taxa_conversao se vier do endpoint
+    cols_tabela = ["#", "funcionaria", "unidade", "clientes_com_indicacoes",
+                   "indicacoes_validas", "indic_por_cliente"]
+    if "vouchers_validados" in df_tabela.columns:
+        cols_tabela.append("vouchers_validados")
+    if "taxa_conversao" in df_tabela.columns:
+        cols_tabela.append("taxa_conversao")
+
+    df_tabela = df_tabela[cols_tabela]
     df_tabela = df_tabela.rename(columns={
         "funcionaria": "Funcionária",
         "unidade": "Unidade",
-        "clientes_com_indicacoes": "Clientes que indicaram",
-        "indicacoes_validas": "Indicações válidas",
+        "clientes_com_indicacoes": "Bateram meta",
+        "indicacoes_validas": "Indicações",
         "indic_por_cliente": "Indic / cliente",
+        "vouchers_validados": "Vouchers",
+        "taxa_conversao": "Conversão %",
     })
+
+    column_config = {
+        "#": st.column_config.NumberColumn(width="small"),
+        "Indicações": st.column_config.NumberColumn(format="%d"),
+        "Indic / cliente": st.column_config.NumberColumn(format="%.1f"),
+    }
+    if "Vouchers" in df_tabela.columns:
+        column_config["Vouchers"] = st.column_config.NumberColumn(format="%d")
+    if "Conversão %" in df_tabela.columns:
+        column_config["Conversão %"] = st.column_config.TextColumn()
+
     st.dataframe(
         df_tabela,
         use_container_width=True,
         hide_index=True,
-        column_config={
-            "#": st.column_config.NumberColumn(width="small"),
-            "Indicações válidas": st.column_config.NumberColumn(format="%d"),
-            "Indic / cliente": st.column_config.NumberColumn(format="%.1f"),
-        },
+        column_config=column_config,
     )
 
     st.markdown("---")
 
     # ─── Gráfico de barras horizontal ───
-    st.markdown("### 📊 Indicações válidas por funcionária")
+    st.markdown("### 📊 Indicações por funcionária")
     try:
         import plotly.express as px
         df_plot = df.copy()
         df_plot["label"] = df_plot["funcionaria"] + " (" + df_plot["unidade"] + ")"
-        # ordenar do menor pro maior pra ficar bonito horizontal (maior em cima)
         df_plot = df_plot.sort_values("indicacoes_validas", ascending=True)
         fig = px.bar(
             df_plot,
@@ -1059,9 +1088,10 @@ def tela_zapi_ranking():
             y="label",
             orientation="h",
             color="unidade",
-            color_discrete_map={"Mogi": "#6366f1", "Suzano": "#f59e0b"},
+            color_discrete_map={"mogi": "#6366f1", "suzano": "#f59e0b",
+                                "Mogi": "#6366f1", "Suzano": "#f59e0b"},
             text="indicacoes_validas",
-            labels={"indicacoes_validas": "Indicações válidas", "label": "", "unidade": "Unidade"},
+            labels={"indicacoes_validas": "Indicações", "label": "", "unidade": "Unidade"},
         )
         fig.update_traces(textposition="outside", textfont_size=11)
         fig.update_layout(
@@ -1081,7 +1111,6 @@ def tela_zapi_ranking():
         f"📅 Calculado em {data.get('gerado_em', '—')} · "
         f"Cache 5min (clica em 🔄 Atualizar pra forçar refresh)"
     )
-
 
 # ============================================================================
 # TELA: 📨 INDICAÇÕES (v9.5)
