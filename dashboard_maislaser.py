@@ -1024,181 +1024,6 @@ def tela_conversas(df_conv, df_leads, df_agend, df_clientes_base=None):
         st.caption(f"Mostrando 50 de {len(df_agrupado)} conversas. Use os filtros pra refinar.")
 
 
-# ─────────── ABA 2: 🔥 TRANSFERÊNCIAS (mantida) ───────────
-
-def tela_transferencias(df_leads, df_conv):
-    st.markdown("# 🔥 Transferências")
-    st.caption("Leads que a Bia encaminhou pras coordenadoras de venda")
-
-    if df_leads is None or df_leads.empty or 'transferido_em' not in df_leads.columns:
-        st.info("📭 Nenhuma transferência registrada ainda. Quando a Bia transferir o primeiro lead, ele aparecerá aqui.")
-        return
-
-    df_transf = df_leads[df_leads['transferido_em'].notna()].copy()
-    if df_transf.empty:
-        st.info("📭 Nenhuma transferência registrada ainda. Quando a Bia transferir o primeiro lead, ele aparecerá aqui.")
-        return
-
-    df_transf['transferido_em'] = pd.to_datetime(df_transf['transferido_em'])
-    try:
-        df_transf['transferido_em_sp'] = df_transf['transferido_em'].dt.tz_convert(TZ_SP)
-    except Exception:
-        df_transf['transferido_em_sp'] = df_transf['transferido_em']
-
-    df_transf = df_transf.sort_values('transferido_em', ascending=False)
-
-    if 'transf_unidade_btn' not in st.session_state:
-        st.session_state['transf_unidade_btn'] = "Todas"
-
-    cnt_todas = len(df_transf)
-    cnt_mogi = len(df_transf[df_transf['unidade'] == 'Mogi das Cruzes'])
-    cnt_suzano = len(df_transf[df_transf['unidade'] == 'Suzano'])
-
-    btn_col1, btn_col2, btn_col3, _ = st.columns([1.2, 1.6, 1.2, 4])
-
-    with btn_col1:
-        is_todas = st.session_state['transf_unidade_btn'] == "Todas"
-        if st.button(f"🏢 Todas ({cnt_todas})", type="primary" if is_todas else "secondary",
-                     use_container_width=True, key="btn_unid_todas"):
-            st.session_state['transf_unidade_btn'] = "Todas"
-            st.rerun()
-
-    with btn_col2:
-        is_mogi = st.session_state['transf_unidade_btn'] == "Mogi das Cruzes"
-        if st.button(f"📍 Mogi das Cruzes ({cnt_mogi})", type="primary" if is_mogi else "secondary",
-                     use_container_width=True, key="btn_unid_mogi"):
-            st.session_state['transf_unidade_btn'] = "Mogi das Cruzes"
-            st.rerun()
-
-    with btn_col3:
-        is_suzano = st.session_state['transf_unidade_btn'] == "Suzano"
-        if st.button(f"📍 Suzano ({cnt_suzano})", type="primary" if is_suzano else "secondary",
-                     use_container_width=True, key="btn_unid_suzano"):
-            st.session_state['transf_unidade_btn'] = "Suzano"
-            st.rerun()
-
-    unidade_filtro = st.session_state['transf_unidade_btn']
-
-    st.markdown("")
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        periodo = st.selectbox("Período", ["Últimas 24h", "Últimos 7 dias", "Últimos 30 dias", "Tudo"], index=1, key="transf_periodo")
-    with col2:
-        tipo_transf = st.selectbox("Tipo de transferência", ["Todos", "Coordenadora (vendas)", "Recepção (humano)"], key="transf_tipo")
-    with col3:
-        coordenadoras = ["Todas"] + sorted(df_transf['transferido_para'].dropna().unique().tolist())
-        coordenadora_filtro = st.selectbox("Destino", coordenadoras, key="transf_coord")
-
-    agora = datetime.now(TZ_SP)
-    if periodo == "Últimas 24h":
-        cutoff = agora - timedelta(hours=24)
-    elif periodo == "Últimos 7 dias":
-        cutoff = agora - timedelta(days=7)
-    elif periodo == "Últimos 30 dias":
-        cutoff = agora - timedelta(days=30)
-    else:
-        cutoff = None
-
-    df_filtrado = df_transf.copy()
-    if cutoff is not None:
-        df_filtrado = df_filtrado[df_filtrado['transferido_em_sp'] >= cutoff]
-
-    if tipo_transf == "Recepção (humano)":
-        df_filtrado = df_filtrado[df_filtrado['transferido_para'].fillna('').str.startswith('Recepção')]
-    elif tipo_transf == "Coordenadora (vendas)":
-        df_filtrado = df_filtrado[~df_filtrado['transferido_para'].fillna('').str.startswith('Recepção')]
-
-    if coordenadora_filtro != "Todas":
-        df_filtrado = df_filtrado[df_filtrado['transferido_para'] == coordenadora_filtro]
-
-    if unidade_filtro != "Todas":
-        df_filtrado = df_filtrado[df_filtrado['unidade'] == unidade_filtro]
-
-    if 'transferido_para' in df_filtrado.columns:
-        mask_recep = df_filtrado['transferido_para'].fillna('').str.startswith('Recepção')
-        qtd_coord = int((~mask_recep).sum())
-        qtd_recep = int(mask_recep.sum())
-    else:
-        qtd_coord = 0
-        qtd_recep = 0
-
-    avisados = int(df_filtrado['cliente_avisado'].sum()) if 'cliente_avisado' in df_filtrado.columns else 0
-    nao_avisados = len(df_filtrado) - avisados
-
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown(render_metric_card("🔥", len(df_filtrado), "Total no período", "primary"), unsafe_allow_html=True)
-    with col2:
-        st.markdown(render_metric_card("💼", qtd_coord, "Coordenadora", "green",
-                                       sub="Transferências pra vendas"), unsafe_allow_html=True)
-    with col3:
-        st.markdown(render_metric_card("🙋", qtd_recep, "Recepção", "blue",
-                                       sub="Atendimento humano"), unsafe_allow_html=True)
-    with col4:
-        cor_aviso = "red" if nao_avisados > 0 else "green"
-        st.markdown(render_metric_card("⚠️", nao_avisados, "Pendente aviso", cor_aviso), unsafe_allow_html=True)
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    st.markdown(f"### 📋 Lista — {len(df_filtrado)} transferência(s)")
-
-    if df_filtrado.empty:
-        st.info("Nenhuma transferência no período/filtros selecionados.")
-        return
-
-    h_col1, h_col2, h_col3, h_col4, h_col5, h_col6 = st.columns([1.5, 1.5, 1.2, 1.4, 3, 1])
-    h_col1.markdown("**Cliente**")
-    h_col2.markdown("**Telefone**")
-    h_col3.markdown("**Unidade**")
-    h_col4.markdown("**Destino**")
-    h_col5.markdown("**Motivo / Sinal**")
-    h_col6.markdown("**Quando**")
-    st.markdown('<hr style="margin: 4px 0 8px 0;">', unsafe_allow_html=True)
-
-    for _, lead in df_filtrado.iterrows():
-        col1, col2, col3, col4, col5, col6 = st.columns([1.5, 1.5, 1.2, 1.4, 3, 1])
-
-        nome = lead.get('nome') or "Sem nome"
-        telefone = lead.get('telefone', '—')
-        unidade = lead.get('unidade') or '—'
-        coord = lead.get('transferido_para') or '—'
-        # Badge de destino
-        if isinstance(coord, str) and coord.startswith('Recepção'):
-            destino_badge = f"<span class='badge-amber'>🙋 {coord}</span>"
-        elif coord != '—':
-            destino_badge = f"<span class='badge-info'>💼 {coord}</span>"
-        else:
-            destino_badge = '<span class="badge-neutral">—</span>'
-
-        sinal = lead.get('ultimo_sinal_compra') or '—'
-        if isinstance(sinal, str) and len(sinal) > 60:
-            sinal = sinal[:60] + "..."
-
-        try:
-            quando = lead['transferido_em_sp'].strftime('%d/%m %H:%M')
-        except Exception:
-            quando = '—'
-
-        # Badge de status de aviso
-        if lead.get('cliente_avisado'):
-            aviso_badge = "<span class='badge-ok'>✅ Avisado</span>"
-        else:
-            aviso_badge = "<span class='badge-amber'>⚠️ Pendente</span>"
-
-        col1.markdown(f"**{nome}** {aviso_badge}", unsafe_allow_html=True)
-        col2.write(f"+{telefone}" if not telefone.startswith('+') else telefone)
-        col3.write(unidade)
-        col4.markdown(destino_badge, unsafe_allow_html=True)
-        col5.write(f"💬 _{sinal}_" if sinal != '—' else '—')
-        col6.write(quando)
-
-        if st.button("Ver conversa", key=f"ver_transf_{telefone}_{lead.name}"):
-            st.session_state['conversa_selecionada'] = telefone
-            st.rerun()
-
-        st.markdown("---")
-
-
 # ─────────── ABA 3: 📅 AGENDAMENTOS (status derivado dos campos reais) ───────────
 
 def _derivar_status_agendamento(row):
@@ -1878,10 +1703,9 @@ def main():
                 st.rerun()
             renderizar_conversa(st.session_state['conversa_selecionada'], df_conv, df_leads, df_agend, df_clientes_base)
         else:
-            tab_pend, tab1, tab2, tab3, tab_base, tab4, tab5 = st.tabs([
+            tab_pend, tab1, tab3, tab_base, tab4, tab5 = st.tabs([
                 "⚠️ Pendências",
                 "💬 Conversas",
-                "🔥 Transferências",
                 "📅 Agendamentos",
                 "📊 Base de Clientes",
                 "📈 Métricas",
@@ -1894,9 +1718,6 @@ def main():
             with tab1:
                 tela_conversas(df_conv, df_leads, df_agend, df_clientes_base)
 
-            with tab2:
-                tela_transferencias(df_leads, df_conv)
-
             with tab3:
                 tela_agendamentos(df_agend, df_leads, df_conv)
 
@@ -1908,7 +1729,6 @@ def main():
 
             with tab5:
                 tela_configuracoes()
-
     elif robo == 'confirmacao':
         # ─── Tabs do Robô Confirmação Agenda ────────────────────
         # Fase C: 4 abas conectadas aos endpoints read-only do Apps Script.
