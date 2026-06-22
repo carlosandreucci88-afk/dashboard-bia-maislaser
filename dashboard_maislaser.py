@@ -2,6 +2,14 @@
 ==============================================================================
 DASHBOARD MAISLASER — Bia
 ==============================================================================
+v5.3.2 (22/06/2026): conserta link "🔗 Nova aba" da lista de Conversas.
+Quando abre em nova guia (URL ?conversa=XXX), agora mostra tela cheia da
+conversa SEM tabs (porque Streamlit cai sempre na primeira aba Pendências
+em nova guia, sem API pra setar aba ativa). Tela cheia é coerente com
+"abri uma conversa em separado" — sem confusão de qual aba estava ativa.
+Chave session_state separada: conv_via_url (vs conversa_selecionada do
+botão "Ver" dentro da própria tab Conversas).
+
 v5.3.1 (22/06/2026): "Ver" em Agendamentos e Métricas agora abre conversa
 DENTRO da própria aba (mesmo padrão da aba Conversas). Voltar retorna pra
 lista de agendamentos/métricas com filtros preservados — aba ativa mantida.
@@ -67,7 +75,7 @@ TZ_SP = timezone(timedelta(hours=-3))
 COR_PRIMARIA = "#5BC0BE"      # teal do logo Maislaser
 COR_PRIMARIA_DARK = "#3D9991"
 CUSTO_USD_POR_MTOK = 3.0
-VERSAO_DASHBOARD = "v5.3.1"
+VERSAO_DASHBOARD = "v5.3.2"
 VERSAO_CEREBRO = "v3.10"
 VERSAO_APPS_SCRIPT = "v6.5"
 MODELO_CLAUDE_DEFAULT = "claude-sonnet-4-6"
@@ -1856,15 +1864,28 @@ def main():
             df_clientes_base = carregar_clientes_base_nomes()
             df_bia_disparos = carregar_bia_disparos()  # v5.1: fallback nome/unidade
 
-        # v5.2: suporta abrir conversa direto via URL (?conversa=5511XXX)
-        # usado pelo botão "🔗" da lista de conversas pra abrir em nova guia
+        # v5.3.2: query param ?conversa=XXX vira uma VIEW DE TELA CHEIA
+        # (chave separada conv_via_url), porque essa URL é tipicamente aberta
+        # em NOVA GUIA do navegador (via botão "🔗") e Streamlit não tem API
+        # pra setar qual tab está ativa. Em tela cheia, sem tabs, não há
+        # confusão sobre "qual aba mostrar".
         _qp_main = st.query_params
-        if "conversa" in _qp_main and "conversa_selecionada" not in st.session_state:
-            st.session_state['conversa_selecionada'] = _qp_main.get("conversa")
+        if "conversa" in _qp_main and "conv_via_url" not in st.session_state:
+            st.session_state['conv_via_url'] = _qp_main.get("conversa")
 
-        # v5.3: tabs SEMPRE renderizadas. O "Ver detalhes" da conversa agora
-        # aparece DENTRO da tab Conversas (não escondendo todas as tabs),
-        # então a aba ativa é preservada quando voltar pra lista.
+        # ─── VIEW DE TELA CHEIA (vinda de nova guia) ───
+        if 'conv_via_url' in st.session_state and st.session_state['conv_via_url']:
+            st.caption("💬 Conversa aberta em nova guia · feche essa guia ou clique abaixo pra voltar à navegação completa")
+            if st.button("← Voltar pra navegação", key="btn_voltar_url"):
+                del st.session_state['conv_via_url']
+                if "conversa" in st.query_params:
+                    del st.query_params["conversa"]
+                st.rerun()
+            renderizar_conversa(st.session_state['conv_via_url'],
+                                df_conv, df_leads, df_agend, df_clientes_base, df_bia_disparos)
+            return  # Não renderiza as tabs
+
+        # ─── FLUXO NORMAL: TABS COMPLETAS ───
         tab_pend, tab1, tab3, tab_base, tab4, tab5 = st.tabs([
             "⚠️ Pendências",
             "💬 Conversas",
@@ -1882,9 +1903,6 @@ def main():
             if 'conversa_selecionada' in st.session_state and st.session_state['conversa_selecionada']:
                 if st.button("← Voltar pra lista", key="btn_voltar_conv"):
                     del st.session_state['conversa_selecionada']
-                    # Limpa query param "conversa" pra não reabrir no próximo refresh
-                    if "conversa" in st.query_params:
-                        del st.query_params["conversa"]
                     st.rerun()
                 renderizar_conversa(st.session_state['conversa_selecionada'],
                                     df_conv, df_leads, df_agend, df_clientes_base, df_bia_disparos)
