@@ -1,3 +1,20 @@
+"""
+==============================================================================
+ABA 🚀 DISPARAR AGENDA — Robô Confirmação Agenda
+==============================================================================
+v2 (22/06/2026): grava `disparos_historico` ANTES do loop de envio (status
+EM_ANDAMENTO) e atualiza ao FINAL com totais reais. Antes era só um INSERT
+no fim — se o Streamlit reset/erro/refresh acontecesse antes do INSERT, o
+registro era perdido (foi o caso do disparo Suzano de 22/06 13h).
+
+Mudanças desta versão:
+- INSERT inicial ANTES do loop → cria registro c/ status='EM_ANDAMENTO'
+- UPDATE ao final → preenche sucessos/erros/falhas
+- Try/except mais verboso (loga erro pro usuário em vez de silenciar)
+- Coluna 'status_dispatch' (EM_ANDAMENTO / CONCLUIDO / FALHOU) — opcional
+==============================================================================
+"""
+
 import streamlit as st
 import pandas as pd
 import requests
@@ -178,17 +195,68 @@ def enviar_mensagem_2sessoes(nome, horario1, servico1, horario2, servico2, unida
 
 
 # ============================================================
+# v2: helpers pra gravar/atualizar histórico defensivamente
+# ============================================================
+def _criar_registro_inicial_historico(unidade, arquivo_nome, total_clientes,
+                                       data_sessoes, numero_alerta):
+    """
+    v2: cria registro EM_ANDAMENTO no histórico ANTES do loop de envio.
+    Garante que mesmo se Streamlit cair / página recarregar / qualquer
+    erro silencioso impedir o INSERT final, o disparo fica registrado.
+    Retorna o ID do registro pra atualização posterior.
+    """
+    try:
+        sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+        resp = sb.table("disparos_historico").insert({
+            "unidade": unidade,
+            "arquivo": arquivo_nome,
+            "data_sessoes": data_sessoes,
+            "total_clientes": total_clientes,
+            "whatsapp_ok": 0,
+            "contexto_ok": 0,
+            "falhas_contexto": 0,
+            "clientes_falha": None,
+            "erros_envio": 0,
+            "numero_alerta": numero_alerta,
+            "observacao": "🔄 EM_ANDAMENTO — disparo em execução",
+        }).execute()
+        if resp.data and len(resp.data) > 0:
+            return resp.data[0].get("id")
+        return None
+    except Exception as e:
+        st.warning(f"⚠️ Não consegui criar registro inicial no histórico: {e}")
+        return None
+
+
+def _atualizar_registro_historico(registro_id, sucessos, erros, falhas_contexto,
+                                   clientes_sem_contexto):
+    """
+    v2: atualiza o registro com os totais reais ao final do loop.
+    """
+    if not registro_id:
+        return False
+    try:
+        sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+        sb.table("disparos_historico").update({
+            "whatsapp_ok": sucessos,
+            "contexto_ok": sucessos - falhas_contexto,
+            "falhas_contexto": falhas_contexto,
+            "clientes_falha": ", ".join(clientes_sem_contexto) if clientes_sem_contexto else None,
+            "erros_envio": erros,
+            "observacao": None,  # Limpa o "EM_ANDAMENTO"
+        }).eq("id", registro_id).execute()
+        return True
+    except Exception as e:
+        st.error(f"❌ Não consegui atualizar histórico (id={registro_id}): {e}")
+        return False
+
+
+# ============================================================
 # ENTRY POINT — chamado pelo dashboard_maislaser.py dentro da tab Disparar agenda
 # ============================================================
 def render_aba_disparador():
     """
     Renderiza a aba 🚀 Disparar agenda do dashboard centralizado.
-    Portado do app.py do robo-maislaser. Mantém UI/UX e regras de negócio
-    intactas; só foi adaptado pra:
-      - rodar dentro de uma aba (sem set_page_config / title de página)
-      - ler credenciais de st.secrets
-      - usar 'return' no lugar de st.stop() (evita parar o dashboard inteiro)
-      - prefixar chaves de session_state/botões com 'disp_' (evita colisão)
     """
     # ============================================================
     # INTERFACE — SELEÇÃO DE UNIDADE E NÚMERO DE ALERTA
@@ -277,7 +345,6 @@ def render_aba_disparador():
             total_original = len(df)
 
             # Colunas obrigatórias que o sistema UNO exporta
-            # Colunas essenciais para o disparo funcionar
             colunas_essenciais = ['Data', 'Cliente', 'Telefone', 'Serviço']
             colunas_encontradas = df.columns.tolist()
 
@@ -329,13 +396,9 @@ def render_aba_disparador():
 
             st.success("✅ Todas as colunas essenciais foram encontradas! Planilha válida.")
 
-            colunas_necessarias = ['Cliente', 'Serviço', 'Telefone']
-            verificacao_colunas = True
-
             if True:
                 # --------------------------------------------------
                 # ✅ CORREÇÃO 1: Filtrar apenas agendamentos ATIVOS
-                # Ignora registros Cancelados, Faltou, Remarcado etc.
                 # --------------------------------------------------
                 if 'Situação' in df.columns:
                     total_antes_filtro = len(df)
@@ -364,35 +427,25 @@ def render_aba_disparador():
 
                 # --------------------------------------------------
                 # AGRUPAMENTO: Serviços agrupados POR TELEFONE
-                # FIX v2: usa Telefone como chave única (não Cliente+Telefone)
-                # Evita duplicatas quando o mesmo telefone aparece com
-                # variações de nome entre comandas diferentes do UNO.
                 # --------------------------------------------------
-
-                # Nome canônico: primeiro nome encontrado por telefone
                 df_nomes = df.groupby('Telefone')['Cliente'].first().reset_index()
 
-                # Agrupa serviços por Telefone + Horario (respeita sessões diferentes)
                 df_srv_horario = df.groupby(['Telefone', 'Horario'])['Serviço'].apply(
                     lambda x: ', '.join(sorted(set(x)))
                 ).reset_index()
 
-                # Pega horários distintos ordenados por telefone
                 df_horarios = df.groupby('Telefone')['Horario'].apply(
                     lambda x: sorted(set(x))
                 ).reset_index()
                 df_horarios['Horario2'] = df_horarios['Horario'].apply(lambda x: x[1] if len(x) > 1 else "")
                 df_horarios['Horario']  = df_horarios['Horario'].apply(lambda x: x[0])
 
-                # Serviços da sessão 1 (primeiro horário)
                 df_srv_h1 = df_srv_horario.groupby('Telefone').first().reset_index()[['Telefone', 'Serviço']]
 
-                # Serviços da sessão 2 (segundo horário, se existir)
                 df_srv_h2 = df_srv_horario.groupby('Telefone').apply(
                     lambda x: x.iloc[1]['Serviço'] if len(x) > 1 else ""
                 ).reset_index().rename(columns={0: 'Servico2'})
 
-                # Monta dataframe final — junta nome, serviços e horários por telefone
                 df_agrupado = df_srv_h1.merge(df_nomes, on='Telefone')
                 df_agrupado = df_agrupado.merge(df_horarios[['Telefone', 'Horario', 'Horario2']], on='Telefone')
                 df_agrupado = df_agrupado.merge(df_srv_h2, on='Telefone', how='left')
@@ -400,11 +453,8 @@ def render_aba_disparador():
                 df_agrupado = df_agrupado[['Cliente', 'Serviço', 'Telefone', 'Horario', 'Horario2', 'Servico2']]
                 total_agrupado = len(df_agrupado)
 
-                # Mostra quantos telefones duplicados foram unificados
                 total_linhas_pre = len(df)
                 if total_agrupado < total_linhas_pre:
-                    dedup = total_linhas_pre - total_agrupado
-                    # Conta apenas deduplicações reais (mesmo tel, nomes diferentes)
                     tels_com_nomes_diff = df.groupby('Telefone')['Cliente'].nunique()
                     tels_dedup = (tels_com_nomes_diff > 1).sum()
                     if tels_dedup > 0:
@@ -429,6 +479,28 @@ def render_aba_disparador():
                 # BOTÃO DE DISPARO
                 # --------------------------------------------------
                 if st.button("🚀 Iniciar Disparos em Massa"):
+
+                    # ─── v2: GRAVA REGISTRO INICIAL ANTES do loop ───
+                    # Cria registro com status EM_ANDAMENTO. Se algo falhar
+                    # depois, pelo menos o histórico mostra que tentou.
+                    # Extrai data das sessões (primeiro horário encontrado)
+                    _data_sessoes = ""
+                    if not df_agrupado.empty and "Horario" in df_agrupado.columns:
+                        _primeiro = str(df_agrupado.iloc[0]["Horario"])
+                        _partes = _primeiro.split(" às ")
+                        if _partes:
+                            _data_sessoes = _partes[0]
+
+                    registro_id = _criar_registro_inicial_historico(
+                        unidade=unidade_selecionada,
+                        arquivo_nome=arquivo_upload.name if arquivo_upload else "—",
+                        total_clientes=total_agrupado,
+                        data_sessoes=_data_sessoes,
+                        numero_alerta=numero_alerta_formatado,
+                    )
+                    if registro_id:
+                        st.caption(f"📝 Registro #{registro_id} criado no histórico (status: EM_ANDAMENTO)")
+
                     progresso = st.progress(0)
                     status_texto = st.empty()
 
@@ -473,8 +545,6 @@ def render_aba_disparador():
                             if code in (200, 201):
                                 sucessos += 1
                                 # FIX: salvar contexto com retry + timeout maior
-                                # ANTES: timeout=5, except:pass (perdia contextos em lotes grandes)
-                                # AGORA: timeout=15, 2 tentativas, warning se falhar
                                 webhook_url = st.secrets.get("URL_WEBHOOK_CONTEXTO", "")
                                 if webhook_url:
                                     ctx_payload = {
@@ -527,6 +597,39 @@ def render_aba_disparador():
                         progresso.progress((i + 1) / total_linhas)
 
                     status_texto.text("✅ Processamento concluído!")
+
+                    # ─── v2: ATUALIZA REGISTRO HISTÓRICO COM TOTAIS FINAIS ───
+                    if registro_id:
+                        ok = _atualizar_registro_historico(
+                            registro_id=registro_id,
+                            sucessos=sucessos,
+                            erros=erros,
+                            falhas_contexto=falhas_contexto,
+                            clientes_sem_contexto=clientes_sem_contexto,
+                        )
+                        if ok:
+                            st.caption(f"📝 Registro #{registro_id} atualizado com totais finais")
+                    else:
+                        # Fallback v1: tenta INSERT direto se não criou o inicial
+                        try:
+                            _sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+                            _sb.table("disparos_historico").insert({
+                                "unidade": unidade_selecionada,
+                                "arquivo": arquivo_upload.name if arquivo_upload else "—",
+                                "data_sessoes": _data_sessoes,
+                                "total_clientes": total_linhas,
+                                "whatsapp_ok": sucessos,
+                                "contexto_ok": sucessos - falhas_contexto,
+                                "falhas_contexto": falhas_contexto,
+                                "clientes_falha": ", ".join(clientes_sem_contexto) if clientes_sem_contexto else None,
+                                "erros_envio": erros,
+                                "numero_alerta": numero_alerta_formatado,
+                                "observacao": "⚠️ Fallback v1 — registro inicial falhou",
+                            }).execute()
+                            st.caption("📝 Histórico gravado (fallback)")
+                        except Exception as e_hist:
+                            st.error(f"❌ Não salvou no histórico (fallback também falhou): {e_hist}")
+
                     if sucessos > 0 and falhas_contexto == 0:
                         st.balloons()
                     st.success(
@@ -541,32 +644,6 @@ def render_aba_disparador():
                             f"**Clientes afetados:** {', '.join(clientes_sem_contexto)}\n\n"
                             f"💡 Solução: re-dispare só para essas clientes."
                         )
-
-                    # ─── Grava registro no histórico de disparos ───
-                    try:
-                        _sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
-                        # Extrai data das sessões (primeiro horário encontrado)
-                        _data_sessoes = ""
-                        if not df_agrupado.empty and "Horario" in df_agrupado.columns:
-                            _primeiro = str(df_agrupado.iloc[0]["Horario"])
-                            _partes = _primeiro.split(" às ")
-                            if _partes:
-                                _data_sessoes = _partes[0]
-
-                        _sb.table("disparos_historico").insert({
-                            "unidade": unidade_selecionada,
-                            "arquivo": arquivo_upload.name if arquivo_upload else "—",
-                            "data_sessoes": _data_sessoes,
-                            "total_clientes": total_linhas,
-                            "whatsapp_ok": sucessos,
-                            "contexto_ok": sucessos - falhas_contexto,
-                            "falhas_contexto": falhas_contexto,
-                            "clientes_falha": ", ".join(clientes_sem_contexto) if clientes_sem_contexto else None,
-                            "erros_envio": erros,
-                            "numero_alerta": numero_alerta_formatado,
-                        }).execute()
-                    except Exception as e_hist:
-                        st.caption(f"⚠️ Não salvou no histórico: {e_hist}")
 
         except Exception as erro_geral:
             st.error(f"❌ Erro ao processar o arquivo: {erro_geral}")
