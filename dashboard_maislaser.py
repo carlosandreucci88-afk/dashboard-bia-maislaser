@@ -2,6 +2,10 @@
 ==============================================================================
 DASHBOARD MAISLASER — Bia
 ==============================================================================
+v5.1 (22/06/2026): fallback bia_disparos pra nome/unidade na aba Conversas.
+Indicados do Indique e Ganhe (Bia v5) agora aparecem com nome+unidade certos,
+filtros Mogi/Suzano pegam todos eles.
+==============================================================================
 """
 
 # ============================================================================
@@ -49,7 +53,7 @@ TZ_SP = timezone(timedelta(hours=-3))
 COR_PRIMARIA = "#5BC0BE"      # teal do logo Maislaser
 COR_PRIMARIA_DARK = "#3D9991"
 CUSTO_USD_POR_MTOK = 3.0
-VERSAO_DASHBOARD = "v5.0"
+VERSAO_DASHBOARD = "v5.1"
 VERSAO_CEREBRO = "v3.10"
 VERSAO_APPS_SCRIPT = "v6.5"
 MODELO_CLAUDE_DEFAULT = "claude-sonnet-4-6"
@@ -535,6 +539,29 @@ def carregar_clientes_base_nomes():
         return pd.DataFrame()
 
 
+# ─── v5.1 (22/06/2026): NOVO — fallback bia_disparos ─────────────────────────
+@st.cache_data(ttl=30)
+def carregar_bia_disparos():
+    """
+    Carrega telefone+nome_indicado+unidade de bia_disparos.
+    Usado como fallback pra resolver nome/unidade na aba Conversas — indicados
+    do Indique e Ganhe (Bia v5) não entram em `leads` automaticamente, então
+    sem esse fallback eles aparecem como 'Sem nome' + '—' na unidade, e os
+    filtros Mogi/Suzano não pegam eles.
+    """
+    sb = get_supabase()
+    try:
+        result = (sb.table("bia_disparos")
+                  .select("telefone, nome_indicado, unidade, nome_cadastrante, status")
+                  .limit(5000)
+                  .execute())
+        df = pd.DataFrame(result.data)
+        return df
+    except Exception:
+        # Tabela pode estar inacessível ou bia_disparos vazio — segue sem fallback
+        return pd.DataFrame()
+
+
 @st.cache_data(ttl=10)
 def carregar_configuracoes():
     sb = get_supabase()
@@ -631,11 +658,15 @@ def carregar_agendamentos():
 # 7) HELPERS
 # ============================================================================
 
-def agrupar_conversas(df_conv, df_leads, df_agend=None, df_clientes_base=None):
+def agrupar_conversas(df_conv, df_leads, df_agend=None, df_clientes_base=None, df_bia_disparos=None):
     """
     Agrupa conversas por telefone e resolve nome/unidade com FALLBACK:
-      - nome: leads.nome → agendamentos.nome → clientes_base.nome
-      - unidade: leads.slot_unidade → leads.unidade → agendamentos.unidade
+      - nome: leads.nome → agendamentos.nome → clientes_base.nome → bia_disparos.nome_indicado
+      - unidade: leads.slot_unidade → leads.unidade → agendamentos.unidade → bia_disparos.unidade
+
+    v5.1 (22/06/2026): adiciona bia_disparos como 4º fallback. Antes os
+    indicados do Indique e Ganhe apareciam como "Sem nome" + "—" e ficavam de
+    fora dos filtros Mogi/Suzano.
     """
     if df_conv.empty:
         return pd.DataFrame()
@@ -690,11 +721,21 @@ def agrupar_conversas(df_conv, df_leads, df_agend=None, df_clientes_base=None):
         grouped = grouped.merge(nomes_cb, on='telefone', how='left')
         grouped['nome'] = grouped['nome'].fillna(grouped['_nome_cb'])
         grouped = grouped.drop(columns=['_nome_cb'], errors='ignore')
+    # 4. bia_disparos.nome_indicado (indicados do Indique e Ganhe / Bia v5) — v5.1
+    if df_bia_disparos is not None and not df_bia_disparos.empty and 'nome_indicado' in df_bia_disparos.columns:
+        nomes_bd = (df_bia_disparos[['telefone', 'nome_indicado']]
+                    .dropna(subset=['nome_indicado'])
+                    .drop_duplicates('telefone', keep='first')
+                    .rename(columns={'nome_indicado': '_nome_bd'}))
+        grouped = grouped.merge(nomes_bd, on='telefone', how='left')
+        grouped['nome'] = grouped['nome'].fillna(grouped['_nome_bd'])
+        grouped = grouped.drop(columns=['_nome_bd'], errors='ignore')
 
     # ─── FALLBACK DE UNIDADE ───
     # 1. slot_unidade (confirmado pelo cliente, mais confiável)
     # 2. unidade do lead (operacional/fallback)
     # 3. unidade do agendamento mais recente
+    # 4. unidade da campanha bia_disparos — v5.1
     if 'slot_unidade' in grouped.columns:
         grouped['_unidade_resolvida'] = grouped['slot_unidade'].fillna(grouped['unidade'])
     else:
@@ -709,6 +750,16 @@ def agrupar_conversas(df_conv, df_leads, df_agend=None, df_clientes_base=None):
         grouped = grouped.merge(unid_agend, on='telefone', how='left')
         grouped['_unidade_resolvida'] = grouped['_unidade_resolvida'].fillna(grouped['_unid_agend'])
         grouped = grouped.drop(columns=['_unid_agend'], errors='ignore')
+
+    # v5.1: bia_disparos.unidade (indicados do Indique e Ganhe)
+    if df_bia_disparos is not None and not df_bia_disparos.empty and 'unidade' in df_bia_disparos.columns:
+        unid_bd = (df_bia_disparos[['telefone', 'unidade']]
+                   .dropna(subset=['unidade'])
+                   .drop_duplicates('telefone', keep='first')
+                   .rename(columns={'unidade': '_unid_bd'}))
+        grouped = grouped.merge(unid_bd, on='telefone', how='left')
+        grouped['_unidade_resolvida'] = grouped['_unidade_resolvida'].fillna(grouped['_unid_bd'])
+        grouped = grouped.drop(columns=['_unid_bd'], errors='ignore')
 
     grouped['unidade'] = grouped['_unidade_resolvida']
     grouped = grouped.drop(columns=['_unidade_resolvida'], errors='ignore')
@@ -809,7 +860,10 @@ def detectar_tags(mensagem):
 # 8) RENDER DETALHE
 # ============================================================================
 
-def renderizar_conversa(telefone, df_conv, df_leads, df_agend=None, df_clientes_base=None):
+def renderizar_conversa(telefone, df_conv, df_leads, df_agend=None, df_clientes_base=None, df_bia_disparos=None):
+    """
+    v5.1 (22/06/2026): aceita df_bia_disparos como 4º fallback de nome/unidade.
+    """
     msgs = df_conv[df_conv['telefone'] == telefone].sort_values('criado_em')
 
     if msgs.empty:
@@ -829,6 +883,11 @@ def renderizar_conversa(telefone, df_conv, df_leads, df_agend=None, df_clientes_
         match_c = df_clientes_base[df_clientes_base['telefone'] == telefone]
         if not match_c.empty and pd.notna(match_c.iloc[0].get('nome')):
             nome = match_c.iloc[0]['nome']
+    # v5.1: fallback bia_disparos.nome_indicado
+    if nome == "Sem nome" and df_bia_disparos is not None and not df_bia_disparos.empty:
+        match_bd = df_bia_disparos[df_bia_disparos['telefone'] == telefone]
+        if not match_bd.empty and pd.notna(match_bd.iloc[0].get('nome_indicado')):
+            nome = match_bd.iloc[0]['nome_indicado']
 
     # Resolver unidade com fallback
     unidade = '-'
@@ -840,6 +899,11 @@ def renderizar_conversa(telefone, df_conv, df_leads, df_agend=None, df_clientes_
         match_a = df_agend[df_agend['telefone'] == telefone]
         if not match_a.empty and pd.notna(match_a.iloc[0].get('unidade')):
             unidade = match_a.iloc[0]['unidade']
+    # v5.1: fallback bia_disparos.unidade
+    if (unidade == '-' or pd.isna(unidade)) and df_bia_disparos is not None and not df_bia_disparos.empty:
+        match_bd = df_bia_disparos[df_bia_disparos['telefone'] == telefone]
+        if not match_bd.empty and pd.notna(match_bd.iloc[0].get('unidade')):
+            unidade = match_bd.iloc[0]['unidade']
 
     col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
     with col1:
@@ -901,7 +965,10 @@ def renderizar_conversa(telefone, df_conv, df_leads, df_agend=None, df_clientes_
 
 # ─────────── ABA 1: 💬 CONVERSAS (modernizada) ───────────
 
-def tela_conversas(df_conv, df_leads, df_agend, df_clientes_base=None):
+def tela_conversas(df_conv, df_leads, df_agend, df_clientes_base=None, df_bia_disparos=None):
+    """
+    v5.1 (22/06/2026): passa df_bia_disparos pra agrupar_conversas.
+    """
     st.markdown("## 💬 Conversas")
     st.caption("Acompanhe em tempo real o que a Bia tá conversando.")
 
@@ -930,7 +997,7 @@ def tela_conversas(df_conv, df_leads, df_agend, df_clientes_base=None):
     if not df_conv.empty and 'criado_em' in df_conv.columns:
         df_conv = df_conv[df_conv['criado_em'] >= dt_inicio]
 
-    df_agrupado = agrupar_conversas(df_conv, df_leads, df_agend, df_clientes_base)
+    df_agrupado = agrupar_conversas(df_conv, df_leads, df_agend, df_clientes_base, df_bia_disparos)
 
     if df_agrupado.empty:
         st.info("Nenhuma conversa no período selecionado.")
@@ -1275,7 +1342,11 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
 
 # ─────────── ABA 4: 📈 MÉTRICAS (mantida, fix de funil vem na Entrega 2) ───────────
 
-def tela_metricas(df_conv, df_leads, df_agend):
+def tela_metricas(df_conv, df_leads, df_agend, df_bia_disparos=None):
+    """
+    v5.1 (22/06/2026): passa df_bia_disparos pra agrupar_conversas no bloco
+    de conversas problemáticas.
+    """
     st.markdown("## 📈 Métricas")
 
     periodo = st.selectbox("Período de análise", ["Hoje", "Últimos 7 dias", "Últimos 30 dias"], index=1, key="met_periodo")
@@ -1510,7 +1581,8 @@ def tela_metricas(df_conv, df_leads, df_agend):
 
     st.divider()
     st.markdown("### ⚠️ Conversas que precisam de atenção")
-    df_agrupado_p = agrupar_conversas(df_conv_p, df_leads, df_agend)
+    # v5.1: passa df_bia_disparos pra resolver nome/unidade dos indicados
+    df_agrupado_p = agrupar_conversas(df_conv_p, df_leads, df_agend, df_bia_disparos=df_bia_disparos)
     if not df_agrupado_p.empty:
         problematicas = df_agrupado_p[df_agrupado_p['alertas'].apply(lambda x: len(x) > 0)]
         if not problematicas.empty:
@@ -1696,12 +1768,14 @@ def main():
             df_leads = carregar_leads()
             df_agend = carregar_agendamentos()
             df_clientes_base = carregar_clientes_base_nomes()
+            df_bia_disparos = carregar_bia_disparos()  # v5.1: fallback nome/unidade
 
         if 'conversa_selecionada' in st.session_state and st.session_state['conversa_selecionada']:
             if st.button("← Voltar pra lista"):
                 del st.session_state['conversa_selecionada']
                 st.rerun()
-            renderizar_conversa(st.session_state['conversa_selecionada'], df_conv, df_leads, df_agend, df_clientes_base)
+            renderizar_conversa(st.session_state['conversa_selecionada'],
+                                df_conv, df_leads, df_agend, df_clientes_base, df_bia_disparos)
         else:
             tab_pend, tab1, tab3, tab_base, tab4, tab5 = st.tabs([
                 "⚠️ Pendências",
@@ -1716,7 +1790,7 @@ def main():
                 render_aba_pendencias()
 
             with tab1:
-                tela_conversas(df_conv, df_leads, df_agend, df_clientes_base)
+                tela_conversas(df_conv, df_leads, df_agend, df_clientes_base, df_bia_disparos)
 
             with tab3:
                 tela_agendamentos(df_agend, df_leads, df_conv)
@@ -1725,7 +1799,7 @@ def main():
                 render_aba_base_clientes(get_supabase())
 
             with tab4:
-                tela_metricas(df_conv, df_leads, df_agend)
+                tela_metricas(df_conv, df_leads, df_agend, df_bia_disparos)
 
             with tab5:
                 tela_configuracoes()
