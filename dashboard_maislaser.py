@@ -2,6 +2,8 @@
 ==============================================================================
 DASHBOARD MAISLASER — Bia
 ==============================================================================
+v5.2 (22/06/2026): botão "🔗 Nova aba" na lista de conversas — abre a
+conversa em outra guia do navegador (preserva o token de login).
 v5.1 (22/06/2026): fallback bia_disparos pra nome/unidade na aba Conversas.
 Indicados do Indique e Ganhe (Bia v5) agora aparecem com nome+unidade certos,
 filtros Mogi/Suzano pegam todos eles.
@@ -53,7 +55,7 @@ TZ_SP = timezone(timedelta(hours=-3))
 COR_PRIMARIA = "#5BC0BE"      # teal do logo Maislaser
 COR_PRIMARIA_DARK = "#3D9991"
 CUSTO_USD_POR_MTOK = 3.0
-VERSAO_DASHBOARD = "v5.1"
+VERSAO_DASHBOARD = "v5.2"
 VERSAO_CEREBRO = "v3.10"
 VERSAO_APPS_SCRIPT = "v6.5"
 MODELO_CLAUDE_DEFAULT = "claude-sonnet-4-6"
@@ -1040,19 +1042,24 @@ def tela_conversas(df_conv, df_leads, df_agend, df_clientes_base=None, df_bia_di
         return
 
     st.markdown("### Lista de conversas")
-    st.caption(f"📊 {len(df_agrupado)} conversa(s) · clique em **Ver detalhes** pra abrir")
+    st.caption(f"📊 {len(df_agrupado)} conversa(s) · clique em **Ver** pra abrir aqui, ou **🔗** pra abrir em nova aba")
 
-    h1, h2, h3, h4, h5, h6 = st.columns([2, 1.5, 1, 3, 1, 1.2])
+    h1, h2, h3, h4, h5, h6, h7 = st.columns([2, 1.5, 1, 2.8, 1, 0.9, 0.7])
     h1.markdown("**Cliente**")
     h2.markdown("**Telefone**")
     h3.markdown("**Unidade**")
     h4.markdown("**Última msg**")
     h5.markdown("**Quando**")
     h6.markdown("**Ação**")
+    h7.markdown("**🔗**")
     st.markdown('<hr style="margin: 4px 0 8px 0;">', unsafe_allow_html=True)
 
+    # v5.2: monta token de login pra preservar na URL da nova aba
+    _qp_now = st.query_params
+    _token_param = f"t={_qp_now['t']}&" if "t" in _qp_now else ""
+
     for idx, row in df_agrupado.head(50).iterrows():
-        c1, c2, c3, c4, c5, c6 = st.columns([2, 1.5, 1, 3, 1, 1.2])
+        c1, c2, c3, c4, c5, c6, c7 = st.columns([2, 1.5, 1, 2.8, 1, 0.9, 0.7])
 
         nome_display = row['nome'] if pd.notna(row.get('nome')) else "Sem nome"
         c1.markdown(f"<div class='conv-name'>{nome_display}</div>", unsafe_allow_html=True)
@@ -1083,9 +1090,16 @@ def tela_conversas(df_conv, df_leads, df_agend, df_clientes_base=None, df_bia_di
             tempo_str = "-"
         c5.markdown(f"<div class='conv-meta'>{tempo_str}</div>", unsafe_allow_html=True)
 
-        if c6.button("Ver detalhes", key=f"btn_{row['telefone']}_{idx}"):
+        if c6.button("Ver", key=f"btn_{row['telefone']}_{idx}"):
             st.session_state['conversa_selecionada'] = row['telefone']
             st.rerun()
+        # v5.2: botão "🔗" abre conversa em nova guia (link_button do Streamlit
+        # abre em _blank por padrão). Preserva o token de login na URL.
+        c7.link_button(
+            "🔗",
+            url=f"?{_token_param}conversa={row['telefone']}",
+            help="Abrir em nova guia",
+        )
 
     if len(df_agrupado) > 50:
         st.caption(f"Mostrando 50 de {len(df_agrupado)} conversas. Use os filtros pra refinar.")
@@ -1770,9 +1784,18 @@ def main():
             df_clientes_base = carregar_clientes_base_nomes()
             df_bia_disparos = carregar_bia_disparos()  # v5.1: fallback nome/unidade
 
+        # v5.2: suporta abrir conversa direto via URL (?conversa=5511XXX)
+        # usado pelo botão "🔗" da lista de conversas pra abrir em nova guia
+        _qp_main = st.query_params
+        if "conversa" in _qp_main and "conversa_selecionada" not in st.session_state:
+            st.session_state['conversa_selecionada'] = _qp_main.get("conversa")
+
         if 'conversa_selecionada' in st.session_state and st.session_state['conversa_selecionada']:
             if st.button("← Voltar pra lista"):
                 del st.session_state['conversa_selecionada']
+                # Limpa query param "conversa" pra não reabrir no próximo refresh
+                if "conversa" in st.query_params:
+                    del st.query_params["conversa"]
                 st.rerun()
             renderizar_conversa(st.session_state['conversa_selecionada'],
                                 df_conv, df_leads, df_agend, df_clientes_base, df_bia_disparos)
