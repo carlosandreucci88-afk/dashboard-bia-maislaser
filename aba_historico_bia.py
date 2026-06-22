@@ -3,24 +3,35 @@
 ABA HISTÓRICO BIA — Lotes que a Bia v5 puxou (modo AUTO)
 ==============================================================================
 
+v2 (22/06/2026): MANTÉM lotes finalizados/validados/invalidados no histórico.
+Antes (v1) usava /?endpoint=validacao que filtrava status_rec=AGUARDANDO_VALIDACAO,
+fazendo lotes sumirem após decisão. Agora usa /?endpoint=clientes (retorna TUDO
+da aba CLIENTES) e filtra por BIA_PUXOU_EM IS NOT NULL — então qualquer lote
+que a Bia trabalhou aparece, independente do status final.
+
 Mostra TODOS os lotes que a Bia trabalhou (ou está trabalhando) em modo AUTO.
-Filtra por `bia_puxou_em IS NOT NULL` no Apps Script Z-API e cruza com
-`bia_disparos` no Supabase pra contar disparos/respostas em tempo real.
+Cruza com `bia_disparos` no Supabase pra contar disparos/respostas em tempo real.
 
 Sub-abas:
   📦 Lotes (resumo)      — tabela 1 linha por campanha + filtros
   🔍 Detalhes do lote    — clica num lote → vê os 20+ indicados individualmente
 
-Status final de cada lote:
-  🤖 RODANDO              — bia_puxou_em preenchido, validacao_marcada vazia
-  ✅ AUTO_VALIDADO_BIA    — atingiu 30% de respostas em <36h
-  ❌ AUTO_INVALIDADO_BIA  — timeout 36h sem atingir 30%
+Status final de cada lote (derivado de STATUS DE AONDE PAROU + Voucher Liberado):
+  🤖 RODANDO              — status_rec=AGUARDANDO_VALIDACAO, sem decisão ainda
+  ⏰ TIMEOUT              — RODANDO há >36h (cron verificarTimeoutBIA pendente)
+  ✅ AUTO_VALIDADO        — status_rec=FINALIZADO + voucher_liberado=SIM
+  ❌ AUTO_INVALIDADO      — status_rec=INVALIDADO_AVISADO ou INVALIDADO_COBRADO
+  🔒 ENCERRADO            — status_rec=ENCERRADO (sem segunda chance)
 
 Fontes:
-  • Apps Script Z-API endpoint /?endpoint=validacao  → metadados da campanha
-  • Apps Script Z-API endpoint /?endpoint=clientes   → bia_puxou_em (histórico)
-  • Apps Script Z-API endpoint /?endpoint=contatos_cliente&campanha_id=X
-  • Supabase tabela bia_disparos                     → status de cada disparo
+  • Apps Script Z-API /?endpoint=clientes            → TODOS lotes + status
+  • Apps Script Z-API /?endpoint=contatos_cliente    → indicados do lote
+  • Supabase tabela bia_disparos                     → R1/R2/respostas em tempo real
+
+LIMITAÇÃO: Cobre só os clientes da aba CLIENTES (não inclui CLIENTES_ARQUIVO).
+O cron arquivarTerminais roda dia 2 do mês — então lotes finalizados ficam
+visíveis até o próximo dia 2. Pra histórico mais antigo, precisaria endpoint
+novo no GAS pra ler CLIENTES_ARQUIVO.
 ==============================================================================
 """
 
@@ -50,19 +61,15 @@ TZ_SP = timezone(timedelta(hours=-3))
 @st.cache_data(ttl=30, show_spinner=False)
 def _carregar_lotes_bia():
     """
-    Carrega TODOS os lotes onde a Bia puxou (modo=AUTO + bia_puxou_em preenchido).
-    Inclui lotes ATIVOS (em AGUARDANDO_VALIDACAO) e ARQUIVADOS (já finalizados).
+    Carrega TODOS os lotes onde a Bia puxou (BIA_PUXOU_EM preenchido em CLIENTES).
 
-    Estratégia:
-    1. Pega ativos via /?endpoint=validacao (filtra bia_puxou_em IS NOT NULL)
-    2. Pega TODOS clientes via /?endpoint=clientes (filtra BIA_PUXOU_EM IS NOT NULL)
-    3. Pega arquivados via /?endpoint=clientes com fonte_arquivo=true (se suportado)
-    
-    Por enquanto: SÓ ATIVOS via endpoint validacao (cobre 99% dos casos do MVP).
-    Quando tu finalizar muitos lotes e quiser ver histórico antigo, a gente
-    adiciona suporte ao arquivo num passo seguinte.
+    v2 (22/06/2026): TROCADO endpoint validacao → clientes.
+    Antes filtrava só AGUARDANDO_VALIDACAO; agora retorna TODOS os status,
+    incluindo FINALIZADO, INVALIDADO_AVISADO, INVALIDADO_COBRADO e ENCERRADO.
+
+    Cobertura: aba CLIENTES (não inclui CLIENTES_ARQUIVO ainda).
     """
-    data = _zapi_get("validacao")
+    data = _zapi_get("clientes")
     if isinstance(data, dict) and data.get("_erro"):
         return pd.DataFrame(), data.get("_erro")
 
@@ -72,41 +79,85 @@ def _carregar_lotes_bia():
 
     df = pd.DataFrame(linhas)
 
-    # Filtra SÓ os que a Bia puxou (modo=AUTO + bia_puxou_em preenchido)
-    df["modo"] = df.get("modo", pd.Series([""] * len(df))).fillna("").astype(str).str.upper().str.strip()
-    df["bia_puxou_em_dt"] = df.get("bia_puxou_em", pd.Series([None] * len(df))).apply(_parse_iso)
-    df["validacao_marcada"] = df["validacao_marcada"].fillna("").astype(str).str.upper().str.strip()
+    # Filtra SÓ os que a Bia puxou (BIA_PUXOU_EM preenchido)
+    if "BIA_PUXOU_EM" not in df.columns:
+        return pd.DataFrame(), (
+            "Coluna BIA_PUXOU_EM não retornada pelo Apps Script — "
+            "rodar migrarV98() no editor do GAS pra adicionar a coluna."
+        )
 
-    df = df[(df["modo"] == "AUTO") & df["bia_puxou_em_dt"].notna()].copy()
+    df["bia_puxou_em_dt"] = df["BIA_PUXOU_EM"].apply(_parse_iso)
+    df = df[df["bia_puxou_em_dt"].notna()].copy()
 
     if df.empty:
         return pd.DataFrame(), None
 
+    # Renomeia colunas do endpoint clientes pra match com nomes esperados pelo resto
+    df = df.rename(columns={
+        "Telefone": "telefone",
+        "Nome": "nome",
+        "Unidade": "unidade",
+        "Funcionaria": "funcionaria",
+        "ID Campanha": "campanha_id",
+        "Total Indicacoes": "contatos",
+        "Voucher Liberado": "voucher_liberado",
+        "PRIVACIDADE": "privacidade",
+        "STATUS DE AONDE PAROU": "status_rec",
+        "DATA BATEU META": "data_bateu_meta",
+    })
+
+    # Garante tipos
+    df["contatos"] = pd.to_numeric(df.get("contatos", 0), errors="coerce").fillna(0).astype(int)
+    df["status_rec"] = df.get("status_rec", "").astype(str).str.strip()
+    df["voucher_liberado"] = df.get("voucher_liberado", "").astype(str).str.upper().str.strip()
+    df["unidade"] = df.get("unidade", "").astype(str)
+    df["nome"] = df.get("nome", "").fillna("").astype(str)
+    df["telefone"] = df.get("telefone", "").astype(str)
+    df["campanha_id"] = df.get("campanha_id", "").astype(str)
+
+    # Limpa sufixos _COBRADO1 / _COBRADO2 pra simplificar derivação
+    df["status_rec_base"] = (
+        df["status_rec"]
+        .str.replace("_COBRADO2", "", regex=False)
+        .str.replace("_COBRADO1", "", regex=False)
+    )
+
     # Status derivado pra cada lote
+    agora = datetime.now(TZ_SP)
+
     def _status_final(row):
-        marcada = row["validacao_marcada"]
-        if marcada == "AUTO_VALIDADO_BIA":
+        status = row["status_rec_base"]
+        voucher = row["voucher_liberado"]
+
+        # 1) VALIDADO: voucher enviado OU status final FINALIZADO
+        if status == "FINALIZADO" or voucher == "SIM":
             return ("✅ AUTO_VALIDADO", "ok")
-        if marcada == "AUTO_INVALIDADO_BIA":
+
+        # 2) INVALIDADO: foi reprovado (1ª ou 2ª vez)
+        if status in ("INVALIDADO_AVISADO", "INVALIDADO_COBRADO"):
             return ("❌ AUTO_INVALIDADO", "alerta")
-        if marcada == "VALIDADO":
-            return ("✅ VALIDADO (manual)", "ok")
-        if marcada == "INVALIDADO":
-            return ("❌ INVALIDADO (manual)", "alerta")
-        # Sem decisão final ainda — Bia rodando
-        # Checa timeout
-        agora = datetime.now(TZ_SP)
-        horas = (agora - row["bia_puxou_em_dt"]).total_seconds() / 3600
-        if horas >= 36:
-            return ("⏰ TIMEOUT (aguardando cron)", "alerta")
-        return ("🤖 RODANDO", "info")
+
+        # 3) ENCERRADO: foi reprovado 2x ou sem resposta
+        if status == "ENCERRADO":
+            return ("🔒 ENCERRADO", "neutro")
+        if status == "_COBRADOSEMRESPOSTA":
+            return ("🔇 SEM RESPOSTA", "neutro")
+
+        # 4) RODANDO: ainda em AGUARDANDO_VALIDACAO
+        if status == "AGUARDANDO_VALIDACAO":
+            horas = (agora - row["bia_puxou_em_dt"]).total_seconds() / 3600
+            if horas >= 36:
+                return ("⏰ TIMEOUT (aguardando cron)", "alerta")
+            return ("🤖 RODANDO", "info")
+
+        # 5) Fallback
+        return (f"❓ {status or '(sem status)'}", "neutro")
 
     df[["_status_label", "_status_class"]] = df.apply(
         lambda r: pd.Series(_status_final(r)), axis=1
     )
 
     # Tempo decorrido desde Bia puxar
-    agora = datetime.now(TZ_SP)
     df["horas_rodando"] = (agora - df["bia_puxou_em_dt"]).dt.total_seconds() / 3600
 
     return df, None
@@ -186,8 +237,8 @@ def render_aba_historico_bia():
     st.markdown("## 📜 Histórico Bia")
     st.caption(
         "Lotes que a Bia v5 trabalhou (modo AUTO). "
-        "Conta disparos e respostas em tempo real cruzando Apps Script Z-API "
-        "com Supabase `bia_disparos`."
+        "Inclui campanhas **rodando, validadas e invalidadas** — "
+        "histórico completo até o arquivamento mensal (dia 2)."
     )
 
     # Carga inicial
@@ -243,26 +294,32 @@ def render_aba_historico_bia():
 
 def _render_resumo_lotes(df_lotes, contagem):
     # ─── CARDS DE RESUMO ───────────────────────────────────────────────
+    # v2: contagem baseada em _status_class (mais confiável que substring match)
     qtd_total = len(df_lotes)
-    qtd_rodando = int((df_lotes["_status_label"] == "🤖 RODANDO").sum())
-    qtd_validados = int(df_lotes["_status_label"].str.contains("VALIDADO", regex=False).sum() - 
-                        df_lotes["_status_label"].str.contains("INVALIDADO", regex=False).sum())
-    qtd_invalidados = int(df_lotes["_status_label"].str.contains("INVALIDADO", regex=False).sum())
+    qtd_rodando = int((df_lotes["_status_class"] == "info").sum())
+    qtd_validados = int(df_lotes["_status_label"].str.startswith("✅").sum())
+    qtd_invalidados = int(df_lotes["_status_label"].str.startswith("❌").sum())
+    qtd_encerrados = int(
+        df_lotes["_status_label"].str.startswith("🔒").sum() +
+        df_lotes["_status_label"].str.startswith("🔇").sum()
+    )
 
     total_indicados = int(df_lotes["contatos"].sum())
-    total_disparados = int(df_lotes["total_disparados_supabase"].sum())
     total_respondeu = int(df_lotes["total_respondeu_supabase"].sum())
     taxa_geral = (total_respondeu / total_indicados * 100) if total_indicados > 0 else 0
 
-    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+    col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
     col_m1.metric("📦 Lotes totais", qtd_total,
-        help="Total de campanhas que a Bia puxou (modo AUTO)")
+        help="Total de campanhas que a Bia puxou (modo AUTO), incluindo validadas/invalidadas")
     col_m2.metric("🤖 Rodando agora", qtd_rodando,
         help="Bia ainda contando respostas, sem decisão final")
-    col_m3.metric("✅ Validados", qtd_validados, delta=f"-{qtd_invalidados} invalidados",
-        delta_color="off",
+    col_m3.metric("✅ Validados", qtd_validados,
         help="Lotes que atingiram 30% e dispararam voucher")
-    col_m4.metric("📊 Taxa de resposta geral", f"{taxa_geral:.1f}%",
+    col_m4.metric("❌ Invalidados", qtd_invalidados,
+        delta=f"+{qtd_encerrados} encerrados" if qtd_encerrados > 0 else None,
+        delta_color="off",
+        help="Lotes que não atingiram 30% no prazo (e os encerrados em segunda chance)")
+    col_m5.metric("📊 Taxa de resposta", f"{taxa_geral:.1f}%",
         help=f"{total_respondeu} / {total_indicados} indicados responderam")
 
     st.markdown("---")
@@ -277,7 +334,16 @@ def _render_resumo_lotes(df_lotes, contagem):
             key="hist_bia_unid",
         )
     with col_f2:
-        status_opcoes = ["Todos", "🤖 Rodando", "✅ Validados", "❌ Invalidados"]
+        # v2: opções expandidas pra incluir encerrados e finalizados
+        status_opcoes = [
+            "Todos",
+            "🟢 Ativos (rodando + timeout)",
+            "🤖 Rodando",
+            "⏰ Timeout",
+            "✅ Validados",
+            "❌ Invalidados",
+            "🔒 Encerrados / Sem resposta",
+        ]
         status_filtro = st.selectbox("Status:", status_opcoes, key="hist_bia_status")
     with col_f3:
         busca = st.text_input(
@@ -290,12 +356,23 @@ def _render_resumo_lotes(df_lotes, contagem):
     df_f = df_lotes.copy()
     if unid_filtro != "Todas":
         df_f = df_f[df_f["unidade"].str.lower() == unid_filtro.lower()]
-    if status_filtro == "🤖 Rodando":
+
+    if status_filtro == "🟢 Ativos (rodando + timeout)":
+        df_f = df_f[df_f["status_rec_base"] == "AGUARDANDO_VALIDACAO"]
+    elif status_filtro == "🤖 Rodando":
         df_f = df_f[df_f["_status_label"] == "🤖 RODANDO"]
+    elif status_filtro == "⏰ Timeout":
+        df_f = df_f[df_f["_status_label"].str.startswith("⏰")]
     elif status_filtro == "✅ Validados":
-        df_f = df_f[df_f["_status_label"].str.contains("✅", regex=False)]
+        df_f = df_f[df_f["_status_label"].str.startswith("✅")]
     elif status_filtro == "❌ Invalidados":
-        df_f = df_f[df_f["_status_label"].str.contains("❌", regex=False)]
+        df_f = df_f[df_f["_status_label"].str.startswith("❌")]
+    elif status_filtro == "🔒 Encerrados / Sem resposta":
+        df_f = df_f[
+            df_f["_status_label"].str.startswith("🔒") |
+            df_f["_status_label"].str.startswith("🔇")
+        ]
+
     if busca.strip():
         b = busca.strip().lower()
         mask = (
@@ -304,8 +381,18 @@ def _render_resumo_lotes(df_lotes, contagem):
         )
         df_f = df_f[mask]
 
-    # Ordena por mais recente primeiro
-    df_f = df_f.sort_values("bia_puxou_em_dt", ascending=False).reset_index(drop=True)
+    # Ordena: ativos no topo, depois pela ordem temporal (mais recente primeiro)
+    df_f = df_f.copy()
+    df_f["_ordem_status"] = df_f["_status_class"].map({
+        "info": 0,      # rodando
+        "alerta": 1,    # timeout, invalidado
+        "ok": 2,        # validado
+        "neutro": 3,    # encerrado, sem resposta
+    }).fillna(4)
+    df_f = df_f.sort_values(
+        ["_ordem_status", "bia_puxou_em_dt"],
+        ascending=[True, False]
+    ).reset_index(drop=True)
 
     st.caption(f"📍 Mostrando **{len(df_f)}** de {len(df_lotes)} lotes")
 
@@ -326,11 +413,15 @@ def _render_resumo_lotes(df_lotes, contagem):
         transition: all 0.15s ease;
     }
     .lote-card:hover { border-color: #5BC0BE; box-shadow: 0 2px 8px rgba(91,192,190,0.15); }
+    .lote-card-finalizado { background: #fafafa; opacity: 0.92; }
     .status-ok      { background: #dcfce7; color: #166534; padding: 3px 10px; border-radius: 12px; font-weight: 700; font-size: 11px; }
     .status-alerta  { background: #fee2e2; color: #991b1b; padding: 3px 10px; border-radius: 12px; font-weight: 700; font-size: 11px; }
     .status-info    { background: #dbeafe; color: #1e40af; padding: 3px 10px; border-radius: 12px; font-weight: 700; font-size: 11px; }
+    .status-neutro  { background: #f3f4f6; color: #4b5563; padding: 3px 10px; border-radius: 12px; font-weight: 700; font-size: 11px; }
+    .badge-voucher  { background: #fef3c7; color: #92400e; padding: 2px 8px; border-radius: 10px; font-weight: 600; font-size: 10px; margin-left: 6px; }
     .progress-mini  { background: #e5e7eb; border-radius: 6px; height: 18px; overflow: hidden; margin-top: 6px; }
     .progress-mini-fill { background: linear-gradient(90deg, #5BC0BE 0%, #3D9991 100%); height: 100%; }
+    .progress-mini-fill-final { background: linear-gradient(90deg, #94a3b8 0%, #64748b 100%); height: 100%; }
     </style>
     """,
         unsafe_allow_html=True,
@@ -353,16 +444,28 @@ def _render_resumo_lotes(df_lotes, contagem):
         bia_dt = row["bia_puxou_em_dt"]
         bia_str = bia_dt.strftime("%d/%m %H:%M") if bia_dt else "—"
 
-        # Tempo restante até timeout (se rodando)
+        # v2: badge extra "🎁 Voucher" pra validados
+        badge_voucher = ""
+        if row["voucher_liberado"] == "SIM":
+            badge_voucher = '<span class="badge-voucher">🎁 Voucher enviado</span>'
+
+        # Tempo restante até timeout (se rodando) ou info de finalizado
         tempo_extra = ""
+        is_finalizado = row["_status_class"] in ("ok", "alerta", "neutro") and \
+                        row["status_rec_base"] != "AGUARDANDO_VALIDACAO"
+
         if row["_status_label"] == "🤖 RODANDO":
             horas_rest = max(0, 36 - row["horas_rodando"])
             cor_t = "#ef4444" if horas_rest < 6 else "#6b7280"
             tempo_extra = f'<span style="color: {cor_t}; font-size: 12px; margin-left: 8px;">⏰ {horas_rest:.1f}h até timeout</span>'
 
+        # CSS: cards finalizados ficam mais discretos
+        card_class = "lote-card lote-card-finalizado" if is_finalizado else "lote-card"
+        progress_class = "progress-mini-fill-final" if is_finalizado else "progress-mini-fill"
+
         st.markdown(
             f"""
-            <div class="lote-card">
+            <div class="{card_class}">
               <div style="display: flex; justify-content: space-between; align-items: center;">
                 <div>
                   <strong style="font-size: 15px;">{nome}</strong>
@@ -370,6 +473,7 @@ def _render_resumo_lotes(df_lotes, contagem):
                 </div>
                 <div>
                   <span class="status-{row['_status_class']}">{row['_status_label']}</span>
+                  {badge_voucher}
                 </div>
               </div>
               <div style="margin-top: 8px; color: #6b7280; font-size: 13px;">
@@ -381,7 +485,7 @@ def _render_resumo_lotes(df_lotes, contagem):
                   <strong style="color: {'#059669' if pct_progresso >= 100 else '#5BC0BE'};">{taxa:.1f}%</strong>
                 </div>
                 <div class="progress-mini">
-                  <div class="progress-mini-fill" style="width: {pct_progresso}%;"></div>
+                  <div class="{progress_class}" style="width: {pct_progresso}%;"></div>
                 </div>
               </div>
             </div>
@@ -437,10 +541,16 @@ def _render_drilldown(df_lotes, contagem):
 
     bia_dt = row["bia_puxou_em_dt"]
     bia_str = bia_dt.strftime("%d/%m/%Y %H:%M") if bia_dt else "—"
+
+    # v2: mostra também voucher_liberado se SIM
+    extra_status = ""
+    if row.get("voucher_liberado") == "SIM":
+        extra_status = " · 🎁 **Voucher enviado**"
+
     st.caption(
         f"🤖 Bia puxou em **{bia_str}** ({_humanizar_tempo(bia_dt)}) · "
         f"📍 {row['unidade'] or '?'} · "
-        f"Status: **{row['_status_label']}**"
+        f"Status: **{row['_status_label']}**{extra_status}"
     )
 
     st.markdown("---")
