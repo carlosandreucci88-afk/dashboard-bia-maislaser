@@ -2,12 +2,16 @@
 ==============================================================================
 DASHBOARD MAISLASER — Bia
 ==============================================================================
+v5.3.1 (22/06/2026): "Ver" em Agendamentos e Métricas agora abre conversa
+DENTRO da própria aba (mesmo padrão da aba Conversas). Voltar retorna pra
+lista de agendamentos/métricas com filtros preservados — aba ativa mantida.
+Cada aba usa uma chave session_state separada (conv_drill_agendamentos,
+conv_drill_metricas) pra não conflitar com a Conversas.
+Filtros de Agendamentos (periodo, status) também ganharam persistência.
+
 v5.3 (22/06/2026): preserva a aba ativa do dashboard ao usar "Ver".
 - Aba Conversas: drill-down fica DENTRO da tab Conversas (em vez de
   esconder todas), preservando aba ativa ao voltar.
-- Aba Agendamentos e Métricas: botões "Ver" trocados por link_button
-  que abrem a conversa em NOVA GUIA do navegador, preservando 100%
-  do estado da aba origem (filtros, scroll, etc).
 - Filtros (período/unidade/alertas/busca) persistem entre drill-down
   e retorno via chaves _conv_*_persist no session_state.
 v5.2 (22/06/2026): botão "🔗 Nova aba" na lista de conversas — abre a
@@ -63,7 +67,7 @@ TZ_SP = timezone(timedelta(hours=-3))
 COR_PRIMARIA = "#5BC0BE"      # teal do logo Maislaser
 COR_PRIMARIA_DARK = "#3D9991"
 CUSTO_USD_POR_MTOK = 3.0
-VERSAO_DASHBOARD = "v5.3"
+VERSAO_DASHBOARD = "v5.3.1"
 VERSAO_CEREBRO = "v3.10"
 VERSAO_APPS_SCRIPT = "v6.5"
 MODELO_CLAUDE_DEFAULT = "claude-sonnet-4-6"
@@ -1257,25 +1261,43 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
 
     st.markdown("")
 
+    # v5.3.1: filtros persistentes — sobrevivem ao drill-down "Ver conversa"
+    # (chaves _agend_*_persist separadas das keys dos widgets)
+    if "_agend_periodo_persist" not in st.session_state:
+        st.session_state["_agend_periodo_persist"] = "Próximos (hoje em diante)"
+    if "_agend_status_persist" not in st.session_state:
+        st.session_state["_agend_status_persist"] = "Todos"
+
+    opcoes_periodo_ag = ["Próximos (hoje em diante)", "Hoje", "Próximos 7 dias", "Últimos 30 dias", "Tudo"]
+    opcoes_status_derivado = [
+        "Todos",
+        "⏳ Pendente",
+        "✅ Confirmado",
+        "🚗 A caminho",
+        "🔄 Pediu reagendar",
+        "❌ Não vai",
+        "🎉 Realizado",
+        "❌ Cancelado",
+        "😶 Faltou",
+    ]
+    try:
+        idx_periodo_ag = opcoes_periodo_ag.index(st.session_state["_agend_periodo_persist"])
+    except ValueError:
+        idx_periodo_ag = 0
+    try:
+        idx_status_ag = opcoes_status_derivado.index(st.session_state["_agend_status_persist"])
+    except ValueError:
+        idx_status_ag = 0
+
     col_f1, col_f2 = st.columns(2)
     with col_f1:
-        periodo = st.selectbox("Período",
-            ["Próximos (hoje em diante)", "Hoje", "Próximos 7 dias", "Últimos 30 dias", "Tudo"],
-            index=0, key="agend_periodo")
+        periodo = st.selectbox("Período", opcoes_periodo_ag, index=idx_periodo_ag, key="agend_periodo")
     with col_f2:
-        # Opções de status agora vêm do status DERIVADO, não do banco
-        opcoes_status_derivado = [
-            "Todos",
-            "⏳ Pendente",
-            "✅ Confirmado",
-            "🚗 A caminho",
-            "🔄 Pediu reagendar",
-            "❌ Não vai",
-            "🎉 Realizado",
-            "❌ Cancelado",
-            "😶 Faltou",
-        ]
-        status_filtro = st.selectbox("Status", opcoes_status_derivado, key="agend_status")
+        status_filtro = st.selectbox("Status", opcoes_status_derivado, index=idx_status_ag, key="agend_status")
+
+    # v5.3.1: salva cópia persistente
+    st.session_state["_agend_periodo_persist"] = periodo
+    st.session_state["_agend_status_persist"] = status_filtro
 
     agora = datetime.now(TZ_SP)
     hoje_inicio = agora.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1355,10 +1377,6 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
     h7.markdown("**Ação**")
     st.divider()
 
-    # v5.3: token de login pra preservar na URL da nova guia
-    _qp_ag = st.query_params
-    _token_ag = f"t={_qp_ag['t']}&" if "t" in _qp_ag else ""
-
     for _, ag in df_filt.iterrows():
         c1, c2, c3, c4, c5, c6, c7 = st.columns([1.6, 1.4, 0.9, 1.2, 1.4, 1.3, 0.9])
 
@@ -1393,15 +1411,13 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
         c6.markdown(f"<span class='{ag['_status_classe']}'>{ag['_status_texto']}</span>",
                     unsafe_allow_html=True)
 
-        # v5.3: trocado st.button por st.link_button — abre em nova guia
-        # do navegador (preservando aba/filtros da Agendamentos).
-        # Se ficasse na mesma guia, o st.rerun() do click resetaria a aba
-        # ativa pra "Pendências" (limitação do st.tabs).
-        c7.link_button(
-            "🔗 Ver",
-            url=f"?{_token_ag}conversa={telefone}",
-            help="Abrir conversa em nova guia",
-        )
+        # v5.3.1: usa chave SEPARADA conv_drill_agendamentos. Assim quando
+        # clicar "Ver", o drill aparece DENTRO da própria tab Agendamentos
+        # (handler no main()), preservando a aba ativa. Ao voltar, mostra
+        # a lista de agendamentos novamente com filtros preservados.
+        if c7.button("Ver", key=f"ver_agend_{telefone}_{ag.name}"):
+            st.session_state['conv_drill_agendamentos'] = telefone
+            st.rerun()
 
         st.markdown("---")
 
@@ -1655,23 +1671,16 @@ def tela_metricas(df_conv, df_leads, df_agend, df_bia_disparos=None):
         problematicas = df_agrupado_p[df_agrupado_p['alertas'].apply(lambda x: len(x) > 0)]
         if not problematicas.empty:
             st.caption(f"{len(problematicas)} conversa(s) com sinais de problema — ideal pra revisar e melhorar o cérebro")
-
-            # v5.3: token de login pra preservar na URL da nova guia
-            _qp_m = st.query_params
-            _token_m = f"t={_qp_m['t']}&" if "t" in _qp_m else ""
-
             for _, row in problematicas.head(10).iterrows():
                 with st.expander(f"📱 +{row['telefone']} · {row.get('nome', 'Sem nome')} · {row['total_mensagens']} msgs"):
                     for a in row['alertas']:
                         st.markdown(f"- {a}")
                     st.caption(f"Última: {row['ultima_mensagem_preview']}")
-                    # v5.3: link_button em vez de button — abre nova guia
-                    # pra preservar a aba Métricas + filtros do usuário
-                    st.link_button(
-                        "🔗 Ver conversa completa",
-                        url=f"?{_token_m}conversa={row['telefone']}",
-                        help="Abrir em nova guia",
-                    )
+                    # v5.3.1: chave separada conv_drill_metricas pro drill
+                    # aparecer DENTRO da própria tab Métricas (preserva aba)
+                    if st.button("Ver conversa completa", key=f"prob_{row['telefone']}"):
+                        st.session_state['conv_drill_metricas'] = row['telefone']
+                        st.rerun()
         else:
             st.success("🎉 Nenhuma conversa problemática detectada no período!")
 
@@ -1883,13 +1892,31 @@ def main():
                 tela_conversas(df_conv, df_leads, df_agend, df_clientes_base, df_bia_disparos)
 
         with tab3:
-            tela_agendamentos(df_agend, df_leads, df_conv)
+            # v5.3.1: drill-down de conversa fica DENTRO da tab Agendamentos
+            # quando o usuário clica "Ver" num agendamento. Ao voltar, retorna
+            # pra lista de agendamentos com filtros preservados.
+            if 'conv_drill_agendamentos' in st.session_state and st.session_state['conv_drill_agendamentos']:
+                if st.button("← Voltar pra lista de agendamentos", key="btn_voltar_agend"):
+                    del st.session_state['conv_drill_agendamentos']
+                    st.rerun()
+                renderizar_conversa(st.session_state['conv_drill_agendamentos'],
+                                    df_conv, df_leads, df_agend, df_clientes_base, df_bia_disparos)
+            else:
+                tela_agendamentos(df_agend, df_leads, df_conv)
 
         with tab_base:
             render_aba_base_clientes(get_supabase())
 
         with tab4:
-            tela_metricas(df_conv, df_leads, df_agend, df_bia_disparos)
+            # v5.3.1: drill-down de conversa fica DENTRO da tab Métricas
+            if 'conv_drill_metricas' in st.session_state and st.session_state['conv_drill_metricas']:
+                if st.button("← Voltar pra métricas", key="btn_voltar_metr"):
+                    del st.session_state['conv_drill_metricas']
+                    st.rerun()
+                renderizar_conversa(st.session_state['conv_drill_metricas'],
+                                    df_conv, df_leads, df_agend, df_clientes_base, df_bia_disparos)
+            else:
+                tela_metricas(df_conv, df_leads, df_agend, df_bia_disparos)
 
         with tab5:
             tela_configuracoes()
