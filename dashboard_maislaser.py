@@ -2,6 +2,10 @@
 ==============================================================================
 DASHBOARD MAISLASER — Bia
 ==============================================================================
+v5.3 (22/06/2026): "Ver detalhes" da conversa fica DENTRO da tab Conversas
+(em vez de esconder todas as tabs), preservando a aba ativa ao voltar.
+Filtros (período/unidade/alertas/busca) persistem entre drill-down e retorno
+via chaves _conv_*_persist no session_state.
 v5.2 (22/06/2026): botão "🔗 Nova aba" na lista de conversas — abre a
 conversa em outra guia do navegador (preserva o token de login).
 v5.1 (22/06/2026): fallback bia_disparos pra nome/unidade na aba Conversas.
@@ -55,7 +59,7 @@ TZ_SP = timezone(timedelta(hours=-3))
 COR_PRIMARIA = "#5BC0BE"      # teal do logo Maislaser
 COR_PRIMARIA_DARK = "#3D9991"
 CUSTO_USD_POR_MTOK = 3.0
-VERSAO_DASHBOARD = "v5.2"
+VERSAO_DASHBOARD = "v5.3"
 VERSAO_CEREBRO = "v3.10"
 VERSAO_APPS_SCRIPT = "v6.5"
 MODELO_CLAUDE_DEFAULT = "claude-sonnet-4-6"
@@ -969,20 +973,56 @@ def renderizar_conversa(telefone, df_conv, df_leads, df_agend=None, df_clientes_
 
 def tela_conversas(df_conv, df_leads, df_agend, df_clientes_base=None, df_bia_disparos=None):
     """
+    v5.3 (22/06/2026): filtros persistentes — sobrevivem ao "Ver detalhes"
+    e ao botão "Voltar pra lista". Antes os widgets sofriam cleanup quando
+    a tab Conversas não era renderizada.
     v5.1 (22/06/2026): passa df_bia_disparos pra agrupar_conversas.
     """
     st.markdown("## 💬 Conversas")
     st.caption("Acompanhe em tempo real o que a Bia tá conversando.")
 
+    # v5.3: inicializa chaves "persist" que sobrevivem mesmo quando a tab
+    # Conversas não é renderizada (caso do drill-down "Ver detalhes")
+    if "_conv_periodo_persist" not in st.session_state:
+        st.session_state["_conv_periodo_persist"] = "Últimos 7 dias"
+    if "_conv_unidade_persist" not in st.session_state:
+        st.session_state["_conv_unidade_persist"] = "Todas"
+    if "_conv_alertas_persist" not in st.session_state:
+        st.session_state["_conv_alertas_persist"] = False
+    if "_conv_busca_persist" not in st.session_state:
+        st.session_state["_conv_busca_persist"] = ""
+
+    opcoes_periodo = ["Hoje", "Ontem", "Últimos 7 dias", "Últimos 30 dias"]
+    opcoes_unidade = ["Todas", "Mogi", "Suzano"]
+
+    try:
+        idx_periodo = opcoes_periodo.index(st.session_state["_conv_periodo_persist"])
+    except ValueError:
+        idx_periodo = 2  # Últimos 7 dias
+    try:
+        idx_unidade = opcoes_unidade.index(st.session_state["_conv_unidade_persist"])
+    except ValueError:
+        idx_unidade = 0
+
     col_filt1, col_filt2, col_filt3, col_filt4 = st.columns([2, 2, 2, 3])
     with col_filt1:
-        periodo = st.selectbox("Período", ["Hoje", "Ontem", "Últimos 7 dias", "Últimos 30 dias"], index=2, key="filt_periodo")
+        periodo = st.selectbox("Período", opcoes_periodo, index=idx_periodo, key="filt_periodo")
     with col_filt2:
-        unidade_filt = st.selectbox("Unidade", ["Todas", "Mogi", "Suzano"], key="filt_unidade")
+        unidade_filt = st.selectbox("Unidade", opcoes_unidade, index=idx_unidade, key="filt_unidade")
     with col_filt3:
-        so_alertas = st.checkbox("⚠️ Só com alertas", key="filt_alertas")
+        so_alertas = st.checkbox("⚠️ Só com alertas",
+                                  value=st.session_state["_conv_alertas_persist"],
+                                  key="filt_alertas")
     with col_filt4:
-        busca = st.text_input("🔎 Buscar (telefone ou nome)", key="filt_busca")
+        busca = st.text_input("🔎 Buscar (telefone ou nome)",
+                              value=st.session_state["_conv_busca_persist"],
+                              key="filt_busca")
+
+    # v5.3: SALVA cópia persistente que sobrevive a re-renders sem widgets
+    st.session_state["_conv_periodo_persist"] = periodo
+    st.session_state["_conv_unidade_persist"] = unidade_filt
+    st.session_state["_conv_alertas_persist"] = so_alertas
+    st.session_state["_conv_busca_persist"] = busca
 
     agora = datetime.now(TZ_SP)
     if periodo == "Hoje":
@@ -1790,42 +1830,46 @@ def main():
         if "conversa" in _qp_main and "conversa_selecionada" not in st.session_state:
             st.session_state['conversa_selecionada'] = _qp_main.get("conversa")
 
-        if 'conversa_selecionada' in st.session_state and st.session_state['conversa_selecionada']:
-            if st.button("← Voltar pra lista"):
-                del st.session_state['conversa_selecionada']
-                # Limpa query param "conversa" pra não reabrir no próximo refresh
-                if "conversa" in st.query_params:
-                    del st.query_params["conversa"]
-                st.rerun()
-            renderizar_conversa(st.session_state['conversa_selecionada'],
-                                df_conv, df_leads, df_agend, df_clientes_base, df_bia_disparos)
-        else:
-            tab_pend, tab1, tab3, tab_base, tab4, tab5 = st.tabs([
-                "⚠️ Pendências",
-                "💬 Conversas",
-                "📅 Agendamentos",
-                "📊 Base de Clientes",
-                "📈 Métricas",
-                "⚙️ Configurações",
-            ])
+        # v5.3: tabs SEMPRE renderizadas. O "Ver detalhes" da conversa agora
+        # aparece DENTRO da tab Conversas (não escondendo todas as tabs),
+        # então a aba ativa é preservada quando voltar pra lista.
+        tab_pend, tab1, tab3, tab_base, tab4, tab5 = st.tabs([
+            "⚠️ Pendências",
+            "💬 Conversas",
+            "📅 Agendamentos",
+            "📊 Base de Clientes",
+            "📈 Métricas",
+            "⚙️ Configurações",
+        ])
 
-            with tab_pend:
-                render_aba_pendencias()
+        with tab_pend:
+            render_aba_pendencias()
 
-            with tab1:
+        with tab1:
+            # v5.3: drill-down de conversa fica DENTRO da tab Conversas
+            if 'conversa_selecionada' in st.session_state and st.session_state['conversa_selecionada']:
+                if st.button("← Voltar pra lista", key="btn_voltar_conv"):
+                    del st.session_state['conversa_selecionada']
+                    # Limpa query param "conversa" pra não reabrir no próximo refresh
+                    if "conversa" in st.query_params:
+                        del st.query_params["conversa"]
+                    st.rerun()
+                renderizar_conversa(st.session_state['conversa_selecionada'],
+                                    df_conv, df_leads, df_agend, df_clientes_base, df_bia_disparos)
+            else:
                 tela_conversas(df_conv, df_leads, df_agend, df_clientes_base, df_bia_disparos)
 
-            with tab3:
-                tela_agendamentos(df_agend, df_leads, df_conv)
+        with tab3:
+            tela_agendamentos(df_agend, df_leads, df_conv)
 
-            with tab_base:
-                render_aba_base_clientes(get_supabase())
+        with tab_base:
+            render_aba_base_clientes(get_supabase())
 
-            with tab4:
-                tela_metricas(df_conv, df_leads, df_agend, df_bia_disparos)
+        with tab4:
+            tela_metricas(df_conv, df_leads, df_agend, df_bia_disparos)
 
-            with tab5:
-                tela_configuracoes()
+        with tab5:
+            tela_configuracoes()
     elif robo == 'confirmacao':
         # ─── Tabs do Robô Confirmação Agenda ────────────────────
         # Fase C: 4 abas conectadas aos endpoints read-only do Apps Script.
