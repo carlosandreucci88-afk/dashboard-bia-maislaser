@@ -3,6 +3,11 @@
 ABA HISTÓRICO BIA — Lotes que a Bia v5 puxou (modo AUTO)
 ==============================================================================
 
+v2.2 (22/06/2026): preserva filtros (unidade/status/busca) ao voltar do
+drill-down. Antes os widgets perdiam estado quando não eram renderizados
+(comportamento conhecido de Streamlit "widget cleanup"). Fix: salvar valores
+em chaves _hist_*_persist separadas das keys dos widgets.
+
 v2.1 (22/06/2026): conserta bug do '</div>' literal aparecendo no card.
 Causa: f-string multiline com indentação de 12 espaços fazia o Streamlit/
 Markdown interpretar como code block e quebrar parsing de tags HTML.
@@ -330,32 +335,66 @@ def _render_resumo_lotes(df_lotes, contagem):
     st.markdown("---")
 
     # ─── FILTROS ───────────────────────────────────────────────────────
+    # v2.2: salvamos em chaves session_state SEPARADAS das keys dos widgets
+    # porque Streamlit faz "widget cleanup" — widgets não-renderizados perdem
+    # seu valor após rerun (e quando tu entra no drill-down, esses widgets
+    # não são renderizados). Mantendo cópia em _hist_*_persist, sobrevive.
+    if "_hist_unid_persist" not in st.session_state:
+        st.session_state["_hist_unid_persist"] = "Todas"
+    if "_hist_status_persist" not in st.session_state:
+        st.session_state["_hist_status_persist"] = "Todos"
+    if "_hist_busca_persist" not in st.session_state:
+        st.session_state["_hist_busca_persist"] = ""
+
+    opcoes_unid = ["Todas", "Mogi", "Suzano"]
+    status_opcoes = [
+        "Todos",
+        "🟢 Ativos (rodando + timeout)",
+        "🤖 Rodando",
+        "⏰ Timeout",
+        "✅ Validados",
+        "❌ Invalidados",
+        "🔒 Encerrados / Sem resposta",
+    ]
+
+    # Recupera índice atual de cada filtro pra inicializar widget
+    try:
+        idx_unid = opcoes_unid.index(st.session_state["_hist_unid_persist"])
+    except ValueError:
+        idx_unid = 0
+    try:
+        idx_status = status_opcoes.index(st.session_state["_hist_status_persist"])
+    except ValueError:
+        idx_status = 0
+
     col_f1, col_f2, col_f3 = st.columns([2, 2, 3])
     with col_f1:
         unid_filtro = st.radio(
             "Unidade:",
-            ["Todas", "Mogi", "Suzano"],
+            opcoes_unid,
+            index=idx_unid,
             horizontal=True,
             key="hist_bia_unid",
         )
     with col_f2:
-        # v2: opções expandidas pra incluir encerrados e finalizados
-        status_opcoes = [
-            "Todos",
-            "🟢 Ativos (rodando + timeout)",
-            "🤖 Rodando",
-            "⏰ Timeout",
-            "✅ Validados",
-            "❌ Invalidados",
-            "🔒 Encerrados / Sem resposta",
-        ]
-        status_filtro = st.selectbox("Status:", status_opcoes, key="hist_bia_status")
+        status_filtro = st.selectbox(
+            "Status:",
+            status_opcoes,
+            index=idx_status,
+            key="hist_bia_status",
+        )
     with col_f3:
         busca = st.text_input(
             "🔍 Buscar cadastrante:",
+            value=st.session_state["_hist_busca_persist"],
             placeholder="Nome ou telefone",
             key="hist_bia_busca",
         )
+
+    # v2.2: SALVA cópia que sobrevive ao drill-down
+    st.session_state["_hist_unid_persist"] = unid_filtro
+    st.session_state["_hist_status_persist"] = status_filtro
+    st.session_state["_hist_busca_persist"] = busca
 
     # Aplica filtros
     df_f = df_lotes.copy()
