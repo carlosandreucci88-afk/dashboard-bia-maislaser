@@ -75,7 +75,7 @@ TZ_SP = timezone(timedelta(hours=-3))
 COR_PRIMARIA = "#5BC0BE"      # teal do logo Maislaser
 COR_PRIMARIA_DARK = "#3D9991"
 CUSTO_USD_POR_MTOK = 3.0
-VERSAO_DASHBOARD = "v5.3.2"
+VERSAO_DASHBOARD = "v5.3.3"
 VERSAO_CEREBRO = "v3.10"
 VERSAO_APPS_SCRIPT = "v6.5"
 MODELO_CLAUDE_DEFAULT = "claude-sonnet-4-6"
@@ -1671,26 +1671,10 @@ def tela_metricas(df_conv, df_leads, df_agend, df_bia_disparos=None):
     else:
         st.info("Sem dados.")
 
-    st.divider()
-    st.markdown("### ⚠️ Conversas que precisam de atenção")
-    # v5.1: passa df_bia_disparos pra resolver nome/unidade dos indicados
-    df_agrupado_p = agrupar_conversas(df_conv_p, df_leads, df_agend, df_bia_disparos=df_bia_disparos)
-    if not df_agrupado_p.empty:
-        problematicas = df_agrupado_p[df_agrupado_p['alertas'].apply(lambda x: len(x) > 0)]
-        if not problematicas.empty:
-            st.caption(f"{len(problematicas)} conversa(s) com sinais de problema — ideal pra revisar e melhorar o cérebro")
-            for _, row in problematicas.head(10).iterrows():
-                with st.expander(f"📱 +{row['telefone']} · {row.get('nome', 'Sem nome')} · {row['total_mensagens']} msgs"):
-                    for a in row['alertas']:
-                        st.markdown(f"- {a}")
-                    st.caption(f"Última: {row['ultima_mensagem_preview']}")
-                    # v5.3.1: chave separada conv_drill_metricas pro drill
-                    # aparecer DENTRO da própria tab Métricas (preserva aba)
-                    if st.button("Ver conversa completa", key=f"prob_{row['telefone']}"):
-                        st.session_state['conv_drill_metricas'] = row['telefone']
-                        st.rerun()
-        else:
-            st.success("🎉 Nenhuma conversa problemática detectada no período!")
+    # v5.3.3: removida seção "⚠️ Conversas que precisam de atenção" — a aba
+    # Pendências já cumpre esse papel com mais detalhes. Manter aqui era
+    # redundância. Drill conv_drill_metricas ainda existe no main() mas
+    # agora nunca é setado (defensivo — não quebra se algo externo setar).
 
 
 # ─────────── ABA 5: ⚙️ CONFIGURAÇÕES (mantida + modelo Sonnet) ───────────
