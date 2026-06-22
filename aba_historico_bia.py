@@ -3,6 +3,11 @@
 ABA HISTÓRICO BIA — Lotes que a Bia v5 puxou (modo AUTO)
 ==============================================================================
 
+v2.1 (22/06/2026): conserta bug do '</div>' literal aparecendo no card.
+Causa: f-string multiline com indentação de 12 espaços fazia o Streamlit/
+Markdown interpretar como code block e quebrar parsing de tags HTML.
+Fix: HTML renderizado sem indentação (concatenação f-string inline).
+
 v2 (22/06/2026): MANTÉM lotes finalizados/validados/invalidados no histórico.
 Antes (v1) usava /?endpoint=validacao que filtrava status_rec=AGUARDANDO_VALIDACAO,
 fazendo lotes sumirem após decisão. Agora usa /?endpoint=clientes (retorna TUDO
@@ -463,35 +468,37 @@ def _render_resumo_lotes(df_lotes, contagem):
         card_class = "lote-card lote-card-finalizado" if is_finalizado else "lote-card"
         progress_class = "progress-mini-fill-final" if is_finalizado else "progress-mini-fill"
 
-        st.markdown(
-            f"""
-            <div class="{card_class}">
-              <div style="display: flex; justify-content: space-between; align-items: center;">
-                <div>
-                  <strong style="font-size: 15px;">{nome}</strong>
-                  <span style="color: #6b7280; font-size: 13px;"> · 📱 {tel} · 📍 {unid}</span>
-                </div>
-                <div>
-                  <span class="status-{row['_status_class']}">{row['_status_label']}</span>
-                  {badge_voucher}
-                </div>
-              </div>
-              <div style="margin-top: 8px; color: #6b7280; font-size: 13px;">
-                🤖 Bia puxou em <strong>{bia_str}</strong> (há {puxou_str}){tempo_extra}
-              </div>
-              <div style="margin-top: 10px;">
-                <div style="display: flex; justify-content: space-between; font-size: 12px; color: #374151;">
-                  <span>📨 {disp}/{ind} enviados · 🛡️ {skip} skip · 💬 {resp} responderam · meta {meta} (30%)</span>
-                  <strong style="color: {'#059669' if pct_progresso >= 100 else '#5BC0BE'};">{taxa:.1f}%</strong>
-                </div>
-                <div class="progress-mini">
-                  <div class="{progress_class}" style="width: {pct_progresso}%;"></div>
-                </div>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
+        # v2.1: HTML sem indentação (Streamlit/Markdown trata 4+ espaços como
+        # code block e quebra parsing de tags HTML inline). Tudo numa string
+        # contínua, sem newlines/indents internos.
+        cor_taxa = '#059669' if pct_progresso >= 100 else '#5BC0BE'
+        html_card = (
+            f'<div class="{card_class}">'
+            f'<div style="display: flex; justify-content: space-between; align-items: center;">'
+            f'<div>'
+            f'<strong style="font-size: 15px;">{nome}</strong>'
+            f'<span style="color: #6b7280; font-size: 13px;"> · 📱 {tel} · 📍 {unid}</span>'
+            f'</div>'
+            f'<div>'
+            f'<span class="status-{row["_status_class"]}">{row["_status_label"]}</span>'
+            f'{badge_voucher}'
+            f'</div>'
+            f'</div>'
+            f'<div style="margin-top: 8px; color: #6b7280; font-size: 13px;">'
+            f'🤖 Bia puxou em <strong>{bia_str}</strong> (há {puxou_str}){tempo_extra}'
+            f'</div>'
+            f'<div style="margin-top: 10px;">'
+            f'<div style="display: flex; justify-content: space-between; font-size: 12px; color: #374151;">'
+            f'<span>📨 {disp}/{ind} enviados · 🛡️ {skip} skip · 💬 {resp} responderam · meta {meta} (30%)</span>'
+            f'<strong style="color: {cor_taxa};">{taxa:.1f}%</strong>'
+            f'</div>'
+            f'<div class="progress-mini">'
+            f'<div class="{progress_class}" style="width: {pct_progresso}%;"></div>'
+            f'</div>'
+            f'</div>'
+            f'</div>'
         )
+        st.markdown(html_card, unsafe_allow_html=True)
 
         # Botão "Ver detalhes"
         col_btn, _ = st.columns([1, 4])
