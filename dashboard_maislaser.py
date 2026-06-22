@@ -2,10 +2,14 @@
 ==============================================================================
 DASHBOARD MAISLASER — Bia
 ==============================================================================
-v5.3 (22/06/2026): "Ver detalhes" da conversa fica DENTRO da tab Conversas
-(em vez de esconder todas as tabs), preservando a aba ativa ao voltar.
-Filtros (período/unidade/alertas/busca) persistem entre drill-down e retorno
-via chaves _conv_*_persist no session_state.
+v5.3 (22/06/2026): preserva a aba ativa do dashboard ao usar "Ver".
+- Aba Conversas: drill-down fica DENTRO da tab Conversas (em vez de
+  esconder todas), preservando aba ativa ao voltar.
+- Aba Agendamentos e Métricas: botões "Ver" trocados por link_button
+  que abrem a conversa em NOVA GUIA do navegador, preservando 100%
+  do estado da aba origem (filtros, scroll, etc).
+- Filtros (período/unidade/alertas/busca) persistem entre drill-down
+  e retorno via chaves _conv_*_persist no session_state.
 v5.2 (22/06/2026): botão "🔗 Nova aba" na lista de conversas — abre a
 conversa em outra guia do navegador (preserva o token de login).
 v5.1 (22/06/2026): fallback bia_disparos pra nome/unidade na aba Conversas.
@@ -1351,6 +1355,10 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
     h7.markdown("**Ação**")
     st.divider()
 
+    # v5.3: token de login pra preservar na URL da nova guia
+    _qp_ag = st.query_params
+    _token_ag = f"t={_qp_ag['t']}&" if "t" in _qp_ag else ""
+
     for _, ag in df_filt.iterrows():
         c1, c2, c3, c4, c5, c6, c7 = st.columns([1.6, 1.4, 0.9, 1.2, 1.4, 1.3, 0.9])
 
@@ -1385,9 +1393,15 @@ def tela_agendamentos(df_agend, df_leads, df_conv):
         c6.markdown(f"<span class='{ag['_status_classe']}'>{ag['_status_texto']}</span>",
                     unsafe_allow_html=True)
 
-        if c7.button("Ver", key=f"ver_agend_{telefone}_{ag.name}"):
-            st.session_state['conversa_selecionada'] = telefone
-            st.rerun()
+        # v5.3: trocado st.button por st.link_button — abre em nova guia
+        # do navegador (preservando aba/filtros da Agendamentos).
+        # Se ficasse na mesma guia, o st.rerun() do click resetaria a aba
+        # ativa pra "Pendências" (limitação do st.tabs).
+        c7.link_button(
+            "🔗 Ver",
+            url=f"?{_token_ag}conversa={telefone}",
+            help="Abrir conversa em nova guia",
+        )
 
         st.markdown("---")
 
@@ -1641,14 +1655,23 @@ def tela_metricas(df_conv, df_leads, df_agend, df_bia_disparos=None):
         problematicas = df_agrupado_p[df_agrupado_p['alertas'].apply(lambda x: len(x) > 0)]
         if not problematicas.empty:
             st.caption(f"{len(problematicas)} conversa(s) com sinais de problema — ideal pra revisar e melhorar o cérebro")
+
+            # v5.3: token de login pra preservar na URL da nova guia
+            _qp_m = st.query_params
+            _token_m = f"t={_qp_m['t']}&" if "t" in _qp_m else ""
+
             for _, row in problematicas.head(10).iterrows():
                 with st.expander(f"📱 +{row['telefone']} · {row.get('nome', 'Sem nome')} · {row['total_mensagens']} msgs"):
                     for a in row['alertas']:
                         st.markdown(f"- {a}")
                     st.caption(f"Última: {row['ultima_mensagem_preview']}")
-                    if st.button("Ver conversa completa", key=f"prob_{row['telefone']}"):
-                        st.session_state['conversa_selecionada'] = row['telefone']
-                        st.rerun()
+                    # v5.3: link_button em vez de button — abre nova guia
+                    # pra preservar a aba Métricas + filtros do usuário
+                    st.link_button(
+                        "🔗 Ver conversa completa",
+                        url=f"?{_token_m}conversa={row['telefone']}",
+                        help="Abrir em nova guia",
+                    )
         else:
             st.success("🎉 Nenhuma conversa problemática detectada no período!")
 
