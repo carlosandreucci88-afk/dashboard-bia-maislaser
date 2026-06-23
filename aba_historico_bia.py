@@ -19,6 +19,9 @@ fazendo lotes sumirem após decisão. Agora usa /?endpoint=clientes (retorna TUD
 da aba CLIENTES) e filtra por BIA_PUXOU_EM IS NOT NULL — então qualquer lote
 que a Bia trabalhou aparece, independente do status final.
 
+v2.3 (23/06/2026): filtro global de unidade movido pra ANTES dos cards de KPI.
+Cards e lista refletem a seleção. Estilo pill (consistente com Pendências e Z-API).
+
 Mostra TODOS os lotes que a Bia trabalhou (ou está trabalhando) em modo AUTO.
 Cruza com `bia_disparos` no Supabase pra contar disparos/respostas em tempo real.
 
@@ -59,6 +62,8 @@ from aba_zapi import (
     _mostrar_erro_e_parar,
     _meta_respostas,
     _get_supabase_zapi,
+    _filtro_unidade_zapi,
+    _aplicar_filtro_unidade_df,
 )
 
 TZ_SP = timezone(timedelta(hours=-3))
@@ -303,7 +308,26 @@ def render_aba_historico_bia():
 # ============================================================================
 
 def _render_resumo_lotes(df_lotes, contagem):
-    # ─── CARDS DE RESUMO ───────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────────
+    # v2.3: FILTRO DE UNIDADE GLOBAL — antes dos cards
+    # ───────────────────────────────────────────────────────────────────
+    unid_filtro = _filtro_unidade_zapi(key_persist="_hist_bia_unidade_persist")
+    st.markdown(
+        '<hr style="margin: 12px 0 18px 0; border: none; border-top: 1px solid #E5E7EB;">',
+        unsafe_allow_html=True,
+    )
+
+    # Aplica filtro de unidade ANTES de tudo (cards leem df já filtrado)
+    df_lotes = _aplicar_filtro_unidade_df(df_lotes, unid_filtro, coluna="unidade")
+
+    if df_lotes.empty:
+        st.info(
+            f"🎉 Nenhum lote em **{unid_filtro}**." if unid_filtro != "Todas"
+            else "Nenhum lote."
+        )
+        return
+
+    # ─── CARDS DE RESUMO (refletem unidade selecionada) ────────────────
     # v2: contagem baseada em _status_class (mais confiável que substring match)
     qtd_total = len(df_lotes)
     qtd_rodando = int((df_lotes["_status_class"] == "info").sum())
@@ -334,19 +358,14 @@ def _render_resumo_lotes(df_lotes, contagem):
 
     st.markdown("---")
 
-    # ─── FILTROS ───────────────────────────────────────────────────────
-    # v2.2: salvamos em chaves session_state SEPARADAS das keys dos widgets
-    # porque Streamlit faz "widget cleanup" — widgets não-renderizados perdem
-    # seu valor após rerun (e quando tu entra no drill-down, esses widgets
-    # não são renderizados). Mantendo cópia em _hist_*_persist, sobrevive.
-    if "_hist_unid_persist" not in st.session_state:
-        st.session_state["_hist_unid_persist"] = "Todas"
+    # ─── FILTROS SECUNDÁRIOS (Status + Busca) ──────────────────────────
+    # v2.3: removido o filtro de unidade duplicado daqui (virou global no topo)
+    # v2.2: persist do status/busca pra sobreviver ao drill-down
     if "_hist_status_persist" not in st.session_state:
         st.session_state["_hist_status_persist"] = "Todos"
     if "_hist_busca_persist" not in st.session_state:
         st.session_state["_hist_busca_persist"] = ""
 
-    opcoes_unid = ["Todas", "Mogi", "Suzano"]
     status_opcoes = [
         "Todos",
         "🟢 Ativos (rodando + timeout)",
@@ -357,33 +376,20 @@ def _render_resumo_lotes(df_lotes, contagem):
         "🔒 Encerrados / Sem resposta",
     ]
 
-    # Recupera índice atual de cada filtro pra inicializar widget
-    try:
-        idx_unid = opcoes_unid.index(st.session_state["_hist_unid_persist"])
-    except ValueError:
-        idx_unid = 0
     try:
         idx_status = status_opcoes.index(st.session_state["_hist_status_persist"])
     except ValueError:
         idx_status = 0
 
-    col_f1, col_f2, col_f3 = st.columns([2, 2, 3])
+    col_f1, col_f2 = st.columns([2, 3])
     with col_f1:
-        unid_filtro = st.radio(
-            "Unidade:",
-            opcoes_unid,
-            index=idx_unid,
-            horizontal=True,
-            key="hist_bia_unid",
-        )
-    with col_f2:
         status_filtro = st.selectbox(
             "Status:",
             status_opcoes,
             index=idx_status,
             key="hist_bia_status",
         )
-    with col_f3:
+    with col_f2:
         busca = st.text_input(
             "🔍 Buscar cadastrante:",
             value=st.session_state["_hist_busca_persist"],
@@ -392,14 +398,11 @@ def _render_resumo_lotes(df_lotes, contagem):
         )
 
     # v2.2: SALVA cópia que sobrevive ao drill-down
-    st.session_state["_hist_unid_persist"] = unid_filtro
     st.session_state["_hist_status_persist"] = status_filtro
     st.session_state["_hist_busca_persist"] = busca
 
-    # Aplica filtros
+    # Aplica filtros (unidade já foi aplicada globalmente lá em cima)
     df_f = df_lotes.copy()
-    if unid_filtro != "Todas":
-        df_f = df_f[df_f["unidade"].str.lower() == unid_filtro.lower()]
 
     if status_filtro == "🟢 Ativos (rodando + timeout)":
         df_f = df_f[df_f["status_rec_base"] == "AGUARDANDO_VALIDACAO"]
