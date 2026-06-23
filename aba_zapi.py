@@ -32,6 +32,12 @@ v9.8 (18/06/2026): FEATURE MODO MANUAL/AUTO
       - AUTO (aguardando puxar) → mensagem informativa + mudar pra MANUAL
       - AUTO (Bia rodando) → progresso X/Y + tempo restante, só visualização
   • Progresso lido direto do Supabase (bia_disparos.respondeu_em)
+
+v9.9 (23/06/2026): FILTRO GLOBAL DE UNIDADE
+  • Filtro Todas / Mogi / Suzano movido pra ANTES dos cards de KPI
+  • Cards e lista de campanhas leem df já filtrado
+  • Estilo pill (consistente com aba Pendências)
+  • Estado persiste em session_state[_zapi_aguard_unidade_persist]
 ==============================================================================
 """
 
@@ -247,6 +253,60 @@ def _meta_respostas(total_contatos):
 
 
 # ============================================================================
+# v9.9 (23/06/2026) — FILTRO GLOBAL DE UNIDADE (pill style)
+# ============================================================================
+# Antes: radio de unidade ficava DEPOIS dos cards de KPI, então os cards
+# mostravam dados de TODAS as unidades mesmo quando filtrava por Mogi/Suzano.
+# Agora: filtro vem ANTES dos cards, e cards/lista refletem a seleção.
+# Padrão visual igual ao da aba Pendências (botões pill com persist).
+# ============================================================================
+
+def _filtro_unidade_zapi(key_persist="_zapi_aguard_unidade_persist"):
+    """Renderiza filtro pill global de unidade no topo da tela.
+    Retorna 'Todas' | 'Mogi' | 'Suzano' (persistido em session_state)."""
+    if key_persist not in st.session_state:
+        st.session_state[key_persist] = "Todas"
+
+    atual = st.session_state[key_persist]
+
+    st.markdown(
+        "<div style='font-size: 14px; color: #6B7280; font-weight: 600; margin-bottom: 6px;'>"
+        "📍 Filtrar por unidade"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3 = st.columns(3)
+    for col, label, valor in [
+        (c1, "📌 Todas",  "Todas"),
+        (c2, "📍 Mogi",   "Mogi"),
+        (c3, "📍 Suzano", "Suzano"),
+    ]:
+        with col:
+            if st.button(
+                label,
+                key=f"zapi_und_{key_persist}_{valor}",
+                type="primary" if atual == valor else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state[key_persist] = valor
+                st.rerun()
+
+    return st.session_state[key_persist]
+
+
+def _aplicar_filtro_unidade_df(df, unidade_sel, coluna="unidade"):
+    """Filtra df por unidade. 'Todas' retorna df inteiro.
+    Match case-insensitive com contains (pega 'mogi', 'Mogi', 'Mogi das Cruzes')."""
+    if df is None or df.empty or unidade_sel == "Todas":
+        return df
+    if coluna not in df.columns:
+        return df
+    target = unidade_sel.lower()
+    return df[df[coluna].astype(str).str.lower().str.contains(target, na=False)].copy()
+
+
+# ============================================================================
 # TELA: ⏳ AGUARDANDO VALIDAÇÃO (v9.8 — feature MODO MANUAL/AUTO)
 # ============================================================================
 
@@ -328,6 +388,22 @@ def tela_zapi_aguardando_validacao():
     df["validacao_marcada"] = df["validacao_marcada"].fillna("").astype(str).str.upper().str.strip()
 
     # ───────────────────────────────────────────────────────────────────
+    # v9.9: FILTRO DE UNIDADE GLOBAL — antes dos cards
+    # ───────────────────────────────────────────────────────────────────
+    unid_filtro = _filtro_unidade_zapi()
+    st.markdown(
+        '<hr style="margin: 12px 0 18px 0; border: none; border-top: 1px solid #E5E7EB;">',
+        unsafe_allow_html=True,
+    )
+
+    # Aplica filtro de unidade ANTES de tudo (cards leem df já filtrado)
+    df = _aplicar_filtro_unidade_df(df, unid_filtro, coluna="unidade")
+
+    if df.empty:
+        st.info(f"🎉 Nada pendente em **{unid_filtro}**." if unid_filtro != "Todas" else "Nada pendente.")
+        return
+
+    # ───────────────────────────────────────────────────────────────────
     # PROGRESSO BIA (Supabase) — só pra campanhas AUTO que Bia já puxou
     # ───────────────────────────────────────────────────────────────────
     camp_ids_bia = tuple(
@@ -336,7 +412,7 @@ def tela_zapi_aguardando_validacao():
     progresso_por_camp = _get_progresso_campanhas_bia(camp_ids_bia)
 
     # ───────────────────────────────────────────────────────────────────
-    # CARDS DE RESUMO
+    # CARDS DE RESUMO — calculados em cima do df JÁ filtrado por unidade
     # ───────────────────────────────────────────────────────────────────
     _marcadas = df["validacao_marcada"].isin(["VALIDADO", "INVALIDADO", "AUTO_VALIDADO_BIA", "AUTO_INVALIDADO_BIA"])
     qtd_processando = int(_marcadas.sum())
@@ -367,21 +443,6 @@ def tela_zapi_aguardando_validacao():
     )
 
     st.markdown("---")
-
-    # Filtro por unidade
-    unid_filtro = st.radio(
-        "Filtrar por unidade:",
-        ["Todas", "Mogi", "Suzano"],
-        horizontal=True,
-        key="zapi_aguard_unidade",
-    )
-    if unid_filtro != "Todas":
-        df = df[df["unidade"].str.lower() == unid_filtro.lower()]
-        df_ativas = df_ativas[df_ativas["unidade"].str.lower() == unid_filtro.lower()]
-
-    if df.empty:
-        st.info(f"Nada pendente em {unid_filtro}.")
-        return
 
     # ───────────────────────────────────────────────────────────────────
     # BANNER DE "PROCESSANDO" (já marcadas, aguardando trigger 5min)
