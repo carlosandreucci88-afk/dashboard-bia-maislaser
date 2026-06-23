@@ -25,8 +25,12 @@ Sub-abas:
   🔄 Reagendar/Não vai    — clicou PRECISO REAGENDAR ou NÃO VOU CONSEGUIR
   💭 Pergunta pós-agend.  — AGENDADA com dúvida (preparo, local, etc)
 
-SKIP_BASE, ERRO_NUMERO_INVALIDO, BLOQUEADO_PELO_INDICADO → fora de escopo
-(virão em fase posterior conforme decisão do dono do projeto).
+v3.0 (23/06/2026):
+  - Filtro GLOBAL de unidade (Todas/Mogi/Suzano) movido pro topo da aba
+  - Cards e sub-abas refletem o filtro de unidade selecionado
+  - Filtro de unidade duplicado dentro das sub-abas REMOVIDO
+  - Dentro de cada sub-aba sobra só o filtro de PERÍODO
+  - Seleção da unidade persiste via session_state (_pend_unidade_persist)
 ==============================================================================
 """
 
@@ -34,9 +38,11 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 
-# Reusa helpers já existentes (filtros, métricas, export) — mesma UX do resto do app
+# Reusa helpers já existentes (métricas, export) — mesma UX do resto do app
+# NOTA v3.0: removemos a importação de `_filtros_periodo_unidade` porque agora
+# usamos `_filtro_periodo_local` definido aqui (sem filtro de unidade, já que
+# isso virou global no topo).
 from aba_confirmacao import (
-    _filtros_periodo_unidade,
     _render_metric_card_local,
     _botao_export_xlsx,
 )
@@ -253,20 +259,136 @@ def _norm_unidade_display(u):
 
 
 # ============================================================================
+# v3.0 — FILTROS NOVOS (unidade global + período local)
+# ============================================================================
+
+def _filtro_unidade_global():
+    """
+    Renderiza filtro global de unidade no topo da aba Pendências.
+    Retorna: 'Todas' | 'Mogi' | 'Suzano' (persistido em session_state).
+
+    Visual: 3 botões em colunas, o selecionado fica type="primary".
+    """
+    key_persist = "_pend_unidade_persist"
+    if key_persist not in st.session_state:
+        st.session_state[key_persist] = "Todas"
+
+    atual = st.session_state[key_persist]
+
+    st.markdown(
+        "<div style='font-size: 14px; color: #6B7280; font-weight: 600; margin-bottom: 6px;'>"
+        "📍 Filtrar por unidade"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3 = st.columns(3)
+
+    opcoes = [
+        (c1, "📌 Todas",    "Todas"),
+        (c2, "📍 Mogi",     "Mogi"),
+        (c3, "📍 Suzano",   "Suzano"),
+    ]
+
+    for col, label, valor in opcoes:
+        with col:
+            if st.button(
+                label,
+                key=f"pend_und_global_{valor}",
+                type="primary" if atual == valor else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state[key_persist] = valor
+                st.rerun()
+
+    return st.session_state[key_persist]
+
+
+def _aplicar_filtro_unidade(df, unidade_sel):
+    """
+    Filtra df pela unidade selecionada. 'Todas' retorna df inteiro.
+    Match case-insensitive (pega 'Mogi', 'mogi', 'Mogi das Cruzes', etc).
+    """
+    if df is None or df.empty or unidade_sel == "Todas":
+        return df
+    if 'unidade' not in df.columns:
+        return df
+    target = unidade_sel.lower()
+    return df[
+        df['unidade'].astype(str).str.lower().str.contains(target, na=False)
+    ].copy()
+
+
+def _filtro_periodo_local(df, coluna_data, key_prefix, default="Tudo"):
+    """
+    Renderiza só filtro de período (Hoje / 24h / 3 dias / Tudo) e retorna df filtrado.
+    Estado persiste em session_state[f'_{key_prefix}_periodo_persist'].
+
+    Substitui o `_filtros_periodo_unidade` antigo de aba_confirmacao — esta
+    versão NÃO renderiza filtro de unidade (que virou global no topo da aba).
+    """
+    if df is None or df.empty:
+        return df
+
+    key_persist = f"_{key_prefix}_periodo_persist"
+    if key_persist not in st.session_state:
+        st.session_state[key_persist] = default
+
+    atual = st.session_state[key_persist]
+
+    c1, c2, c3, c4 = st.columns(4)
+    opcoes = [
+        (c1, "📅 Hoje",            "Hoje"),
+        (c2, "🕐 Últimas 24h",      "Últimas 24h"),
+        (c3, "📅 Últimos 3 dias",   "Últimos 3 dias"),
+        (c4, "♾️ Tudo",             "Tudo"),
+    ]
+
+    for col, label, valor in opcoes:
+        with col:
+            if st.button(
+                label,
+                key=f"{key_prefix}_per_{valor}",
+                type="primary" if atual == valor else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state[key_persist] = valor
+                st.rerun()
+
+    # Aplica corte temporal
+    agora = pd.Timestamp.now(tz=TZ_SP)
+    try:
+        if atual == "Hoje":
+            inicio = agora.normalize()
+            return df[df[coluna_data] >= inicio].copy()
+        elif atual == "Últimas 24h":
+            inicio = agora - pd.Timedelta(hours=24)
+            return df[df[coluna_data] >= inicio].copy()
+        elif atual == "Últimos 3 dias":
+            inicio = agora - pd.Timedelta(days=3)
+            return df[df[coluna_data] >= inicio].copy()
+        else:  # Tudo
+            return df
+    except Exception:
+        # Se o corte falhar (ex: coluna sem tz), retorna df sem filtrar pra não quebrar a aba
+        return df
+
+
+# ============================================================================
 # RENDER POR SUB-ABA
 # ============================================================================
 
 def _render_lista_handoffs(df, tipo_label, key_prefix):
-    """Renderiza lista de HANDOFF ou HANDOFF_MED (vindos de bia_disparos)."""
+    """Renderiza lista de HANDOFF ou HANDOFF_MED (vindos de bia_disparos).
+    v3.0: usa _filtro_periodo_local (unidade já foi filtrada globalmente)."""
     if df.empty:
         st.success(f"🎉 Nenhum {tipo_label} aberto!")
         return
 
-    # Filtros (período + unidade) — default "Tudo" pra ver toda fila aberta
-    df_f = _filtros_periodo_unidade(df, "quando_sp", "unidade", key_prefix, default_periodo="Tudo")
+    df_f = _filtro_periodo_local(df, "quando_sp", key_prefix, default="Tudo")
 
     if df_f.empty:
-        st.info("Nenhum caso nos filtros selecionados.")
+        st.info("Nenhum caso no período selecionado.")
         return
 
     # Header + export
@@ -323,15 +445,16 @@ def _render_lista_handoffs(df, tipo_label, key_prefix):
 
 
 def _render_lista_reagendar(df, key_prefix):
-    """Renderiza lista REAGENDAR + NAO_VOU (vindos de agendamentos)."""
+    """Renderiza lista REAGENDAR + NAO_VOU (vindos de agendamentos).
+    v3.0: usa _filtro_periodo_local (unidade já foi filtrada globalmente)."""
     if df.empty:
         st.success("🎉 Nenhuma pendência aberta!")
         return
 
-    df_f = _filtros_periodo_unidade(df, "quando_sp", "unidade", key_prefix, default_periodo="Tudo")
+    df_f = _filtro_periodo_local(df, "quando_sp", key_prefix, default="Tudo")
 
     if df_f.empty:
-        st.info("Nenhum caso nos filtros selecionados.")
+        st.info("Nenhum caso no período selecionado.")
         return
 
     col_t, col_e = st.columns([4, 1.4])
@@ -396,15 +519,16 @@ def _render_lista_reagendar(df, key_prefix):
 
 
 def _render_lista_pos_agendamento(df, key_prefix):
-    """Renderiza lista de AGENDADA com pergunta pós-agendamento."""
+    """Renderiza lista de AGENDADA com pergunta pós-agendamento.
+    v3.0: usa _filtro_periodo_local (unidade já foi filtrada globalmente)."""
     if df.empty:
         st.success("🎉 Nenhuma pergunta pós-agendamento aberta!")
         return
 
-    df_f = _filtros_periodo_unidade(df, "quando_sp", "unidade", key_prefix, default_periodo="Tudo")
+    df_f = _filtro_periodo_local(df, "quando_sp", key_prefix, default="Tudo")
 
     if df_f.empty:
-        st.info("Nenhum caso nos filtros selecionados.")
+        st.info("Nenhum caso no período selecionado.")
         return
 
     col_t, col_e = st.columns([4, 1.4])
@@ -474,19 +598,38 @@ def _render_lista_pos_agendamento(df, key_prefix):
 # ============================================================================
 
 def render_aba_pendencias():
-    """Render da aba ⚠️ Pendências Bia. Sem args — usa _get_sb() interno."""
+    """Render da aba ⚠️ Pendências Bia. Sem args — usa _get_sb() interno.
+
+    v3.0 — fluxo:
+      1. Título + caption
+      2. Filtro GLOBAL de unidade (Todas / Mogi / Suzano)
+      3. Cards (refletem filtro de unidade)
+      4. Sub-abas (refletem filtro de unidade; só filtro de período interno)
+    """
     st.markdown("## ⚠️ Pendências Bia")
     st.caption(
         "Casos abertos esperando contato da recepção. "
         "Quando você ligar/atender, marque com ✓ pra remover da fila."
     )
 
-    # Carga das 3 fontes
-    df_bd = _carregar_pendencias_bia_disparos()
-    df_ag = _carregar_pendencias_agendamentos()
-    df_pa = _carregar_pendencias_pos_agendamento()
+    # ── v3.0: FILTRO GLOBAL de unidade ANTES dos cards ────────────────────
+    unidade_sel = _filtro_unidade_global()
+    st.markdown(
+        '<hr style="margin: 12px 0 18px 0; border: none; border-top: 1px solid #E5E7EB;">',
+        unsafe_allow_html=True,
+    )
 
-    # Contagens pra badges das sub-abas
+    # ── Carga das 3 fontes (já em cache de 30s) ───────────────────────────
+    df_bd_raw = _carregar_pendencias_bia_disparos()
+    df_ag_raw = _carregar_pendencias_agendamentos()
+    df_pa_raw = _carregar_pendencias_pos_agendamento()
+
+    # ── Aplica filtro global de unidade nos 3 dfs ─────────────────────────
+    df_bd = _aplicar_filtro_unidade(df_bd_raw, unidade_sel)
+    df_ag = _aplicar_filtro_unidade(df_ag_raw, unidade_sel)
+    df_pa = _aplicar_filtro_unidade(df_pa_raw, unidade_sel)
+
+    # Contagens pra badges das sub-abas (já refletem filtro de unidade)
     qtd_handoff = int((df_bd['tipo'] == 'HANDOFF').sum()) if not df_bd.empty else 0
     qtd_med     = int((df_bd['tipo'] == 'HANDOFF_MED').sum()) if not df_bd.empty else 0
     qtd_reag    = len(df_ag)
@@ -494,14 +637,23 @@ def render_aba_pendencias():
     qtd_total   = qtd_handoff + qtd_med + qtd_reag + qtd_pos
 
     if qtd_total == 0:
-        st.success("🎉 **Nenhuma pendência aberta!** A recepção tá em dia.")
-        st.caption(
-            "Quando aparecer cliente HANDOFF, HANDOFF_MED, REAGENDAR ou pergunta pós-agendamento, "
-            "vai listar aqui automaticamente. Atualiza a cada 30s."
-        )
+        # Mensagem diferenciada se filtrou unidade vs total
+        if unidade_sel != "Todas":
+            st.success(
+                f"🎉 **Nenhuma pendência aberta em {unidade_sel}!** Recepção em dia."
+            )
+            st.caption(
+                f"Mostrando apenas {unidade_sel}. Clique em **📌 Todas** acima pra ver tudo."
+            )
+        else:
+            st.success("🎉 **Nenhuma pendência aberta!** A recepção tá em dia.")
+            st.caption(
+                "Quando aparecer cliente HANDOFF, HANDOFF_MED, REAGENDAR ou pergunta pós-agendamento, "
+                "vai listar aqui automaticamente. Atualiza a cada 30s."
+            )
         return
 
-    # KPIs no topo (5 cards agora)
+    # ── KPIs no topo (5 cards) — refletem filtro de unidade ───────────────
     col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
     col_m1.markdown(_render_metric_card_local("📋", qtd_total, "Total aberto", "primary"), unsafe_allow_html=True)
     col_m2.markdown(_render_metric_card_local("💬", qtd_handoff, "HANDOFF", "blue"), unsafe_allow_html=True)
@@ -511,7 +663,7 @@ def render_aba_pendencias():
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Sub-abas com contadores no título (4 abas agora)
+    # ── Sub-abas com contadores no título (já refletem filtro de unidade) ─
     tab_h, tab_m, tab_r, tab_p = st.tabs([
         f"💬 HANDOFF ({qtd_handoff})",
         f"🩺 HANDOFF Médico ({qtd_med})",
