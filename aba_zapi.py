@@ -750,17 +750,55 @@ def _render_acao_auto_rodando(camp_id, contatos, bia_puxou_dt, progresso_por_cam
 # ============================================================================
 
 def _executar_set_modo(tel, modo, nome):
-    """Chama set_modo_campanha no Apps Script + trata resposta + rerun."""
+    """
+    Chama set_modo_campanha no Apps Script + trata resposta + rerun.
+    
+    v2.0 (23/06/2026): se modo='AUTO', acorda o webhook Bia Disparador v2
+    DEPOIS de marcar AUTO no Apps Script. O webhook faz: descoberta da
+    campanha → INSERT contatos em bia_disparos → dispara 1 template/min
+    até esvaziar a fila → dorme. Custo ~$0 quando ocioso.
+    """
+    # Passo 1: marcar modo no Apps Script (logica original)
     with st.spinner(f"Definindo modo {modo} pra {nome}..."):
         resp = _zapi_action("set_modo_campanha", tel=tel, modo=modo)
+    
     if resp.get("_erro") or resp.get("erro"):
         st.error(f"❌ Falhou: {resp.get('_erro') or resp.get('erro')}")
+        return
+    
+    # Passo 2: NOVO - se for AUTO, acorda o webhook do n8n
+    if modo == "AUTO":
+        WEBHOOK_BIA_DISPARO = "https://n8n-production-ec01.up.railway.app/webhook/bia-iniciar-disparo"
+        try:
+            r = requests.post(
+                WEBHOOK_BIA_DISPARO,
+                json={"origem": "dashboard_auto", "telefone_cadastrante": tel, "nome": nome},
+                timeout=5,
+            )
+            if r.status_code == 200:
+                st.toast(f"🤖 Bia acordada! Vai disparar 1 template/min pra {nome}.", icon="🚀")
+            else:
+                st.toast(
+                    f"⚠️ AUTO marcado, mas webhook retornou HTTP {r.status_code}.",
+                    icon="⚠️",
+                )
+        except requests.exceptions.Timeout:
+            st.toast(
+                f"⏱️ Webhook acordado (timeout normal — Bia processando {nome}).",
+                icon="🚀",
+            )
+        except Exception as e:
+            st.toast(
+                f"⚠️ AUTO marcado, mas falhou ao acordar webhook: {e}",
+                icon="⚠️",
+            )
     else:
         st.toast(f"Modo {modo} aplicado pra {nome}", icon="✅")
-        _zapi_get.clear()
-        _get_progresso_campanhas_bia.clear()
-        st.rerun()
-
+    
+    # Passo 3: limpa caches + rerun (logica original)
+    _zapi_get.clear()
+    _get_progresso_campanhas_bia.clear()
+    st.rerun()
 
 def _render_lista_contatos(camp_id, nome):
     """Bloco expansível com os 20 contatos da campanha."""
