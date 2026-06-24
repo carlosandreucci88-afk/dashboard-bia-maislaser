@@ -2,6 +2,30 @@
 ==============================================================================
 ABA 🚀 DISPARAR AGENDA — Robô Confirmação Agenda
 ==============================================================================
+v6.14 (24/06/2026): VERIFICAÇÃO FINAL POR GET ÚNICO — elimina falsos positivos
+de "Contexto NÃO salvo" causados por timeout do POST quando Apps Script demora
+pra responder mas já salvou.
+
+CAUSA RAIZ:
+  Apps Script `salvarContexto` demora >15s quando há contenção do lock
+  (trigger paralelo + Contexto com 595+ linhas + cold start). Streamlit dava
+  timeout e marcava como falha — MAS o Apps Script JÁ HAVIA SALVADO.
+
+CASO REAL:
+  Disparo Suzano 24/06 11:53 reportou 5 falhas. Todas as 5 estavam no Contexto
+  e 4 já tinham confirmado normalmente. Alerta falso 100%.
+
+FIX v6.14:
+  • timeout POST 15→30s + 2→3 tentativas (mais resiliente)
+  • Não mostra warning durante o loop (não é confiável em tempo real)
+  • Tracking de todos os telefones disparados em lista local
+  • Após o loop: 1 GET único no endpoint=contexto compara TODOS os telefones
+    disparados com a lista REAL do Apps Script
+  • Reconcilia: falsos positivos corrigidos + falhas reais detectadas
+  • Bonus: também detecta falhas silenciosas (POST 200 mas contexto sumiu)
+  • Degradação graciosa: se GET falhar, usa dados do POST
+
+==============================================================================
 v2 (22/06/2026): grava `disparos_historico` ANTES do loop de envio (status
 EM_ANDAMENTO) e atualiza ao FINAL com totais reais. Antes era só um INSERT
 no fim — se o Streamlit reset/erro/refresh acontecesse antes do INSERT, o
@@ -23,143 +47,68 @@ import time
 import re
 from supabase import create_client
 
-# ============================================================
-# CONFIGURAÇÕES DO MÓDULO
-# ============================================================
-# Templates aprovados na Meta — parte da lógica de negócio, não credencial.
 NOME_MODELO_MENSAGEM        = "confirmacao_agenda_maislaser_v4"
 NOME_MODELO_MENSAGEM_2SESS  = "confirmacao_agenda_maislaser_2sessoes_v2"
 
-# Credenciais e URLs sensíveis: lidos de st.secrets dentro das funções.
-# Necessário configurar no Streamlit Cloud (share.streamlit.io/settings/secrets):
-#   TOKEN_META            — token long-lived do WhatsApp Business
-#   ID_TELEFONE_META      — phone number ID da Meta
-#   URL_WEBHOOK_CONTEXTO  — Apps Script /exec do robô confirmação
-#   NUMERO_ROBO_ALERTAS   — número que recebe os alertas (ex: "5511911177883")
-
-# ============================================================
-# FUNÇÃO: Limpar número de telefone
-# ============================================================
 def limpar_numero(numero):
-    """
-    Limpa o número deixando apenas dígitos e garante o formato
-    correto internacional com DDI 55 (Brasil).
-    Trata casos onde o pandas lê como float (ex: 5511999990000.0)
-    """
     if pd.isna(numero):
         return None
-
     num_str = str(numero).strip()
-
-    # Remove ponto flutuante gerado pelo pandas (ex: 55119999.0 → 55119999)
     if num_str.endswith('.0'):
         num_str = num_str[:-2]
-
-    # Remove tudo que não for dígito
     num_limpo = re.sub(r'\D', '', num_str)
-
     if num_limpo == '':
         return None
-
-    # ✅ CORREÇÃO: Evita duplicar o 55 — verifica se JÁ começa com 55
-    # e se o comprimento faz sentido para um número brasileiro com DDI
-    # Número brasileiro com DDI: 55 + DDD (2) + número (8 ou 9) = 12 ou 13 dígitos
     if num_limpo.startswith('55') and len(num_limpo) >= 12:
-        return num_limpo  # Já está correto, não adiciona 55 novamente
+        return num_limpo
     elif not num_limpo.startswith('55'):
         return '55' + num_limpo
     else:
         return num_limpo
 
-# ============================================================
-# FUNÇÃO: Limpar nome do serviço para exibição na mensagem
-# ============================================================
 def limpar_nome_servico(servico):
-    """
-    Remove os prefixos 'F - ' e 'M - ' que o sistema UNO adiciona
-    nos serviços (F = Feminino, M = Masculino).
-    Deixa o nome mais limpo e natural na mensagem do cliente.
-    Ex: 'F - Depilação de Axilas cortesia' → 'Depilação de Axilas'
-    Também remove sufixos como 'cortesia', '(área P)', etc.
-    """
     if pd.isna(servico) or str(servico).strip() == '':
         return ''
-
     s = str(servico).strip()
-
-    # Remove prefixo de gênero 'F - ' ou 'M - '
     s = re.sub(r'^[FM]\s*-\s*', '', s)
-
-    # Remove indicadores de área como '(área P)', '(área M)', '(área G)'
     s = re.sub(r'\(área\s*[A-Z]\)', '', s, flags=re.IGNORECASE)
-
-    # Remove a palavra 'cortesia' no final (case insensitive)
     s = re.sub(r'\bcortesia\b', '', s, flags=re.IGNORECASE)
-
-    # Remove espaços duplos e trim
     s = re.sub(r'\s+', ' ', s).strip()
-
-    # Remove vírgula ou hífen no final se sobrar
     s = s.rstrip(',-').strip()
-
     return s
 
-# ============================================================
-# FUNÇÃO: Enviar mensagem via WhatsApp Cloud API
-# ============================================================
 def enviar_mensagem_whatsapp(nome, horario, procedimento, unidade, telefone_destino):
-    """
-    Faz a chamada de API para a Meta enviando o modelo estruturado
-    na versão nativa v25.0.
-    Template v2: {{1}} Nome, {{2}} Horário, {{3}} Serviços, {{4}} Unidade
-    """
     url = f"https://graph.facebook.com/v25.0/{st.secrets['ID_TELEFONE_META']}/messages"
-
     headers = {
         "Authorization": f"Bearer {st.secrets['TOKEN_META']}",
         "Content-Type": "application/json"
     }
-
-    # Garante que quebras de linha não quebrem a API
     procedimento_limpo = str(procedimento).replace('\n', ' ').replace('\r', '').strip()
-
     payload = {
         "messaging_product": "whatsapp",
         "to": str(telefone_destino),
         "type": "template",
         "template": {
             "name": NOME_MODELO_MENSAGEM,
-            "language": {
-                "code": "pt_BR"
-            },
-            "components": [
-                {
-                    "type": "body",
-                    "parameters": [
-                        {"type": "text", "text": str(nome)},           # {{1}} Nome do cliente
-                        {"type": "text", "text": str(horario)},        # {{2}} Data e horário
-                        {"type": "text", "text": procedimento_limpo},  # {{3}} Serviço(s) agrupados
-                        {"type": "text", "text": str(unidade)}         # {{4}} Nome da unidade
-                    ]
-                }
-            ]
+            "language": {"code": "pt_BR"},
+            "components": [{
+                "type": "body",
+                "parameters": [
+                    {"type": "text", "text": str(nome)},
+                    {"type": "text", "text": str(horario)},
+                    {"type": "text", "text": procedimento_limpo},
+                    {"type": "text", "text": str(unidade)}
+                ]
+            }]
         }
     }
-
     try:
         resposta = requests.post(url, headers=headers, json=payload)
         return resposta.status_code, resposta.json()
     except Exception as e:
         return 500, {"error": str(e)}
 
-# ============================================================
-# FUNÇÃO: Enviar mensagem de 2 sessões via WhatsApp Cloud API
-# ============================================================
 def enviar_mensagem_2sessoes(nome, horario1, servico1, horario2, servico2, unidade, telefone_destino):
-    """
-    Dispara o template especial para clientes com 2 sessões no mesmo dia.
-    Template: {{1}} Nome, {{2}} Horário1, {{3}} Serviço1, {{4}} Horário2, {{5}} Serviço2, {{6}} Unidade
-    """
     url = f"https://graph.facebook.com/v25.0/{st.secrets['ID_TELEFONE_META']}/messages"
     headers = {
         "Authorization": f"Bearer {st.secrets['TOKEN_META']}",
@@ -172,19 +121,17 @@ def enviar_mensagem_2sessoes(nome, horario1, servico1, horario2, servico2, unida
         "template": {
             "name": NOME_MODELO_MENSAGEM_2SESS,
             "language": {"code": "pt_BR"},
-            "components": [
-                {
-                    "type": "body",
-                    "parameters": [
-                        {"type": "text", "text": str(nome)},
-                        {"type": "text", "text": str(horario1)},
-                        {"type": "text", "text": str(servico1).replace('\n', ' ').strip()},
-                        {"type": "text", "text": str(horario2)},
-                        {"type": "text", "text": str(servico2).replace('\n', ' ').strip()},
-                        {"type": "text", "text": str(unidade)}
-                    ]
-                }
-            ]
+            "components": [{
+                "type": "body",
+                "parameters": [
+                    {"type": "text", "text": str(nome)},
+                    {"type": "text", "text": str(horario1)},
+                    {"type": "text", "text": str(servico1).replace('\n', ' ').strip()},
+                    {"type": "text", "text": str(horario2)},
+                    {"type": "text", "text": str(servico2).replace('\n', ' ').strip()},
+                    {"type": "text", "text": str(unidade)}
+                ]
+            }]
         }
     }
     try:
@@ -194,17 +141,8 @@ def enviar_mensagem_2sessoes(nome, horario1, servico1, horario2, servico2, unida
         return 500, {"error": str(e)}
 
 
-# ============================================================
-# v2: helpers pra gravar/atualizar histórico defensivamente
-# ============================================================
 def _criar_registro_inicial_historico(unidade, arquivo_nome, total_clientes,
                                        data_sessoes, numero_alerta):
-    """
-    v2: cria registro EM_ANDAMENTO no histórico ANTES do loop de envio.
-    Garante que mesmo se Streamlit cair / página recarregar / qualquer
-    erro silencioso impedir o INSERT final, o disparo fica registrado.
-    Retorna o ID do registro pra atualização posterior.
-    """
     try:
         sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
         resp = sb.table("disparos_historico").insert({
@@ -230,9 +168,6 @@ def _criar_registro_inicial_historico(unidade, arquivo_nome, total_clientes,
 
 def _atualizar_registro_historico(registro_id, sucessos, erros, falhas_contexto,
                                    clientes_sem_contexto):
-    """
-    v2: atualiza o registro com os totais reais ao final do loop.
-    """
     if not registro_id:
         return False
     try:
@@ -243,7 +178,7 @@ def _atualizar_registro_historico(registro_id, sucessos, erros, falhas_contexto,
             "falhas_contexto": falhas_contexto,
             "clientes_falha": ", ".join(clientes_sem_contexto) if clientes_sem_contexto else None,
             "erros_envio": erros,
-            "observacao": None,  # Limpa o "EM_ANDAMENTO"
+            "observacao": None,
         }).eq("id", registro_id).execute()
         return True
     except Exception as e:
@@ -251,16 +186,7 @@ def _atualizar_registro_historico(registro_id, sucessos, erros, falhas_contexto,
         return False
 
 
-# ============================================================
-# ENTRY POINT — chamado pelo dashboard_maislaser.py dentro da tab Disparar agenda
-# ============================================================
 def render_aba_disparador():
-    """
-    Renderiza a aba 🚀 Disparar agenda do dashboard centralizado.
-    """
-    # ============================================================
-    # INTERFACE — SELEÇÃO DE UNIDADE E NÚMERO DE ALERTA
-    # ============================================================
     unidade_selecionada = st.selectbox(
         "Selecione a Unidade que está operando hoje:",
         ["", "Mogi das Cruzes", "Suzano"],
@@ -271,7 +197,6 @@ def render_aba_disparador():
         st.info("👆 Selecione a unidade acima para continuar.")
         return
 
-    # Confirmação da unidade
     st.warning(f"⚠️ Você selecionou a unidade **{unidade_selecionada}** — está correto?")
     col1, col2 = st.columns(2)
     with col1:
@@ -290,7 +215,6 @@ def render_aba_disparador():
         st.session_state["disp_unidade_confirmada"] = True
         st.session_state["disp_unidade_valor"] = unidade_selecionada
 
-    # Garante que a unidade confirmada seja usada
     if st.session_state.get("disp_unidade_confirmada"):
         unidade_selecionada = st.session_state.get("disp_unidade_valor", unidade_selecionada)
         st.success(f"✅ Unidade **{unidade_selecionada}** confirmada!")
@@ -304,7 +228,6 @@ def render_aba_disparador():
         numero_alerta_formatado = limpar_numero(numero_alerta_input)
         st.info(f"📢 Os alertas serão enviados para: {numero_alerta_formatado}")
 
-        # Botão verde para ativar alertas
         numero_robo = st.secrets["NUMERO_ROBO_ALERTAS"]
         link_whatsapp = f"https://wa.me/{numero_robo}?text=oi"
         st.markdown(
@@ -329,14 +252,10 @@ def render_aba_disparador():
             unsafe_allow_html=True
         )
 
-        # Confirmação de que enviou o oi
         alertas_ativados = st.checkbox("✅ Já enviei o 'oi' e estou pronto para disparar!", key="disp_alertas_ativados")
         if not alertas_ativados:
             return
 
-    # ============================================================
-    # UPLOAD DA PLANILHA
-    # ============================================================
     arquivo_upload = st.file_uploader("Selecione a planilha do UNO (.xlsx)", type=["xlsx"])
 
     if arquivo_upload is not None:
@@ -344,13 +263,9 @@ def render_aba_disparador():
             df = pd.read_excel(arquivo_upload)
             total_original = len(df)
 
-            # Colunas obrigatórias que o sistema UNO exporta
             colunas_essenciais = ['Data', 'Cliente', 'Telefone', 'Serviço']
             colunas_encontradas = df.columns.tolist()
 
-            # --------------------------------------------------
-            # VALIDAÇÃO VISUAL DAS COLUNAS
-            # --------------------------------------------------
             st.subheader("🔍 Validação da Planilha")
 
             linhas_html = ""
@@ -385,7 +300,6 @@ def render_aba_disparador():
             </table>
             """, unsafe_allow_html=True)
 
-            # Colunas extras encontradas (além das essenciais)
             extras = [c for c in colunas_encontradas if c not in colunas_essenciais]
             if extras:
                 st.info(f"ℹ️ Colunas extras encontradas (ignoradas): {', '.join(extras)}")
@@ -397,9 +311,6 @@ def render_aba_disparador():
             st.success("✅ Todas as colunas essenciais foram encontradas! Planilha válida.")
 
             if True:
-                # --------------------------------------------------
-                # ✅ CORREÇÃO 1: Filtrar apenas agendamentos ATIVOS
-                # --------------------------------------------------
                 if 'Situação' in df.columns:
                     total_antes_filtro = len(df)
                     df = df[df['Situação'].str.strip().str.lower() == 'agendado']
@@ -410,24 +321,12 @@ def render_aba_disparador():
                             f"com situação 'Agendado' (cancelados, faltou, etc.)."
                         )
 
-                # --------------------------------------------------
-                # LIMPEZA DOS DADOS
-                # --------------------------------------------------
                 df['Cliente'] = df['Cliente'].fillna('').astype(str).str.strip()
                 df['Telefone'] = df['Telefone'].apply(limpar_numero).fillna('').astype(str)
-
-                # ✅ CORREÇÃO 2: Limpa prefixos F-/M- e sufixos de área dos serviços
                 df['Serviço'] = df['Serviço'].apply(limpar_nome_servico)
-
-                # Converte data serial do Excel para horário legível
                 df['Horario'] = pd.to_datetime(df['Data']).dt.strftime('%d/%m/%Y às %Hh%M')
-
-                # Remove linhas onde o serviço ficou vazio após limpeza
                 df = df[df['Serviço'] != '']
 
-                # --------------------------------------------------
-                # AGRUPAMENTO: Serviços agrupados POR TELEFONE
-                # --------------------------------------------------
                 df_nomes = df.groupby('Telefone')['Cliente'].first().reset_index()
 
                 df_srv_horario = df.groupby(['Telefone', 'Horario'])['Serviço'].apply(
@@ -460,9 +359,6 @@ def render_aba_disparador():
                     if tels_dedup > 0:
                         st.info(f"🔄 {tels_dedup} telefone(s) tinham nomes diferentes entre comandas — unificados.")
 
-                # --------------------------------------------------
-                # EXIBIÇÃO DOS DADOS NA TELA
-                # --------------------------------------------------
                 st.success(
                     f"✅ Planilha carregada com sucesso! "
                     f"{len(df)} registros válidos encontrados."
@@ -475,15 +371,8 @@ def render_aba_disparador():
                 st.subheader(f"Pré-visualização dos disparos ({unidade_selecionada}):")
                 st.dataframe(df_agrupado, use_container_width=True)
 
-                # --------------------------------------------------
-                # BOTÃO DE DISPARO
-                # --------------------------------------------------
                 if st.button("🚀 Iniciar Disparos em Massa"):
 
-                    # ─── v2: GRAVA REGISTRO INICIAL ANTES do loop ───
-                    # Cria registro com status EM_ANDAMENTO. Se algo falhar
-                    # depois, pelo menos o histórico mostra que tentou.
-                    # Extrai data das sessões (primeiro horário encontrado)
                     _data_sessoes = ""
                     if not df_agrupado.empty and "Horario" in df_agrupado.columns:
                         _primeiro = str(df_agrupado.iloc[0]["Horario"])
@@ -504,10 +393,14 @@ def render_aba_disparador():
                     progresso = st.progress(0)
                     status_texto = st.empty()
 
-                    sucessos = 0
-                    erros = 0
-                    falhas_contexto = 0
-                    clientes_sem_contexto = []
+                    sucessos = 0  # contador de WhatsApps enviados (status 200/201 da Meta)
+                    erros = 0  # contador de falhas de WhatsApp (status != 200)
+                    falhas_contexto_post = 0  # 🆕 v6.14: falhas só do POST (pode ter falsos positivos)
+                    clientes_falha_post = []  # 🆕 v6.14: lista de quem o POST reportou falha
+                    # 🆕 v6.14 — tracking de TODOS os telefones disparados (com sucesso na Meta).
+                    # Será usado no GET final pra verificar se realmente estão no Contexto.
+                    # Cada item: {tel, nome, ctx_post_ok}
+                    telefones_disparados = []
                     total_linhas = len(df_agrupado)
 
                     for i, (_, linha) in enumerate(df_agrupado.iterrows()):
@@ -525,7 +418,6 @@ def render_aba_disparador():
                             horario2_cliente = linha.get('Horario2', '')
                             servico2_cliente = linha.get('Servico2', '')
 
-                            # Detecta se tem 2 sessões no mesmo dia
                             tem_2_sessoes = bool(horario2_cliente and horario2_cliente != horario_cliente)
 
                             if tem_2_sessoes:
@@ -544,7 +436,27 @@ def render_aba_disparador():
 
                             if code in (200, 201):
                                 sucessos += 1
-                                # FIX: salvar contexto com retry + timeout maior
+                                # FIX v6.14 (24/06/2026): timeout 30s + 3 tentativas + verificação GET final.
+                                #
+                                # CAUSA RAIZ DO BUG ANTERIOR (v6.13 — 15s, 2 tent, sem GET):
+                                #   Apps Script `salvarContexto` demorava >15s pra responder em
+                                #   condições de carga (lock contention + trigger paralelo + 595+
+                                #   linhas no Contexto). Streamlit dava timeout e marcava como
+                                #   falha — MAS o Apps Script já havia salvado o contexto.
+                                #   Resultado: alerta falso positivo "Contexto NÃO salvo".
+                                #   Caso real: disparo Suzano 24/06 11:53 reportou 5 falhas,
+                                #   todas estavam no Contexto e 4 já tinham confirmado.
+                                #
+                                # FIX v6.14:
+                                #   (1) timeout 30s (margem maior) + 3 tentativas (mais resiliente)
+                                #   (2) NÃO mostra warning durante o loop (não confiável em tempo real)
+                                #   (3) Acumula `telefones_disparados` pra verificação final via GET
+                                #   (4) Após o loop, 1 GET único no endpoint=contexto compara TODOS os
+                                #       telefones disparados com a lista REAL do Apps Script.
+                                #       Isso elimina falso positivo definitivamente, e ainda detecta
+                                #       falhas reais que o POST com status 200 + body de erro
+                                #       teria mascarado.
+                                ctx_post_ok = False
                                 webhook_url = st.secrets.get("URL_WEBHOOK_CONTEXTO", "")
                                 if webhook_url:
                                     ctx_payload = {
@@ -558,25 +470,33 @@ def render_aba_disparador():
                                         "servico2": servico2_cliente,
                                         "numero_alerta": numero_alerta_formatado
                                     }
-                                    ctx_ok = False
-                                    for tentativa in range(2):
+                                    # 3 tentativas com backoff 0s, 2s, 5s
+                                    backoff = [0, 2, 5]
+                                    for tentativa in range(3):
+                                        if backoff[tentativa] > 0:
+                                            time.sleep(backoff[tentativa])
                                         try:
-                                            r_ctx = requests.post(webhook_url, json=ctx_payload, timeout=15)
+                                            r_ctx = requests.post(webhook_url, json=ctx_payload, timeout=30)
                                             if r_ctx.status_code == 200:
-                                                ctx_ok = True
+                                                ctx_post_ok = True
                                                 break
                                         except requests.exceptions.Timeout:
-                                            if tentativa == 0:
-                                                time.sleep(2)
+                                            # Timeout NÃO significa falha real — Apps Script pode
+                                            # estar processando. Verificação final via GET vai dizer.
+                                            continue
                                         except Exception:
                                             break
-                                    if not ctx_ok:
-                                        falhas_contexto += 1
-                                        clientes_sem_contexto.append(nome_cliente)
-                                        st.warning(
-                                            f"⚠️ Contexto NÃO salvo: {nome_cliente} ({telefone_formatado}) "
-                                            f"— WhatsApp enviado mas robô NÃO vai reconhecer a resposta"
-                                        )
+                                    if not ctx_post_ok:
+                                        # POST falhou — pode ser falso positivo. Não exibe warning
+                                        # ainda, só registra. Decisão final virá do GET de verificação.
+                                        falhas_contexto_post += 1
+                                        clientes_falha_post.append(nome_cliente)
+                                # 🆕 v6.14 — guarda telefone disparado pra verificação final
+                                telefones_disparados.append({
+                                    'tel': telefone_formatado,
+                                    'nome': nome_cliente,
+                                    'ctx_post_ok': ctx_post_ok,
+                                })
                             else:
                                 erros += 1
                                 st.error(
@@ -590,15 +510,92 @@ def render_aba_disparador():
                                 f"{nome_cliente} (encontrado: '{telefone_formatado}')"
                             )
 
-                        # Delay para respeitar limites de taxa da Meta
                         time.sleep(1.5)
-
-                        # Atualiza barra de progresso
                         progresso.progress((i + 1) / total_linhas)
+
+                    status_texto.text("✅ Loop de envios concluído. Verificando contextos no Apps Script...")
+
+                    # ════════════════════════════════════════════════════════════════
+                    # 🆕 v6.14 — VERIFICAÇÃO FINAL POR GET ÚNICO
+                    # ════════════════════════════════════════════════════════════════
+                    # Antes de gravar o resumo final, faz UMA chamada GET no endpoint
+                    # `contexto` pra obter snapshot de TODOS os telefones no Contexto.
+                    # Compara com `telefones_disparados`. Resultado:
+                    #   • Falsos positivos do POST (timeout mas salvou OK) → corrigidos
+                    #   • Falhas reais (POST OK mas não está no Contexto) → detectadas
+                    #   • Falhas reais (POST falhou E não está no Contexto) → confirmadas
+                    #
+                    # Custo: 1 GET (~50KB pra 595 linhas) em vez de N GETs.
+                    # Degradação graciosa: se GET falhar, usa dados do POST (comportamento v6.13).
+                    # ════════════════════════════════════════════════════════════════
+                    falhas_contexto = falhas_contexto_post  # default: usa POST se GET falhar
+                    clientes_sem_contexto = list(clientes_falha_post)  # cópia defensiva
+                    falsos_positivos_corrigidos = 0
+                    falhas_silenciosas_detectadas = 0
+                    verificacao_ok = False
+
+                    if telefones_disparados:
+                        try:
+                            apps_script_url = st.secrets.get("APPS_SCRIPT_URL", "")
+                            apps_script_token = st.secrets.get("APPS_SCRIPT_TOKEN", "")
+                            if apps_script_url and apps_script_token:
+                                # Dá um respiro pro Apps Script terminar de processar
+                                # POSTs em fila (de timeouts pendentes)
+                                time.sleep(5)
+                                status_texto.text("🔎 Consultando Apps Script para verificar contextos...")
+                                r_check = requests.get(
+                                    f"{apps_script_url}?endpoint=contexto&token={apps_script_token}",
+                                    timeout=45,  # GET pode ser mais lento com Contexto grande
+                                )
+                                if r_check.status_code == 200:
+                                    ctx_data = r_check.json()
+                                    linhas_ctx = ctx_data.get("linhas", [])
+                                    # Set de telefones presentes no Contexto (string normalizada)
+                                    tels_no_contexto = set()
+                                    for linha_ctx in linhas_ctx:
+                                        tel_ctx = str(linha_ctx.get("telefone", "")).strip()
+                                        # remove sufixo .0 se vier como float
+                                        if tel_ctx.endswith('.0'):
+                                            tel_ctx = tel_ctx[:-2]
+                                        if tel_ctx:
+                                            tels_no_contexto.add(tel_ctx)
+
+                                    # Recalcula falhas REAIS baseado no GET
+                                    falhas_contexto = 0
+                                    clientes_sem_contexto = []
+                                    for d in telefones_disparados:
+                                        no_contexto = d['tel'] in tels_no_contexto
+                                        if no_contexto and not d['ctx_post_ok']:
+                                            # Falso positivo do POST — salvou OK mas POST não soube
+                                            falsos_positivos_corrigidos += 1
+                                        elif not no_contexto and d['ctx_post_ok']:
+                                            # POST disse OK mas não tá no Contexto — falha silenciosa
+                                            falhas_silenciosas_detectadas += 1
+                                            falhas_contexto += 1
+                                            clientes_sem_contexto.append(d['nome'])
+                                        elif not no_contexto and not d['ctx_post_ok']:
+                                            # Confirmado: POST falhou E não tá no Contexto
+                                            falhas_contexto += 1
+                                            clientes_sem_contexto.append(d['nome'])
+                                    verificacao_ok = True
+                                else:
+                                    st.warning(
+                                        f"⚠️ Verificação final via GET retornou HTTP {r_check.status_code}. "
+                                        f"Usando dados do POST (pode ter falsos positivos)."
+                                    )
+                            else:
+                                st.info(
+                                    "ℹ️ Verificação final pulada: secrets APPS_SCRIPT_URL ou "
+                                    "APPS_SCRIPT_TOKEN não configurados. Usando dados do POST."
+                                )
+                        except Exception as e_get:
+                            st.warning(
+                                f"⚠️ Verificação final via GET falhou: {e_get}. "
+                                f"Usando dados do POST (pode ter falsos positivos)."
+                            )
 
                     status_texto.text("✅ Processamento concluído!")
 
-                    # ─── v2: ATUALIZA REGISTRO HISTÓRICO COM TOTAIS FINAIS ───
                     if registro_id:
                         ok = _atualizar_registro_historico(
                             registro_id=registro_id,
@@ -610,7 +607,6 @@ def render_aba_disparador():
                         if ok:
                             st.caption(f"📝 Registro #{registro_id} atualizado com totais finais")
                     else:
-                        # Fallback v1: tenta INSERT direto se não criou o inicial
                         try:
                             _sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
                             _sb.table("disparos_historico").insert({
@@ -636,6 +632,23 @@ def render_aba_disparador():
                         f"🎉 Disparos finalizados! "
                         f"✅ Sucessos: {sucessos} | ❌ Erros/Falhas: {erros}"
                     )
+
+                    # 🆕 v6.14 — Feedback claro sobre o que a verificação final corrigiu/detectou
+                    if verificacao_ok and falsos_positivos_corrigidos > 0:
+                        st.info(
+                            f"🔎 **Verificação final corrigiu {falsos_positivos_corrigidos} "
+                            f"alerta(s) falso(s) positivo(s)**: o POST `salvar_contexto` "
+                            f"reportou falha (timeout), mas o Apps Script JÁ HAVIA salvado o contexto. "
+                            f"Esses clientes estão funcionando normalmente — o robô vai reconhecer "
+                            f"as respostas deles."
+                        )
+                    if verificacao_ok and falhas_silenciosas_detectadas > 0:
+                        st.warning(
+                            f"🔎 **Verificação final detectou {falhas_silenciosas_detectadas} "
+                            f"falha(s) silenciosa(s)**: o POST retornou status 200 mas o contexto "
+                            f"NÃO está no Apps Script. Esses clientes precisam de re-disparo."
+                        )
+
                     if falhas_contexto > 0:
                         st.error(
                             f"🚨 **ATENÇÃO: {falhas_contexto} cliente(s) receberam o WhatsApp "
