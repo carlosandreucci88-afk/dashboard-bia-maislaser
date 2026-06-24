@@ -54,6 +54,31 @@ def _salvar_observacao(registro_id: int, texto: str):
 
 
 # ============================================================
+# HELPERS
+# ============================================================
+
+def _safe_str(valor) -> str:
+    """
+    Converte valor pra string segura, tratando NaN/None.
+    Bug v6.14.1 corrigido (24/06/2026): Supabase retorna NULL como np.nan
+    no pandas. `str(np.nan) == "nan"` (literal), e `np.nan or ""` retorna
+    np.nan porque NaN é TRUTHY em Python (é float não-zero). Por isso o
+    dashboard renderizava "nan" em vez de string vazia.
+    """
+    if valor is None:
+        return ""
+    try:
+        if pd.isna(valor):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    s = str(valor).strip()
+    if s.lower() == "nan" or s.lower() == "none":
+        return ""
+    return s
+
+
+# ============================================================
 # RENDER
 # ============================================================
 
@@ -141,9 +166,25 @@ def render_aba_historico_disparos():
             data_str = str(row["criado_em"])[:16]
 
         # Badge de status
+        # 🆕 v6.14.1 (24/06/2026): lógica de classificação corrigida.
+        # ANTES: disparo INTERROMPIDO (0 enviados de N clientes) caía em
+        # falhas==0 && erros==0 → era classificado como "✅ Sucesso total".
+        # AGORA: checa observação por INTERROMPIDO/FALHOU primeiro, depois
+        # checa se whatsapp_ok < total_clientes (disparo parcial).
         falhas = int(row.get("falhas_contexto") or 0)
         erros = int(row.get("erros_envio") or 0)
-        if falhas == 0 and erros == 0:
+        total_chk = int(row.get("total_clientes") or 0)
+        wpp_chk = int(row.get("whatsapp_ok") or 0)
+        obs_chk = _safe_str(row.get("observacao")).upper()
+
+        if "INTERROMPIDO" in obs_chk or "FALHOU" in obs_chk:
+            badge = '<span class="badge-amber">❌ Interrompido</span>'
+        elif total_chk > 0 and wpp_chk == 0:
+            badge = '<span class="badge-amber">❌ Nenhum envio realizado</span>'
+        elif total_chk > 0 and wpp_chk < total_chk:
+            faltam = total_chk - wpp_chk
+            badge = f'<span class="badge-alerta">⚠️ Parcial — {faltam} não enviado(s)</span>'
+        elif falhas == 0 and erros == 0:
             badge = '<span class="badge-ok">✅ Sucesso total</span>'
         elif falhas > 0:
             badge = f'<span class="badge-alerta">⚠️ {falhas} contexto(s) perdido(s)</span>'
@@ -164,8 +205,8 @@ def render_aba_historico_disparos():
         total = int(row.get("total_clientes") or 0)
         wpp_ok = int(row.get("whatsapp_ok") or 0)
         ctx_ok = int(row.get("contexto_ok") or 0)
-        arquivo = str(row.get("arquivo") or "—")
-        data_sess = str(row.get("data_sessoes") or "—")
+        arquivo = _safe_str(row.get("arquivo")) or "—"
+        data_sess = _safe_str(row.get("data_sessoes")) or "—"
 
         # Linha principal
         st.markdown(
@@ -188,12 +229,13 @@ def render_aba_historico_disparos():
         )
 
         # Clientes que falharam (se houver)
-        clientes_falha = row.get("clientes_falha") or ""
-        if clientes_falha and str(clientes_falha).strip():
+        # 🆕 v6.14.1 — usa _safe_str pra eliminar "nan" quando valor é NULL no Supabase
+        clientes_falha = _safe_str(row.get("clientes_falha"))
+        if clientes_falha:
             st.caption(f"⚠️ Contexto perdido: {clientes_falha}")
 
         # Observação editável
-        obs_atual = str(row.get("observacao") or "")
+        obs_atual = _safe_str(row.get("observacao"))
         col_obs, col_btn = st.columns([5, 1])
         with col_obs:
             nova_obs = st.text_input(
