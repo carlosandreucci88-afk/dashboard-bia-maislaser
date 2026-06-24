@@ -540,8 +540,14 @@ def render_aba_disparador():
                             apps_script_token = st.secrets.get("APPS_SCRIPT_TOKEN", "")
                             if apps_script_url and apps_script_token:
                                 # Dá um respiro pro Apps Script terminar de processar
-                                # POSTs em fila (de timeouts pendentes)
-                                time.sleep(5)
+                                # POSTs em fila (de timeouts pendentes).
+                                # 🆕 v6.14.1 — 15s (era 5s) pra cobrir pior caso de lock contention:
+                                # caso real DANIELI 24/06 levou 12min entre POST e salvar terminar.
+                                # 15s não cobre 12min, mas dá margem pra fila do Apps Script drenar
+                                # os POSTs que ainda estavam processando quando o loop acabou.
+                                # Sem isso, GET pode rodar antes do salvar terminar e marcar
+                                # falsos positivos como "falha real silenciosa".
+                                time.sleep(15)
                                 status_texto.text("🔎 Consultando Apps Script para verificar contextos...")
                                 r_check = requests.get(
                                     f"{apps_script_url}?endpoint=contexto&token={apps_script_token}",
