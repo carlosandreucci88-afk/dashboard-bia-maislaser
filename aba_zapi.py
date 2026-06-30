@@ -315,8 +315,8 @@ def tela_zapi_aguardando_validacao():
     st.caption(
         "Coordenadora decide o **MODO** de cada campanha:  "
         "**👤 MANUAL** = captadora liga e valida.  "
-        "**🤖 AUTO** = Bia v5 puxa o lote e dispara templates pros indicados; "
-        "valida sozinha ao atingir 30% de respostas em até 36h."
+        "**🤖 AUTO** = Disparador AUTO puxa o lote e dispara templates pros indicados (1/min). "
+        "Cada clique vira handoff direto pra recepção via Z-API."
     )
 
     # ───────────────────────────────────────────────────────────────────
@@ -356,7 +356,7 @@ def tela_zapi_aguardando_validacao():
                 horizontal=True,
                 key="toggle_default_modo",
                 label_visibility="collapsed",
-                format_func=lambda x: f"👤 {x} (captadora liga)" if x == "MANUAL" else f"🤖 {x} (Bia trabalha)",
+                format_func=lambda x: f"👤 {x} (captadora liga)" if x == "MANUAL" else f"🤖 {x} (Disparador AUTO)",
             )
             if modo_novo != modo_default_atual:
                 with st.spinner("Atualizando default global..."):
@@ -434,8 +434,8 @@ def tela_zapi_aguardando_validacao():
         help="Aguardando captadora ligar pros indicados"
     )
     col_m3.metric(
-        "🤖 AUTO (Bia rodando)", qtd_auto_puxado,
-        help="Bia já puxou o lote, contando respostas"
+        "🤖 AUTO (rodando)", qtd_auto_puxado,
+        help="Disparador AUTO já puxou o lote, contando cliques recebidos"
     )
     col_m4.metric(
         "⏳ Em processamento", qtd_processando,
@@ -533,7 +533,7 @@ def _renderizar_card_campanha(row, progresso_por_camp, modo_default_atual):
     elif modo_atual == "MANUAL":
         modo_html = '<span class="modo-manual">👤 MANUAL</span>'
     elif modo_atual == "AUTO" and bia_puxou is not None:
-        modo_html = '<span class="modo-auto-rodando">🤖 AUTO · BIA RODANDO</span>'
+        modo_html = '<span class="modo-auto-rodando">🤖 AUTO · RODANDO</span>'
     else:
         modo_html = '<span class="modo-auto-aguarda">🤖 AUTO · AGUARDANDO PUXAR</span>'
 
@@ -632,11 +632,11 @@ def _render_acao_sem_decisao(camp_id, tel, nome, modo_default_atual):
             _executar_set_modo(tel, "MANUAL", nome)
     with col_a:
         if st.button(
-            "🤖 AUTO (Bia trabalha)",
+            "🤖 AUTO (Disparador AUTO)",
             key=f"set_auto_{camp_id}",
             type="primary",
             use_container_width=True,
-            help="Bia v5 dispara templates pros 20 indicados. Auto-valida com 30% de respostas em até 36h.",
+            help="Disparador AUTO dispara templates pros 20 indicados (1/min). Cada clique vira handoff pra recepção via Z-API.",
         ):
             _executar_set_modo(tel, "AUTO", nome)
 
@@ -672,7 +672,7 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
                 "↩️ Mudar pra AUTO",
                 key=f"to_auto_{camp_id}",
                 use_container_width=True,
-                help="Cancela MANUAL e deixa a Bia trabalhar este lote.",
+                help="Cancela MANUAL. Disparador AUTO vai trabalhar este lote.",
             ):
                 _executar_set_modo(tel, "AUTO", nome)
         else:
@@ -681,7 +681,7 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
                 key=f"to_auto_disabled_{camp_id}",
                 disabled=True,
                 use_container_width=True,
-                help="Não dá mais — Bia já trabalhou esse lote.",
+                help="Não dá mais — Disparador AUTO já trabalhou esse lote.",
             )
 
     # Confirmação dupla pra Validar/Invalidar
@@ -742,14 +742,14 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
 
 
 def _render_acao_auto_aguardando(camp_id, tel, nome):
-    """Estado: MODO=AUTO mas Bia ainda não puxou o lote."""
+    """Estado: MODO=AUTO mas Disparador ainda não puxou o lote."""
     st.markdown(
         '<div class="card-acao">'
         '<strong>🤖 Modo AUTO selecionado.</strong> '
-        'Bia v5 vai puxar este lote no próximo ciclo do Cron 6 v2 '
-        '(a cada 20min entre 10h e 19h). '
+        'Disparador AUTO vai puxar este lote no próximo ciclo (a cada 10min). '
+        'Depois dispara 1 template por minuto até esvaziar a fila.'
         '<br><br>'
-        '<small>Você ainda pode voltar pra MANUAL enquanto Bia não puxar.</small>'
+        '<small>Você ainda pode voltar pra MANUAL enquanto o lote não for puxado.</small>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -766,39 +766,38 @@ def _render_acao_auto_aguardando(camp_id, tel, nome):
 
 
 def _render_acao_auto_rodando(camp_id, contatos, bia_puxou_dt, progresso_por_camp):
-    """Estado: MODO=AUTO, Bia já puxou o lote. Mostra progresso, sem botões."""
-    respostas = progresso_por_camp.get(camp_id, 0)
-    meta = _meta_respostas(contatos)
-    pct = int(min(100, (respostas / meta * 100) if meta > 0 else 0))
+    """Estado: MODO=AUTO, Disparador já puxou o lote. Mostra cliques recebidos.
 
-    # Tempo desde Bia puxar
+    v3.0 (30/06/2026): sem timeout 36h, sem meta 30%. No modelo demolição cada
+    clique de botão vira handoff direto pra recepção via Z-API. Aqui é só
+    visualização — coordenadora não precisa fazer nada.
+    """
+    cliques = progresso_por_camp.get(camp_id, 0)
+    pct = int(min(100, (cliques / contatos * 100) if contatos > 0 else 0))
+
     agora = datetime.now(TZ_SP)
     horas_rodando = (agora - bia_puxou_dt).total_seconds() / 3600
-    horas_restantes = max(0, 36 - horas_rodando)
-    timeout_iminente = horas_restantes < 6
-
-    cor_timeout = "#ef4444" if timeout_iminente else "#6b7280"
 
     st.markdown(
         f"""
         <div class="card-acao">
         <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
             <div>
-                🤖 <strong>Bia trabalhando há {horas_rodando:.1f}h</strong>
+                🤖 <strong>Disparador AUTO trabalhando há {horas_rodando:.1f}h</strong>
             </div>
-            <div style="color: {cor_timeout}; font-weight: 600;">
-                ⏰ {horas_restantes:.1f}h até timeout
+            <div style="color: #6b7280; font-size: 12px;">
+                {contatos} indicados
             </div>
         </div>
         <div style="margin-top: 8px;">
-            📊 <strong>Progresso:</strong> {respostas} / {meta} respostas ({pct}%)
+            💬 <strong>Cliques recebidos:</strong> {cliques} / {contatos} ({pct}%)
             <div class="progress-bg">
                 <div class="progress-fill" style="width: {pct}%;"></div>
             </div>
         </div>
         <div style="margin-top: 10px; font-size: 12px; color: #6b7280;">
-            ℹ️ Bia auto-valida ao bater {meta} respostas, ou auto-invalida após 36h.
-            Coordenadora não precisa fazer nada.
+            ℹ️ Cada clique de botão (AGENDAR / SABER MAIS) gera alerta automático
+            pra recepção via Z-API. Coordenadora não precisa fazer nada aqui.
         </div>
         </div>
         """,
@@ -813,50 +812,27 @@ def _render_acao_auto_rodando(camp_id, contatos, bia_puxou_dt, progresso_por_cam
 def _executar_set_modo(tel, modo, nome):
     """
     Chama set_modo_campanha no Apps Script + trata resposta + rerun.
-    
-    v2.0 (23/06/2026): se modo='AUTO', acorda o webhook Bia Disparador v2
-    DEPOIS de marcar AUTO no Apps Script. O webhook faz: descoberta da
-    campanha → INSERT contatos em bia_disparos → dispara 1 template/min
-    até esvaziar a fila → dorme. Custo ~$0 quando ocioso.
+
+    v3.0 (30/06/2026): removida chamada ao webhook n8n (Railway morreu na
+    demolição). Agora o cron `puxarLotesAuto` do Apps Script Filtro Webhook
+    Bia (10min) puxa lotes em AUTO automaticamente e o `dispararProximoDaFila`
+    (1min) dispara templates. Coordenadora só marca o modo aqui.
     """
-    # Passo 1: marcar modo no Apps Script (logica original)
     with st.spinner(f"Definindo modo {modo} pra {nome}..."):
         resp = _zapi_action("set_modo_campanha", tel=tel, modo=modo)
-    
+
     if resp.get("_erro") or resp.get("erro"):
         st.error(f"❌ Falhou: {resp.get('_erro') or resp.get('erro')}")
         return
-    
-    # Passo 2: NOVO - se for AUTO, acorda o webhook do n8n
+
     if modo == "AUTO":
-        WEBHOOK_BIA_DISPARO = "https://n8n-production-ec01.up.railway.app/webhook/bia-iniciar-disparo"
-        try:
-            r = requests.post(
-                WEBHOOK_BIA_DISPARO,
-                json={"origem": "dashboard_auto", "telefone_cadastrante": tel, "nome": nome},
-                timeout=5,
-            )
-            if r.status_code == 200:
-                st.toast(f"🤖 Bia acordada! Vai disparar 1 template/min pra {nome}.", icon="🚀")
-            else:
-                st.toast(
-                    f"⚠️ AUTO marcado, mas webhook retornou HTTP {r.status_code}.",
-                    icon="⚠️",
-                )
-        except requests.exceptions.Timeout:
-            st.toast(
-                f"⏱️ Webhook acordado (timeout normal — Bia processando {nome}).",
-                icon="🚀",
-            )
-        except Exception as e:
-            st.toast(
-                f"⚠️ AUTO marcado, mas falhou ao acordar webhook: {e}",
-                icon="⚠️",
-            )
+        st.toast(
+            f"🤖 AUTO marcado pra {nome}. Disparador puxa em até 10min, depois envia 1 template/min.",
+            icon="🚀",
+        )
     else:
         st.toast(f"Modo {modo} aplicado pra {nome}", icon="✅")
-    
-    # Passo 3: limpa caches + rerun (logica original)
+
     _zapi_get.clear()
     _get_progresso_campanhas_bia.clear()
     st.rerun()
