@@ -261,6 +261,117 @@ def _meta_respostas(total_contatos):
 # Padrão visual igual ao da aba Pendências (botões pill com persist).
 # ============================================================================
 
+# ============================================================================
+# v9.11 (30/06/2026) — CONFIG TELEFONES DA RECEPÇÃO
+# ============================================================================
+# Edita configuracoes.recepcao_{mogi,suzano}_telefone via dashboard.
+# O Apps Script Filtro Webhook Bia v3.1 (_getTelefoneRecepcao) consulta esse
+# campo a cada clique de botão pra mandar o alerta pra recepção correta.
+# ============================================================================
+
+@st.cache_data(ttl=15, show_spinner=False)
+def _carregar_recepcao_telefones():
+    """Lê configuracoes.recepcao_{mogi,suzano}_telefone do Supabase.
+    Cache 15s — invalidado manualmente após _salvar_recepcao_telefones()."""
+    try:
+        sb = _get_supabase_zapi()
+        result = (sb.table("configuracoes")
+                  .select("recepcao_mogi_telefone, recepcao_suzano_telefone")
+                  .eq("id", 1)
+                  .limit(1)
+                  .execute())
+        if result.data and len(result.data) > 0:
+            r = result.data[0]
+            return (
+                str(r.get("recepcao_mogi_telefone") or "").strip(),
+                str(r.get("recepcao_suzano_telefone") or "").strip(),
+            )
+    except Exception as e:
+        st.toast(f"⚠️ Falha lendo recepção: {e}", icon="⚠️")
+    return ("", "")
+
+
+def _salvar_recepcao_telefones(tel_mogi, tel_suzano):
+    """UPDATE configuracoes SET recepcao_*_telefone WHERE id=1. Só dígitos."""
+    try:
+        sb = _get_supabase_zapi()
+        sb.table("configuracoes").update({
+            "recepcao_mogi_telefone": tel_mogi,
+            "recepcao_suzano_telefone": tel_suzano,
+            "atualizado_em": datetime.now(TZ_SP).isoformat(),
+        }).eq("id", 1).execute()
+        _carregar_recepcao_telefones.clear()
+        return True
+    except Exception as e:
+        st.error(f"❌ Falha salvando: {e}")
+        return False
+
+
+def _so_digitos(s):
+    """Mantém só dígitos. '+55 (11) 99999-9999' → '5511999999999'."""
+    if not s:
+        return ""
+    return "".join(ch for ch in str(s) if ch.isdigit())
+
+
+def _render_config_recepcao():
+    """Renderiza expander 'Telefones da recepção' no topo da aba aguardando.
+    Discreto — fica recolhido por padrão."""
+    tel_mogi_atual, tel_suzano_atual = _carregar_recepcao_telefones()
+
+    # Status compacto pra mostrar mesmo recolhido
+    status_mogi = f"✅ {tel_mogi_atual}" if tel_mogi_atual else "⚠️ não configurado"
+    status_suzano = f"✅ {tel_suzano_atual}" if tel_suzano_atual else "⚠️ não configurado"
+
+    with st.expander(
+        f"📞 Telefones que recebem alertas do Disparador AUTO  ·  "
+        f"Mogi: {status_mogi}  ·  Suzano: {status_suzano}",
+        expanded=False,
+    ):
+        st.caption(
+            "Quando um lead clica num botão do template, o Disparador AUTO "
+            "manda um alerta via Z-API pra esses números. Um por unidade."
+        )
+
+        col_m, col_s = st.columns(2)
+        with col_m:
+            novo_mogi = st.text_input(
+                "📍 Mogi",
+                value=tel_mogi_atual,
+                key="cfg_recep_mogi",
+                placeholder="5511999999999",
+                help="Número com DDI + DDD, só dígitos. Ex: 5511976473948",
+            )
+        with col_s:
+            novo_suzano = st.text_input(
+                "📍 Suzano",
+                value=tel_suzano_atual,
+                key="cfg_recep_suzano",
+                placeholder="5511999999999",
+                help="Número com DDI + DDD, só dígitos. Ex: 5511976473948",
+            )
+
+        novo_mogi_clean = _so_digitos(novo_mogi)
+        novo_suzano_clean = _so_digitos(novo_suzano)
+        mudou = (novo_mogi_clean != tel_mogi_atual) or (novo_suzano_clean != tel_suzano_atual)
+
+        col_btn, col_info = st.columns([1, 3])
+        with col_btn:
+            if st.button(
+                "💾 Salvar",
+                key="cfg_recep_salvar",
+                type="primary" if mudou else "secondary",
+                disabled=not mudou,
+                use_container_width=True,
+            ):
+                if _salvar_recepcao_telefones(novo_mogi_clean, novo_suzano_clean):
+                    st.toast("Telefones da recepção atualizados", icon="✅")
+                    st.rerun()
+        with col_info:
+            if mudou:
+                st.caption("⚠️ Mudanças pendentes — clica em Salvar.")
+
+
 def _filtro_unidade_zapi(key_persist="_zapi_aguard_unidade_persist"):
     """Renderiza filtro pill global de unidade no topo da tela.
     Retorna 'Todas' | 'Mogi' | 'Suzano' (persistido em session_state)."""
@@ -386,6 +497,11 @@ def tela_zapi_aguardando_validacao():
     df["bia_puxou_em_dt"] = df.get("bia_puxou_em", pd.Series([None] * len(df))).apply(_parse_iso)
     df["modo"] = df.get("modo", pd.Series([""] * len(df))).fillna("").astype(str).str.upper().str.strip()
     df["validacao_marcada"] = df["validacao_marcada"].fillna("").astype(str).str.upper().str.strip()
+
+    # ───────────────────────────────────────────────────────────────────
+    # v9.11: CONFIG TELEFONES DA RECEPÇÃO — antes do filtro de unidade
+    # ───────────────────────────────────────────────────────────────────
+    _render_config_recepcao()
 
     # ───────────────────────────────────────────────────────────────────
     # v9.9: FILTRO DE UNIDADE GLOBAL — antes dos cards
