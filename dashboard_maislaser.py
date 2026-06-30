@@ -2,6 +2,18 @@
 ==============================================================================
 DASHBOARD MAISLASER — Bia
 ==============================================================================
+v6.0 (30/06/2026): MODELO DEMOLIÇÃO da Bia v5.
+  - Remove aba "⚠️ Pendências" do robô Bia (HANDOFF/HANDOFF_MED/AGENDADA não
+    existem mais após normalização de status pra RESPONDEU + drop das tabelas
+    `conversas` e `agendamentos` na migration_v3_demolicao.sql).
+  - Remove aba "📜 Histórico Bia" do robô Z-API (era do modelo FSM antigo com
+    timeout 36h / auto-validação 30%, que foi demolido).
+  - Adiciona aba "🤖 Disparador AUTO" no robô Z-API (no lugar de Histórico Bia)
+    — visualização read-only do estado dos disparos da Bia v5 a partir do
+    Supabase `bia_disparos` agrupado por campanha_id.
+  - Apaga arquivos: aba_pendencias.py, aba_historico_bia.py
+  - Novo arquivo: aba_disparador_auto.py
+
 v5.3.2 (22/06/2026): conserta link "🔗 Nova aba" da lista de Conversas.
 Quando abre em nova guia (URL ?conversa=XXX), agora mostra tela cheia da
 conversa SEM tabs (porque Streamlit cai sempre na primeira aba Pendências
@@ -55,9 +67,8 @@ from aba_confirmacao import (
 )
 from aba_disparador import render_aba_disparador
 from aba_zapi import render_aba_zapi_aguardando, render_aba_zapi_ranking, render_aba_zapi_indicacoes, render_aba_zapi_metricas, render_aba_zapi_clientes
-from aba_pendencias import render_aba_pendencias
 from aba_historico_disparos import render_aba_historico_disparos
-from aba_historico_bia import render_aba_historico_bia
+from aba_disparador_auto import render_aba_disparador_auto
 
 
 # ============================================================================
@@ -75,7 +86,7 @@ TZ_SP = timezone(timedelta(hours=-3))
 COR_PRIMARIA = "#5BC0BE"      # teal do logo Maislaser
 COR_PRIMARIA_DARK = "#3D9991"
 CUSTO_USD_POR_MTOK = 3.0
-VERSAO_DASHBOARD = "v5.3.3"
+VERSAO_DASHBOARD = "v6.0"
 VERSAO_CEREBRO = "v3.10"
 VERSAO_APPS_SCRIPT = "v6.5"
 MODELO_CLAUDE_DEFAULT = "claude-sonnet-4-6"
@@ -1870,17 +1881,16 @@ def main():
             return  # Não renderiza as tabs
 
         # ─── FLUXO NORMAL: TABS COMPLETAS ───
-        tab_pend, tab1, tab3, tab_base, tab4, tab5 = st.tabs([
-            "⚠️ Pendências",
+        # v6.0 (30/06/2026): aba "⚠️ Pendências" REMOVIDA (modelo demolição).
+        # HANDOFF/HANDOFF_MED/AGENDADA não existem mais em bia_disparos após a
+        # migration; tabelas `conversas` e `agendamentos` foram dropadas.
+        tab1, tab3, tab_base, tab4, tab5 = st.tabs([
             "💬 Conversas",
             "📅 Agendamentos",
             "📊 Base de Clientes",
             "📈 Métricas",
             "⚙️ Configurações",
         ])
-
-        with tab_pend:
-            render_aba_pendencias()
 
         with tab1:
             # v5.3: drill-down de conversa fica DENTRO da tab Conversas
@@ -1955,12 +1965,13 @@ def main():
 
     elif robo == 'zapi':
         # ─── Tabs do Robô Z-API Indicações ──────────────────────
-        # v9.8 (18/06/2026): adicionada tab Histórico Bia entre Indicações e Ranking
-        tab_aguard, tab_clientes, tab_indic, tab_hist_bia, tab_rank, tab_metr = st.tabs([
+        # v6.0 (30/06/2026): aba "📜 Histórico Bia" SUBSTITUÍDA por
+        # "🤖 Disparador AUTO" (modelo demolição — modelo FSM antigo morreu).
+        tab_aguard, tab_clientes, tab_indic, tab_disp_auto, tab_rank, tab_metr = st.tabs([
             "⏳ Aguardando validação",
             "👥 Clientes no programa",
             "📨 Indicações",
-            "📜 Histórico Bia",
+            "🤖 Disparador AUTO",
             "🏆 Ranking funcionárias",
             "📊 Métricas",
         ])
@@ -1974,8 +1985,8 @@ def main():
         with tab_indic:
             render_aba_zapi_indicacoes()
 
-        with tab_hist_bia:
-            render_aba_historico_bia()
+        with tab_disp_auto:
+            render_aba_disparador_auto()
 
         with tab_rank:
             render_aba_zapi_ranking()
