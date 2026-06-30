@@ -133,7 +133,7 @@ def _agrupar_por_campanha(df_disp):
         # pega 1ª linha pra extrair metadados do cadastrante
         primeira = g.iloc[0]
         return pd.Series({
-            'campanha_id': primeira['campanha_id'],
+            'campanha_id': g.name,  # 'campanha_id' virou o index do grupo no .apply()
             'nome_cadastrante': primeira.get('nome_cadastrante') or '—',
             'telefone_cadastrante': primeira.get('telefone_cadastrante') or '',
             'unidade': primeira.get('unidade') or '—',
