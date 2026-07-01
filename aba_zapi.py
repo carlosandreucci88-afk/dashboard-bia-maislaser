@@ -43,6 +43,14 @@ v9.11 (30/06/2026): CONFIG TELEFONES DA RECEPÇÃO
   • Expander no topo da aba pra editar recepcao_{mogi,suzano}_telefone
   • Apps Script Filtro Webhook Bia v3.1+ lê esses valores a cada clique
 
+v9.13 (01/07/2026): PUXAR LOTE NA HORA
+  • Ao clicar AUTO, dashboard chama endpoint puxar_lote_agora do Filtro
+    Webhook Bia (v3.7+) IMEDIATAMENTE. Coordenadora não espera mais 10min
+    pelo cron.
+  • Nova função _bia_action usa secrets APPS_SCRIPT_URL_BIA / TOKEN_BIA
+  • Se puxar_lote_agora falhar, mostra warning mas não bloqueia — cron
+    de 10min pega depois como backup.
+
 v9.12 (01/07/2026): ESTADO AUTO_TERMINADO
   • Novo 5º estado nas campanhas AUTO: `auto_terminado`
   • Ativa quando (disparados + skip_base + erros) >= total_contatos
@@ -111,6 +119,39 @@ def _zapi_action(endpoint: str, **params):
     query = {"endpoint": endpoint, "token": token, **{k: v for k, v in params.items() if v is not None}}
     try:
         resp = requests.get(url, params=query, timeout=20, allow_redirects=True)
+        if resp.status_code != 200:
+            return {"_erro": f"HTTP {resp.status_code}"}
+        return resp.json()
+    except Exception as e:
+        return {"_erro": f"Erro: {e}"}
+
+
+# ============================================================================
+# v9.13 — CLIENTE HTTP PARA O FILTRO WEBHOOK BIA (Apps Script separado)
+# ============================================================================
+# Usado pra chamar o endpoint puxar_lote_agora imediatamente após clicar AUTO,
+# em vez de esperar 10min pelo cron `puxarLotesAuto`.
+#
+# Requer 2 secrets NOVOS no Streamlit:
+#   APPS_SCRIPT_URL_BIA   = URL do webapp do Filtro Webhook Bia (v3.7+)
+#   APPS_SCRIPT_TOKEN_BIA = valor da property DASHBOARD_TOKEN no Filtro Bia
+#
+# Timeout maior (30s) porque puxarLotesAuto pode processar até 5 lotes e
+# gastar 10-15s em runs cheios.
+# ============================================================================
+
+def _bia_action(endpoint: str, **params):
+    """Chama endpoint do Filtro Webhook Bia. NÃO cacheado. Timeout 30s."""
+    try:
+        url = st.secrets["APPS_SCRIPT_URL_BIA"]
+        token = st.secrets["APPS_SCRIPT_TOKEN_BIA"]
+    except Exception:
+        return {"_erro": "Configuração ausente: APPS_SCRIPT_URL_BIA / APPS_SCRIPT_TOKEN_BIA"}
+
+    query = {"endpoint": endpoint, "token": token,
+             **{k: v for k, v in params.items() if v is not None}}
+    try:
+        resp = requests.get(url, params=query, timeout=30, allow_redirects=True)
         if resp.status_code != 200:
             return {"_erro": f"HTTP {resp.status_code}"}
         return resp.json()
@@ -1183,7 +1224,13 @@ def _executar_set_modo(tel, modo, nome):
     v3.0 (30/06/2026): removida chamada ao webhook n8n (Railway morreu na
     demolição). Agora o cron `puxarLotesAuto` do Apps Script Filtro Webhook
     Bia (10min) puxa lotes em AUTO automaticamente e o `dispararProximoDaFila`
-    (1min) dispara templates. Coordenadora só marca o modo aqui.
+    (1min) dispara templates.
+
+    v9.13 (01/07/2026): quando modo=AUTO, chama puxar_lote_agora no Filtro
+    Webhook Bia IMEDIATAMENTE após set_modo. Coordenadora não precisa mais
+    esperar até 10min pelo cron — primeiro template sai em ~1min.
+    Se puxar_lote_agora falhar, mostra warning mas não bloqueia (cron pega
+    depois como backup).
     """
     with st.spinner(f"Definindo modo {modo} pra {nome}..."):
         resp = _zapi_action("set_modo_campanha", tel=tel, modo=modo)
@@ -1193,10 +1240,30 @@ def _executar_set_modo(tel, modo, nome):
         return
 
     if modo == "AUTO":
-        st.toast(
-            f"🤖 AUTO marcado pra {nome}. Disparador puxa em até 10min, depois envia 1 template/min.",
-            icon="🚀",
-        )
+        # v9.13: puxa lote na hora em vez de esperar cron de 10min
+        with st.spinner("🚀 Puxando lote pra Bia disparar agora..."):
+            resp_puxar = _bia_action("puxar_lote_agora")
+
+        if resp_puxar.get("_erro") or resp_puxar.get("erro"):
+            # Não bloqueia — se falhar, cron de 10min pega depois
+            st.warning(
+                f"⚠️ AUTO marcado, mas puxar_lote_agora falhou: "
+                f"{resp_puxar.get('_erro') or resp_puxar.get('erro')}. "
+                f"Cron vai puxar em até 10min mesmo assim."
+            )
+        elif resp_puxar.get("ja_disparado_recente"):
+            st.toast(
+                f"🤖 AUTO marcado pra {nome}. Lote já foi puxado nos últimos 30s, "
+                f"primeiro template sai em até 1min.",
+                icon="🚀",
+            )
+        else:
+            duracao = resp_puxar.get("duracao_ms", 0) / 1000
+            st.toast(
+                f"🤖 AUTO marcado pra {nome}. Lote puxado em {duracao:.1f}s, "
+                f"primeiro template sai em até 1min.",
+                icon="🚀",
+            )
     else:
         st.toast(f"Modo {modo} aplicado pra {nome}", icon="✅")
 
