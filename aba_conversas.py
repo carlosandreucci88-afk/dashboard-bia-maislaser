@@ -475,13 +475,30 @@ def _render_lista(df):
         )
         st.markdown(html, unsafe_allow_html=True)
 
-        col_btn, _ = st.columns([1, 4])
-        with col_btn:
-            if st.button("🔍 Ver conversa",
-                         key=f"conv_open_{row['id']}",
-                         use_container_width=True):
-                st.session_state['_conv_drill_id'] = row['id']
-                st.rerun()
+        # Link HTML pra abrir conversa em NOVA ABA do navegador.
+        # Preserva o token de auth (?t=...) e passa ?conv_id=X.
+        # O dashboard_maislaser.py detecta conv_id na URL e renderiza fullscreen.
+        try:
+            qp_atuais = st.query_params
+            t_atual = qp_atuais.get("t", "")
+        except Exception:
+            t_atual = ""
+        url_conv = f"?conv_id={row['id']}"
+        if t_atual:
+            url_conv += f"&t={t_atual}"
+
+        st.markdown(
+            f'<div style="margin-top: 6px;">'
+            f'<a href="{url_conv}" target="_blank" '
+            f'style="display: inline-block; padding: 6px 14px; '
+            f'background: white; color: #3D9991; border: 1px solid #E5E7EB; '
+            f'border-radius: 8px; text-decoration: none; font-weight: 600; '
+            f'font-size: 13px; transition: all 0.15s ease;">'
+            f'🔍 Ver conversa <span style="color: #9ca3af;">↗</span>'
+            f'</a>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
     # Controles paginação
     if total_pag > 1:
@@ -530,9 +547,117 @@ def render_aba_conversas():
 
     df_f = _aplicar_filtro_unidade(df, unidade_sel)
 
-    # Drill-down ativo?
+    # Drill-down ativo? (via session_state pra navegação inline)
     drill_id = st.session_state.get('_conv_drill_id')
     if drill_id:
         _render_drilldown(drill_id, df_f)
     else:
         _render_lista(df_f)
+
+
+# ============================================================================
+# FULLSCREEN — chamado pelo dashboard_maislaser.py quando URL tem ?conv_id=xxx
+# ============================================================================
+
+def render_conversa_fullscreen(conv_id):
+    """Renderiza SÓ a timeline de 1 conversa, sem sidebar/abas.
+    Usado quando o usuário abre '?conv_id=xxx' em nova aba do browser."""
+
+    # Botão voltar (limpa query params e recarrega dashboard normal)
+    col_back, col_title = st.columns([1, 5])
+    with col_back:
+        if st.button("🏠 Voltar pro dashboard", use_container_width=True):
+            # Preserva só o token de auth
+            qp = st.query_params
+            t_atual = qp.get("t", None)
+            st.query_params.clear()
+            if t_atual:
+                st.query_params["t"] = t_atual
+            st.rerun()
+
+    st.markdown(
+        '<hr style="margin: 12px 0 18px 0; border: none; border-top: 1px solid #E5E7EB;">',
+        unsafe_allow_html=True,
+    )
+
+    # Carrega o lead específico direto do Supabase
+    try:
+        sb = _get_sb()
+        result = (sb.table("bia_disparos")
+                  .select("id, telefone, nome_indicado, nome_cadastrante, "
+                          "campanha_id, telefone_cadastrante, unidade, privacidade, "
+                          "status, botao_clicado, fila_em, disparado_em, "
+                          "respondeu_em, ultima_notif_recepcao, "
+                          "tipo_resposta, texto_livre_avisado_em, ultima_msg_cliente, "
+                          "reminder_1_enviado_em, reminder_2_enviado_em")
+                  .eq("id", conv_id)
+                  .limit(1)
+                  .execute())
+        if not result.data:
+            st.error(f"❌ Conversa `{conv_id}` não encontrada.")
+            return
+        df = pd.DataFrame(result.data)
+        # Converte timestamps
+        for col in ('fila_em', 'disparado_em', 'respondeu_em', 'ultima_notif_recepcao',
+                    'texto_livre_avisado_em', 'reminder_1_enviado_em', 'reminder_2_enviado_em'):
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors='coerce', utc=True)
+                try:
+                    df[col + '_sp'] = df[col].dt.tz_convert(TZ_SP)
+                except Exception:
+                    df[col + '_sp'] = df[col]
+    except Exception as e:
+        st.error(f"Erro ao carregar conversa: {e}")
+        return
+
+    # Reusa o drill-down normal (mesma UI, sem botão de voltar interno)
+    _render_drilldown_fullscreen(conv_id, df)
+
+
+def _render_drilldown_fullscreen(lead_id, df):
+    """Igual ao _render_drilldown mas SEM o botão 'Voltar pra lista' interno
+    (já tem o 'Voltar pro dashboard' no fullscreen)."""
+    linha = df[df['id'] == lead_id]
+    if linha.empty:
+        st.warning("Conversa não encontrada.")
+        return
+
+    row = linha.iloc[0]
+    nome = row.get('nome_indicado') or '(sem nome)'
+    telefone = row.get('telefone') or '—'
+    unidade = _norm_unidade(row.get('unidade'))
+    nome_cad = row.get('nome_cadastrante') or '—'
+
+    st.markdown(f"## 💬 Conversa — {nome}")
+    st.caption(
+        f"📱 +{telefone} · 📍 {unidade} · "
+        f"👥 Indicado por {nome_cad} · "
+        f"🆔 `{row.get('campanha_id', '?')}`"
+    )
+
+    status = row.get('status') or '?'
+    tipo_r = row.get('tipo_resposta')
+    st.markdown(
+        f'<div style="margin: 10px 0;">'
+        f'<span style="background: #f3f4f6; color: #4b5563; padding: 3px 10px; '
+        f'border-radius: 12px; font-weight: 700; font-size: 11px; margin-right: 8px;">'
+        f'Status: {status}</span>'
+        f'{_badge_decisao(tipo_r)}'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.divider()
+
+    eventos = _construir_timeline(row)
+    if not eventos:
+        st.info("Nenhum evento registrado nessa conversa ainda.")
+        return
+
+    st.markdown("### 🕒 Timeline")
+    st.caption(f"{len(eventos)} evento(s) reconstruídos a partir dos timestamps do banco.")
+
+    prev_ts = None
+    for ev in eventos:
+        _render_timeline_evento(ev, prev_ts=prev_ts)
+        prev_ts = ev['ts']
