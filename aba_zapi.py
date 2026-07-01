@@ -43,6 +43,12 @@ v9.11 (30/06/2026): CONFIG TELEFONES DA RECEPÇÃO
   • Expander no topo da aba pra editar recepcao_{mogi,suzano}_telefone
   • Apps Script Filtro Webhook Bia v3.1+ lê esses valores a cada clique
 
+v9.14 (01/07/2026): FILTRO UNIDADE EM MÉTRICAS
+  • Filtro pill Todas / Mogi / Suzano no topo da aba Métricas
+  • Passa parâmetro `unidade` pro endpoint metricas_funil (Apps Script
+    atualizado — retrocompat se dashboard chamar sem parâmetro)
+  • Estado persiste em session_state[_zapi_metricas_unidade_persist]
+
 v9.13 (01/07/2026): PUXAR LOTE NA HORA
   • Ao clicar AUTO, dashboard chama endpoint puxar_lote_agora do Filtro
     Webhook Bia (v3.7+) IMEDIATAMENTE. Coordenadora não espera mais 10min
@@ -1836,9 +1842,12 @@ def tela_zapi_indicacoes():
 # ============================================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _zapi_get_metricas(data_inicio: str = "", data_fim: str = ""):
-    """Chama o endpoint metricas_funil com filtro opcional de período.
-    Cache 5min por combinação de datas."""
+def _zapi_get_metricas(data_inicio: str = "", data_fim: str = "", unidade: str = ""):
+    """Chama o endpoint metricas_funil com filtro opcional de período + unidade.
+    Cache 5min por combinação (data_inicio, data_fim, unidade).
+
+    v9.14: parâmetro unidade adicionado. Vazio = todas (retrocompat).
+    """
     try:
         url = st.secrets["APPS_SCRIPT_URL_ZAPI"]
         token = st.secrets["APPS_SCRIPT_TOKEN_ZAPI"]
@@ -1848,6 +1857,7 @@ def _zapi_get_metricas(data_inicio: str = "", data_fim: str = ""):
     params = {"endpoint": "metricas_funil", "token": token}
     if data_inicio: params["data_inicio"] = data_inicio
     if data_fim:    params["data_fim"] = data_fim
+    if unidade:     params["unidade"] = unidade
 
     try:
         resp = requests.get(url, params=params, timeout=45, allow_redirects=True)
@@ -1915,8 +1925,17 @@ def tela_zapi_metricas():
         df_fmt = "/".join(reversed(data_fim_str.split("-")))
         st.caption(f"📍 Período: **{di_fmt}** até **{df_fmt}**")
 
+    # v9.14: filtro de unidade Todas / Mogi / Suzano
+    unid_sel = _filtro_unidade_zapi(key_persist="_zapi_metricas_unidade_persist")
+    unidade_param = "" if unid_sel == "Todas" else unid_sel.lower()
+
+    st.markdown(
+        '<hr style="margin: 12px 0 18px 0; border: none; border-top: 1px solid #E5E7EB;">',
+        unsafe_allow_html=True,
+    )
+
     with st.spinner("Calculando métricas do funil..."):
-        data = _zapi_get_metricas(data_inicio_str, data_fim_str)
+        data = _zapi_get_metricas(data_inicio_str, data_fim_str, unidade_param)
 
     if _mostrar_erro_e_parar(data, "(carregando métricas)"):
         return
