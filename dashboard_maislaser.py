@@ -424,6 +424,14 @@ def main():
     if not check_password():
         st.stop()
 
+    # v6.2: se URL tem ?conv_id=xxx, mostra timeline da conversa em fullscreen
+    # (sem sidebar de robôs, sem abas). Usado quando abre conversa em nova aba.
+    qp = st.query_params
+    if "conv_id" in qp:
+        from aba_conversas import render_conversa_fullscreen
+        render_conversa_fullscreen(qp["conv_id"])
+        return
+
     # v6.1: robô Bia conversacional foi removido. Default = confirmacao.
     # Sessões antigas com robo_ativo='bia' são normalizadas pra confirmacao.
     if ('robo_ativo' not in st.session_state
