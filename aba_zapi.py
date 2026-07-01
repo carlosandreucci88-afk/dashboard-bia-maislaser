@@ -1558,16 +1558,56 @@ def _zapi_get_metricas(data_inicio: str = "", data_fim: str = ""):
         return {"_erro": "Resposta do Apps Script não é JSON válido."}
 
 
+# ==============================================================================
+# ⚠️ FRAGMENTO — Substitui SÓ a função `tela_zapi_metricas` no aba_zapi.py
+# ==============================================================================
+#
+# ONDE APLICAR:
+#   1. Abre aba_zapi.py
+#   2. Ctrl+F → busca `def tela_zapi_metricas():`
+#   3. Seleciona TODO o corpo dessa função (até a próxima `def` ou até
+#      `# ============================================================================`)
+#   4. Substitui pelo bloco abaixo (só a função, sem esse header)
+#   5. Commit + push
+#
+# NÃO substituir a `_zapi_get_metricas` — essa continua igual.
+#
+# CONTEXTO DO BUG:
+#   Apps Script _endpointMetricasFunil retorna:
+#     { periodo, funil: {iniciaram_conversa, escolheram_privacidade,
+#                        bateram_meta, validados, invalidados,
+#                        encerrados_sem_resposta, em_andamento, ...},
+#       taxas, gerado_em }
+#
+#   Mas o Python antigo procurava (não existia no JSON):
+#     data.total_convidados, funil.n1_convidados.total, funil.n4_recebeu_voucher.pct,
+#     data.drop_off, data.privacidade, data.por_unidade, data.tempos,
+#     data.top5_conversao, data.fontes
+#
+#   Resultado: tudo caía em `.get(default 0)` → dashboard mostrava zero pra tudo.
+#
+# O QUE ESSA VERSÃO FAZ:
+#   • Lê `funil` no formato flat que o endpoint realmente retorna
+#   • Calcula % dentro do próprio Python
+#   • Renderiza os 4 KPIs + funil visual + status "em andamento"
+#   • REMOVE seções que dependem de dados que o Apps Script NÃO retorna:
+#       - drop-off detalhado (sem dados)
+#       - comparação Mogi/Suzano (sem dados)
+#       - privacidade agregada (sem dados)
+#       - tempos médios (sem dados)
+#       - top 5 funcionárias (sem dados — se quiser, migra pra chamar
+#         `funcionarias_real` que já funciona)
+# ==============================================================================
+
+
 def tela_zapi_metricas():
     st.markdown("## 📊 Métricas Z-API — Funil & Conversão")
     st.caption(
-        "Visão completa do programa Indique e Ganhe: onde os clientes "
-        "convertem, onde travam, e quanto tempo leva."
+        "Visão do funil de conversão do Indique e Ganhe: onde os clientes "
+        "convertem e onde travam. Cálculo em tempo real a partir de CLIENTES + arquivo."
     )
 
-    # ─── v9.7: Filtro de período personalizado ───────────────────────────
-    # Filtra por Data Cadastro (quando cliente entrou no programa).
-    # ───────────────────────────────────────────────────────────────────
+    # ─── Filtro de período (mantido igual) ──────────────────────────────
     from datetime import date, timedelta
     hoje = date.today()
 
@@ -1576,7 +1616,7 @@ def tela_zapi_metricas():
         usar_filtro = st.toggle(
             "🎯 Filtrar por período",
             value=False, key="met_usar_filtro",
-            help="Liga pra recalcular tudo num período específico (por Data Cadastro do cliente)"
+            help="Filtra por Data Cadastro (quando cliente entrou no programa)"
         )
 
     data_inicio_str = ""
@@ -1605,7 +1645,6 @@ def tela_zapi_metricas():
             _zapi_get_metricas.clear()
             st.rerun()
 
-    # Label do período aplicado (visual)
     if usar_filtro:
         di_fmt = "/".join(reversed(data_inicio_str.split("-")))
         df_fmt = "/".join(reversed(data_fim_str.split("-")))
@@ -1617,46 +1656,68 @@ def tela_zapi_metricas():
     if _mostrar_erro_e_parar(data, "(carregando métricas)"):
         return
 
-    total = data.get("total_convidados", 0)
-    funil = data.get("funil", {})
-    drop = data.get("drop_off", {})
-    priv = data.get("privacidade", {})
-    por_unid = data.get("por_unidade", {})
-    tempos = data.get("tempos", {}).get("cadastro_ate_meta", {})
-    top5 = data.get("top5_conversao", [])
-    fontes = data.get("fontes", {})
+    # ─── Lê o funil no formato REAL que o Apps Script retorna ──────────
+    # Contrato do endpoint _endpointMetricasFunil (v9.7):
+    #   funil = {
+    #     iniciaram_conversa, escolheram_privacidade, enviaram_pelo_menos_1,
+    #     bateram_meta, enviados_validacao, validados, invalidados,
+    #     encerrados_sem_resposta, em_andamento
+    #   }
+    funil = data.get("funil", {}) or {}
 
-    n_voucher = funil.get("n4_recebeu_voucher", {}).get("total", 0)
-    pct_voucher = funil.get("n4_recebeu_voucher", {}).get("pct", 0)
+    n_convidados = int(funil.get("iniciaram_conversa", 0) or 0)
+    n_priv       = int(funil.get("escolheram_privacidade", 0) or 0)
+    n_enviou1    = int(funil.get("enviaram_pelo_menos_1", 0) or 0)
+    n_bateu_meta = int(funil.get("bateram_meta", 0) or 0)
+    n_validados  = int(funil.get("validados", 0) or 0)
+    n_invalid    = int(funil.get("invalidados", 0) or 0)
+    n_desistiu   = int(funil.get("encerrados_sem_resposta", 0) or 0)
+    n_andamento  = int(funil.get("em_andamento", 0) or 0)
+
+    def _pct(numerador, denominador):
+        if not denominador:
+            return 0.0
+        return round(numerador / denominador * 100, 1)
+
+    pct_priv     = _pct(n_priv, n_convidados)
+    pct_enviou1  = _pct(n_enviou1, n_convidados)
+    pct_meta     = _pct(n_bateu_meta, n_convidados)
+    pct_voucher  = _pct(n_validados, n_convidados)
 
     # ─── 4 CARDS MACRO ───
     col_a, col_b, col_c, col_d = st.columns(4)
-    col_a.metric("👥 Convidados", f"{total:,}".replace(",", "."))
-    col_b.metric("🎁 Voucher liberado", f"{n_voucher:,}".replace(",", "."),
-        delta=f"{pct_voucher}% conversão", delta_color="normal")
-    col_c.metric("⏱️ Mediana cadastro → meta", f"{tempos.get('mediana_h', 0):.1f}h",
-        help=f"Amostra: {tempos.get('amostra', 0)} clientes com timestamps válidos")
-    col_d.metric("💤 Desistiram", f"{drop.get('desistiu_sem_resp', 0):,}".replace(",", "."),
-        delta=f"-{round(drop.get('desistiu_sem_resp', 0)/total*100, 1) if total else 0}%",
+    col_a.metric(
+        "👥 Convidados", f"{n_convidados:,}".replace(",", "."),
+        help="Total de clientes que iniciaram conversa (Data Cadastro dentro do período)"
+    )
+    col_b.metric(
+        "🎁 Voucher liberado", f"{n_validados:,}".replace(",", "."),
+        delta=f"{pct_voucher}% conversão", delta_color="normal"
+    )
+    col_c.metric(
+        "🚀 Em andamento", f"{n_andamento:,}".replace(",", "."),
+        help="Ainda não terminaram o funil (privacidade, contatos, validação)"
+    )
+    col_d.metric(
+        "💤 Desistiram", f"{n_desistiu:,}".replace(",", "."),
+        delta=f"-{_pct(n_desistiu, n_convidados)}%",
         delta_color="inverse",
-        help="Pararam de responder após cobrança (_COBRADOSEMRESPOSTA)")
+        help="Pararam de responder após cobrança (_COBRADOSEMRESPOSTA)"
+    )
 
     st.markdown("---")
 
-    # ─── FUNIL VISUAL (barras horizontais) ───
+    # ─── FUNIL VISUAL (4 barras) ───
     st.markdown("### 🔻 Funil de conversão")
 
     niveis = [
-        ("👥 Convidados",        funil.get("n1_convidados", {})),
-        ("✅ Escolheu privacidade", funil.get("n2_escolheu_priv", {})),
-        ("🎯 Bateu meta (20)",   funil.get("n3_bateu_meta", {})),
-        ("🎁 Recebeu voucher",   funil.get("n4_recebeu_voucher", {})),
+        ("👥 Convidados",             n_convidados, 100.0 if n_convidados else 0.0),
+        ("✅ Escolheu privacidade",   n_priv,       pct_priv),
+        ("🎯 Bateu meta (20)",        n_bateu_meta, pct_meta),
+        ("🎁 Recebeu voucher",        n_validados,  pct_voucher),
     ]
 
-    for label, dados_nivel in niveis:
-        n = dados_nivel.get("total", 0)
-        pct = dados_nivel.get("pct", 0)
-        # Barra com largura proporcional
+    for label, n, pct in niveis:
         st.markdown(
             f"""<div style="margin: 8px 0;">
                 <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
@@ -1674,112 +1735,50 @@ def tela_zapi_metricas():
 
     st.markdown("---")
 
-    # ─── DROP-OFF — onde perde clientes ───
-    st.markdown("### 📉 Onde perde clientes")
+    # ─── STATUS DETALHADO ───
+    st.markdown("### 📊 Distribuição por status final")
 
-    drops = [
-        ("💤 Desistiu sem responder", drop.get("desistiu_sem_resp", 0), "🚨"),
-        ("⏸️ Travado em validação",   drop.get("travados_val", 0), ""),
-        ("🔒 Travado em privacidade", drop.get("travados_priv", 0), ""),
-        ("📞 Travado em contatos",    drop.get("travados_cont", 0), ""),
-        ("🚫 Encerrado (invalid. 2x)", drop.get("encerrados", 0), ""),
-    ]
-    drops.sort(key=lambda x: x[1], reverse=True)
-
-    cols = st.columns(len(drops))
-    for col, (label, qtd, badge) in zip(cols, drops):
-        pct_d = round(qtd/total*100, 1) if total else 0
-        col.metric(label, qtd, delta=f"{pct_d}%" if qtd else "0%",
-            delta_color="inverse" if qtd > 5 else "off")
-        if badge:
-            col.caption(f"{badge} maior gargalo")
+    col_v, col_i, col_d_col, col_and = st.columns(4)
+    col_v.metric("✅ Validados", n_validados,
+        help="STATUS_REC = FINALIZADO")
+    col_i.metric("❌ Invalidados", n_invalid,
+        help="STATUS_REC = INVALIDADO_AVISADO ou INVALIDADO_COBRADO",
+        delta=f"{_pct(n_invalid, n_convidados)}%",
+        delta_color="inverse" if n_invalid > 0 else "off")
+    col_d_col.metric("💤 Sem resposta", n_desistiu,
+        delta=f"{_pct(n_desistiu, n_convidados)}%",
+        delta_color="inverse" if n_desistiu > 0 else "off",
+        help="_COBRADOSEMRESPOSTA (pararam de responder após cobrança)")
+    col_and.metric("🚀 Ainda em andamento", n_andamento,
+        help="Aguardando privacidade, contatos ou validação")
 
     st.markdown("---")
 
-    # ─── COMPARAÇÃO MOGI vs SUZANO ───
-    st.markdown("### 🏬 Comparação entre unidades")
+    # ─── TAXAS ───
+    st.markdown("### 📈 Taxas de conversão")
+    taxas = data.get("taxas", {}) or {}
+    col_t1, col_t2, col_t3, col_t4 = st.columns(4)
+    col_t1.metric("🔐 % escolheu privacidade", f"{pct_priv}%",
+        help="Convidados → escolheram 1 ou 2")
+    col_t2.metric("📨 % enviou pelo menos 1", f"{pct_enviou1}%",
+        help="Convidados → mandaram ao menos 1 contato")
+    col_t3.metric("🎯 % bateu meta", f"{pct_meta}%",
+        help="Convidados → completaram os 20 contatos")
+    col_t4.metric("🎁 % conversão total", f"{pct_voucher}%",
+        help="Convidados → viraram voucher liberado")
 
-    col_m, col_s = st.columns(2)
-    for col, key, nome in [(col_m, "mogi", "🏙️ Mogi"), (col_s, "suzano", "🌆 Suzano")]:
-        u = por_unid.get(key, {})
-        utot = u.get("total", 0)
-        ufin = u.get("finalizados", 0)
-        upct = round(ufin/utot*100, 1) if utot else 0
-        col.markdown(f"#### {nome}")
-        col.metric("Total convidados", utot)
-        col.metric("Voucher liberado", ufin, delta=f"{upct}% conversão")
-        col.metric("Desistiram", u.get("desistiu", 0))
-        col.metric("Encerrados", u.get("encerrados", 0))
-
-    st.markdown("---")
-
-    # ─── PRIVACIDADE + TEMPOS ───
-    col_p, col_t = st.columns(2)
-
-    with col_p:
-        st.markdown("### 🔐 Privacidade")
-        ident = priv.get("identificado", 0)
-        anon = priv.get("anonimo", 0)
-        vazio = priv.get("vazio", 0)
-        pct_anon = priv.get("pct_anonimo_dentre_decididos", 0)
-
-        st.markdown(f"""
-        - **Identificadas (1):** {ident} cliente{'s' if ident != 1 else ''}
-        - **Anônimas (2):** {anon} cliente{'s' if anon != 1 else ''}
-        - **Sem registro:** {vazio} cliente{'s' if vazio != 1 else ''} *(antigos pré-v9)*
-
-        Entre quem escolheu: **{pct_anon}% optaram pelo modo anônimo.**
-        """)
-
-        if pct_anon > 50:
-            st.info(f"💡 Maioria prefere anonimato — talvez seja sinal de que clientes querem indicar mas não querem que amigos saibam.")
-
-    with col_t:
-        st.markdown("### ⏱️ Tempos médios")
-        amostra = tempos.get('amostra', 0)
-        if amostra > 0:
-            med = tempos.get('mediana_h', 0)
-            mean_ = tempos.get('media_h', 0)
-            mn = tempos.get('min_h', 0)
-            mx = tempos.get('max_h', 0)
-            st.markdown(f"""
-            **Cadastro → bater meta** *(amostra: {amostra} clientes)*
-
-            - **Mediana:** {med:.1f}h ⚡
-            - **Média:** {mean_:.1f}h
-            - **Mais rápido:** {mn:.2f}h ({int(mn*60)}min)
-            - **Mais demorado:** {mx:.1f}h
-            """)
-            if med < 1:
-                st.success(f"🚀 Engajamento muito rápido — metade dos clientes completam em menos de 1h.")
-        else:
-            st.info("Sem dados suficientes (precisa coluna DATA BATEU META preenchida).")
-
-    st.markdown("---")
-
-    # ─── TOP 5 CONVERSÃO ───
-    st.markdown("### 🏆 Top 5 funcionárias por taxa de conversão")
-    st.caption("Funcionárias com **≥3 convidados**, ordenadas por % de voucher liberado.")
-
-    if top5:
-        df_top = pd.DataFrame(top5)
-        df_top["📊 Conversão"] = df_top["taxa_conversao"].apply(lambda x: f"{x:.1f}%")
-        df_top = df_top[["funcionaria", "unidade", "convidados", "finalizados", "📊 Conversão"]]
-        df_top.columns = ["👩 Funcionária", "📍 Unidade", "👥 Convidados", "🎁 Vouchers", "📊 Conversão"]
-        df_top["📍 Unidade"] = df_top["📍 Unidade"].astype(str).str.title()
-        df_top.index = df_top.index + 1
-        df_top.index.name = "🏅"
-        st.dataframe(df_top, use_container_width=True)
+    # ─── Footer ───
+    gerado = data.get("gerado_em", "")
+    if gerado:
+        try:
+            from datetime import datetime as _dt
+            gerado_dt = _dt.fromisoformat(gerado.replace("Z", "+00:00")).astimezone(TZ_SP)
+            gerado_fmt = gerado_dt.strftime("%d/%m/%Y %H:%M:%S")
+        except Exception:
+            gerado_fmt = gerado
+        st.caption(f"📅 Calculado em {gerado_fmt} · Cache 5min (clica em 🔄 Atualizar pra forçar refresh)")
     else:
-        st.info("Ninguém atingiu amostra mínima (3 convidados) ainda.")
-
-    # ─── Fonte ───
-    st.caption(
-        f"📚 Fonte: {fontes.get('clientes_ativos', 0)} clientes ativos + "
-        f"{fontes.get('clientes_arquivo', 0)} arquivados. "
-        f"Cache 5min (clica em 🔄 Atualizar pra forçar refresh)."
-    )
-
+        st.caption("Cache 5min. Clica em 🔄 Atualizar pra forçar refresh.")
 
 # ============================================================================
 # TELA: 👥 CLIENTES NO PROGRAMA (v9.8)
