@@ -2,17 +2,17 @@
 ==============================================================================
 DASHBOARD MAISLASER
 ==============================================================================
+v6.3 (01/07/2026): REINTRODUZ ABA BASE DE CLIENTES
+  - Adiciona `📊 Base de clientes` como última tab do Robô Z-API
+  - Reintroduz import de `render_aba_base_clientes` (arquivo já existia no
+    repo desde a demolição v6.1, só o import foi removido)
+  - Passa `get_supabase()` pra função (contrato que ela espera)
+
 v6.1 (30/06/2026): DEMOLIÇÃO FINAL do robô Bia conversacional.
   - Remove "🤖 Robô Bia IA" do dashboard inteiro (tabelas conversas e
     agendamentos foram dropadas na migration_v3_demolicao.sql; o modelo
     FSM com Cérebro Determinístico foi substituído pelo modelo AUTO).
   - Default agora é Robô Confirmação Agenda.
-  - Remove código órfão: tela_conversas, tela_agendamentos, tela_metricas,
-    tela_configuracoes, renderizar_conversa, agrupar_conversas, detectar_*,
-    formatar_*, carregar_conversas/leads/agendamentos/clientes_base/
-    bia_disparos/configuracoes, salvar_configuracoes, set_modo_manutencao.
-  - Mantém apenas: get_supabase, autenticação, CSS, helpers de UI
-    (render_metric_card, _get_logo_html, placeholder_aba).
 
 v6.0 (30/06/2026): aba "🤖 Disparador AUTO" no robô Z-API (novo modelo).
 ==============================================================================
@@ -28,6 +28,7 @@ import base64
 import os
 
 # Módulos das abas
+from aba_base_clientes import render_aba_base_clientes
 from aba_confirmacao import (
     tela_confirmacao_disparos_dia,
     tela_confirmacao_historico,
@@ -61,7 +62,7 @@ st.set_page_config(
 TZ_SP = timezone(timedelta(hours=-3))
 COR_PRIMARIA = "#5BC0BE"
 COR_PRIMARIA_DARK = "#3D9991"
-VERSAO_DASHBOARD = "v6.2"
+VERSAO_DASHBOARD = "v6.3"
 
 # v6.1: só 2 robôs (Bia conversacional morreu na demolição)
 ROBOS = {
@@ -514,7 +515,8 @@ def main():
     elif robo == 'zapi':
         # v6.0: aba "📜 Histórico Bia" substituída por "🤖 Disparador AUTO"
         # v3.6: aba "💬 Conversas" ao lado do Disparador AUTO
-        tab_aguard, tab_clientes, tab_indic, tab_disp_auto, tab_conv, tab_rank, tab_metr = st.tabs([
+        # v6.3: aba "📊 Base de clientes" reintroduzida no final
+        tab_aguard, tab_clientes, tab_indic, tab_disp_auto, tab_conv, tab_rank, tab_metr, tab_base = st.tabs([
             "⏳ Aguardando validação",
             "👥 Clientes no programa",
             "📨 Indicações",
@@ -522,6 +524,7 @@ def main():
             "💬 Conversas",
             "🏆 Ranking funcionárias",
             "📊 Métricas",
+            "📊 Base de clientes",
         ])
 
         with tab_aguard:
@@ -544,6 +547,9 @@ def main():
 
         with tab_metr:
             render_aba_zapi_metricas()
+
+        with tab_base:
+            render_aba_base_clientes(get_supabase())
 
     if auto_refresh:
         time.sleep(30)
