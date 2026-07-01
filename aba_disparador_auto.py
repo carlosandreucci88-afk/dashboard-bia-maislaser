@@ -65,7 +65,10 @@ def _carregar_disparos(dias_atras=30):
                           "campanha_id, telefone_cadastrante, unidade, privacidade, "
                           "status, botao_clicado, fila_em, disparado_em, "
                           "respondeu_em, ultima_notif_recepcao, motivo_skip, "
-                          "tentativas_envio")
+                          "tentativas_envio, "
+                          # v3.5: classificação de resposta + timestamps R1/R2
+                          "tipo_resposta, texto_livre_avisado_em, "
+                          "reminder_1_enviado_em, reminder_2_enviado_em")
                   .gte("fila_em", data_limite)
                   .order("fila_em", desc=True)
                   .limit(10000)
@@ -73,7 +76,8 @@ def _carregar_disparos(dias_atras=30):
         df = pd.DataFrame(result.data or [])
         if df.empty:
             return df
-        for col in ('fila_em', 'disparado_em', 'respondeu_em', 'ultima_notif_recepcao'):
+        for col in ('fila_em', 'disparado_em', 'respondeu_em', 'ultima_notif_recepcao',
+                    'texto_livre_avisado_em', 'reminder_1_enviado_em', 'reminder_2_enviado_em'):
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors='coerce', utc=True)
                 try:
@@ -112,6 +116,14 @@ def _agrupar_por_campanha(df_disp):
         enviados = disparado + respondeu  # ignora SKIP_BASE e ERRO
         taxa = (respondeu / enviados * 100) if enviados > 0 else 0.0
 
+        # v3.5: contadores por tipo_resposta
+        if 'tipo_resposta' in g.columns:
+            positivas = int(g['tipo_resposta'].isin(['POSITIVA_BOTAO', 'POSITIVA_TEXTO']).sum())
+            negativas = int((g['tipo_resposta'] == 'NEGATIVA').sum())
+            genericas = int((g['tipo_resposta'] == 'GENERICA').sum())
+        else:
+            positivas = negativas = genericas = 0
+
         primeiro = g['fila_em_sp'].min() if 'fila_em_sp' in g.columns else None
         ultimo = g[['fila_em_sp', 'disparado_em_sp', 'respondeu_em_sp']].max(axis=1).max() \
                  if 'fila_em_sp' in g.columns else None
@@ -146,6 +158,9 @@ def _agrupar_por_campanha(df_disp):
             'erro': erro,
             'enviados': enviados,
             'taxa_clique': taxa,
+            'positivas': positivas,       # v3.5
+            'negativas': negativas,       # v3.5
+            'genericas': genericas,       # v3.5
             'primeiro_em_sp': primeiro,
             'ultimo_em_sp': ultimo,
             'estado': estado,
@@ -186,6 +201,17 @@ def _norm_unidade(u):
     if 'suzano' in ul:
         return 'Suzano'
     return u
+
+
+def _formatar_decisao(tipo_resp):
+    """v3.5: converte tipo_resposta em label amigável com emoji."""
+    mapa = {
+        'POSITIVA_BOTAO':  '✅ Positiva (botão)',
+        'POSITIVA_TEXTO':  '✅ Positiva (texto)',
+        'NEGATIVA':        '❌ Negativa',
+        'GENERICA':        '💬 Genérica',
+    }
+    return mapa.get(tipo_resp, '—')
 
 
 def _aplicar_filtro_unidade(df, unidade_sel):
@@ -296,16 +322,26 @@ def _render_drilldown(camp_id, df_disp):
     df_disp_view['Status'] = df_disp_view['status'].apply(lambda s: f"{_emoji_status(s)} {s}")
     df_disp_view['Botão'] = df_disp_view['botao_clicado'].fillna('—')
 
+    # v3.5: Decisão (baseado em tipo_resposta)
+    if 'tipo_resposta' in df_disp_view.columns:
+        df_disp_view['Decisão'] = df_disp_view['tipo_resposta'].apply(_formatar_decisao)
+    else:
+        df_disp_view['Decisão'] = '—'
+
     for col_dt, col_label in [('disparado_em_sp', '🚀 Disparado'),
                                 ('respondeu_em_sp', '💬 Respondeu'),
-                                ('ultima_notif_recepcao_sp', '🔔 Recepção avisada')]:
+                                ('ultima_notif_recepcao_sp', '🔔 Recepção avisada'),
+                                # v3.5: colunas de lembretes
+                                ('reminder_1_enviado_em_sp', '⏰ R1'),
+                                ('reminder_2_enviado_em_sp', '⏰ R2')]:
         if col_dt in df_disp_view.columns:
             df_disp_view[col_label] = df_disp_view[col_dt].apply(
                 lambda d: d.strftime('%d/%m %H:%M') if pd.notna(d) else '—'
             )
 
-    cols_show = ['Indicado', 'Telefone', 'Status', 'Botão',
-                 '🚀 Disparado', '💬 Respondeu', '🔔 Recepção avisada']
+    cols_show = ['Indicado', 'Telefone', 'Status', 'Botão', 'Decisão',
+                 '🚀 Disparado', '💬 Respondeu', '🔔 Recepção avisada',
+                 '⏰ R1', '⏰ R2']
     cols_exist = [c for c in cols_show if c in df_disp_view.columns]
     st.dataframe(df_disp_view[cols_exist].reset_index(drop=True),
                  use_container_width=True, hide_index=True, height=500)
