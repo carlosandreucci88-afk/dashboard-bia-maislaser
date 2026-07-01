@@ -2,7 +2,55 @@
 ==============================================================================
 ABA Z-API INDICAÇÕES — Robô Z-API (Apps Script v9.8)
 ==============================================================================
-Conecta o dashboard aos endpoints do Apps Script do Z-API.
+Conecta o dashboard aos endpoints do Apps Script do Z-API:
+
+  GET endpoints (leitura):
+    /?endpoint=ping              → healthcheck
+    /?endpoint=clientes          → todas as linhas de CLIENTES
+    /?endpoint=indicacoes&limit  → últimas N indicações
+    /?endpoint=validacao         → pendentes de validação enriquecidas
+                                    (v9.8: agora retorna modo + bia_puxou_em)
+    /?endpoint=contatos_cliente&campanha_id=ID → 20 contatos da campanha
+    /?endpoint=funcionarias      → ranking
+    /?endpoint=funcionarias_real → ranking calculado em tempo real
+    /?endpoint=metricas_funil    → funil completo
+    /?endpoint=stats             → métricas agregadas leves
+    /?endpoint=get_default_modo  → v9.8: lê toggle bia_default_modo_auto
+
+  AÇÕES (também GET, com query params):
+    /?endpoint=marcar_validacao&tel=...&decisao=VALIDADO|INVALIDADO&modo=AUTO|MANUAL
+      → marca o dropdown na aba certa. Trigger processarValidacoes (5min)
+        dispara voucher / mensagem.
+    /?endpoint=set_modo_campanha&tel=...&modo=AUTO|MANUAL  → v9.8
+    /?endpoint=set_default_modo&modo=AUTO|MANUAL           → v9.8
+
+v9.8 (18/06/2026): FEATURE MODO MANUAL/AUTO
+  • Toggle global "Default modo das próximas campanhas" no topo da aba
+  • Card de cada campanha com 4 estados:
+      - SEM DECISÃO → botões MANUAL / AUTO
+      - MANUAL → botões Validar/Invalidar + opção mudar pra AUTO
+      - AUTO (aguardando puxar) → mensagem informativa + mudar pra MANUAL
+      - AUTO (Bia rodando) → progresso X/Y + tempo restante, só visualização
+  • Progresso lido direto do Supabase (bia_disparos.respondeu_em)
+
+v9.9 (23/06/2026): FILTRO GLOBAL DE UNIDADE
+  • Filtro Todas / Mogi / Suzano movido pra ANTES dos cards de KPI
+  • Cards e lista de campanhas leem df já filtrado
+  • Estilo pill (consistente com aba Pendências)
+  • Estado persiste em session_state[_zapi_aguard_unidade_persist]
+
+v9.11 (30/06/2026): CONFIG TELEFONES DA RECEPÇÃO
+  • Expander no topo da aba pra editar recepcao_{mogi,suzano}_telefone
+  • Apps Script Filtro Webhook Bia v3.1+ lê esses valores a cada clique
+
+v9.12 (01/07/2026): ESTADO AUTO_TERMINADO
+  • Novo 5º estado nas campanhas AUTO: `auto_terminado`
+  • Ativa quando (disparados + skip_base + erros) >= total_contatos
+  • Card volta com botões ✅ Validar / ❌ Invalidar (igual MANUAL)
+  • Durante `auto_rodando`: mostra progresso + breakdown de respostas
+    (Positivas / Genéricas / Negativas / Sem resposta) em tempo real
+  • Substitui _get_progresso_campanhas_bia por _get_status_campanhas_auto
+    que retorna dict completo por campanha
 ==============================================================================
 """
 
@@ -17,11 +65,15 @@ TZ_SP = timezone(timedelta(hours=-3))
 
 
 # ============================================================================
-# CLIENTE HTTP
+# CLIENTE HTTP — cacheado, com timeout e fallback gracioso
 # ============================================================================
 
 @st.cache_data(ttl=30, show_spinner=False)
 def _zapi_get(endpoint: str, **params):
+    """
+    Chama um endpoint do Apps Script do Z-API.
+    Cache 30s. Timeout 15s. Se falhar, retorna {'_erro': '...'}.
+    """
     try:
         url = st.secrets["APPS_SCRIPT_URL_ZAPI"]
         token = st.secrets["APPS_SCRIPT_TOKEN_ZAPI"]
@@ -46,6 +98,10 @@ def _zapi_get(endpoint: str, **params):
 
 
 def _zapi_action(endpoint: str, **params):
+    """
+    Versão NÃO cacheada do _zapi_get, para AÇÕES (marcar_validacao, set_modo_campanha, etc).
+    Cache não tem cabimento aqui porque cada clique precisa chegar no Apps Script.
+    """
     try:
         url = st.secrets["APPS_SCRIPT_URL_ZAPI"]
         token = st.secrets["APPS_SCRIPT_TOKEN_ZAPI"]
@@ -63,6 +119,7 @@ def _zapi_action(endpoint: str, **params):
 
 
 def _mostrar_erro_e_parar(data, contexto=""):
+    """Helper: se data tem _erro, mostra alert e retorna True (caller deve return)."""
     if isinstance(data, dict) and data.get("_erro"):
         st.error(f"❌ {data['_erro']}" + (f" {contexto}" if contexto else ""))
         return True
@@ -74,6 +131,7 @@ def _mostrar_erro_e_parar(data, contexto=""):
 # ============================================================================
 
 def _parse_iso(s):
+    """ISO string (qualquer flavor) → datetime tz-aware em SP. None se vazio/inválido."""
     if not s:
         return None
     try:
@@ -86,6 +144,7 @@ def _parse_iso(s):
 
 
 def _humanizar_tempo(dt):
+    """Datetime → string tipo '4h', '2d 3h', '1 semana'. None se dt for None."""
     if dt is None:
         return "—"
     agora = datetime.now(TZ_SP)
@@ -107,6 +166,7 @@ def _humanizar_tempo(dt):
 
 
 def _classe_urgencia(dt):
+    """Datetime → string de urgência ('ok', 'atencao', 'urgente') por idade."""
     if dt is None:
         return "ok"
     agora = datetime.now(TZ_SP)
@@ -119,6 +179,7 @@ def _classe_urgencia(dt):
 
 
 def _formatar_telefone(tel):
+    """5511974869664 → +55 (11) 97486-9664"""
     s = str(tel).strip()
     if s.startswith("55") and len(s) == 13:
         return f"+55 ({s[2:4]}) {s[4:9]}-{s[9:]}"
@@ -126,11 +187,15 @@ def _formatar_telefone(tel):
 
 
 # ============================================================================
-# HELPERS MODO MANUAL/AUTO
+# v9.8 — HELPERS NOVOS (MODO MANUAL/AUTO)
 # ============================================================================
 
 @st.cache_resource
 def _get_supabase_zapi():
+    """
+    Cliente Supabase dedicado pro aba_zapi.py (segue padrão do
+    dashboard_maislaser.py: cached_resource, lê de st.secrets).
+    """
     url = st.secrets["SUPABASE_URL"]
     key = st.secrets["SUPABASE_KEY"]
     return create_client(url, key)
@@ -138,14 +203,23 @@ def _get_supabase_zapi():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _get_default_modo():
+    """
+    Lê o toggle global 'bia_default_modo_auto' do Apps Script.
+    Cache 60s — invalidado manualmente após _set_default_modo().
+    Retorna 'AUTO' ou 'MANUAL' (default 'MANUAL' se erro).
+    """
     data = _zapi_get("get_default_modo")
     if isinstance(data, dict) and data.get("_erro"):
-        return "MANUAL"
+        return "MANUAL"  # fallback seguro
     modo = str(data.get("modo", "MANUAL")).upper()
     return modo if modo in ("AUTO", "MANUAL") else "MANUAL"
 
 
 def _set_default_modo(modo):
+    """
+    Grava o toggle global no Apps Script + invalida o cache da leitura.
+    Retorna True se OK, False se erro.
+    """
     resp = _zapi_action("set_default_modo", modo=modo)
     if resp.get("_erro") or resp.get("erro"):
         st.error(f"❌ Falhou: {resp.get('_erro') or resp.get('erro')}")
@@ -156,6 +230,11 @@ def _set_default_modo(modo):
 
 @st.cache_data(ttl=30, show_spinner=False)
 def _get_progresso_campanhas_bia(campanha_ids_tuple):
+    """
+    LEGADO (v9.8-v9.11): Conta só respostas com respondeu_em NOT NULL.
+    Substituído por _get_status_campanhas_auto na v9.12 (dict completo).
+    Mantido aqui pra compat caso algum outro módulo referencie.
+    """
     if not campanha_ids_tuple:
         return {}
     try:
@@ -174,21 +253,107 @@ def _get_progresso_campanhas_bia(campanha_ids_tuple):
                 contagem[cid] = contagem.get(cid, 0) + 1
         return contagem
     except Exception as e:
+        # Falha silenciosa — UI mostra "—" no progresso
         st.toast(f"⚠️ Não consegui ler progresso Bia: {e}", icon="⚠️")
         return {}
 
 
+# ============================================================================
+# v9.12 — STATUS COMPLETO DAS CAMPANHAS AUTO
+# ============================================================================
+# Substitui _get_progresso_campanhas_bia. Retorna dict RICO com breakdown de
+# disparos e respostas, permitindo detectar estado "auto_terminado".
+#
+# Contadores retornados por campanha_id:
+#   • disparados     : status normal, disparado_em NOT NULL
+#   • skip_base      : status = SKIP_BASE (cliente já era da base)
+#   • erros          : status = ERRO / BLOQUEADO / ERRO_NUMERO_INVALIDO /
+#                       BLOQUEADO_PELO_INDICADO
+#   • positivas      : tipo_resposta IN (POSITIVA_BOTAO, POSITIVA_TEXTO)
+#   • genericas      : tipo_resposta = GENERICA (ex: "oi", "quem é")
+#   • negativas      : tipo_resposta = NEGATIVA
+#   • sem_resposta   : disparado mas respondeu_em IS NULL
+#
+# Cache 20s pra atualização quase em tempo real no dashboard.
+# ============================================================================
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _get_status_campanhas_auto(campanha_ids_tuple):
+    """Retorna dict {campanha_id: {disparados, skip_base, erros, positivas,
+    negativas, genericas, sem_resposta}} pra campanhas AUTO."""
+    if not campanha_ids_tuple:
+        return {}
+    try:
+        sb = _get_supabase_zapi()
+        result = (
+            sb.table("bia_disparos")
+            .select("campanha_id, status, disparado_em, respondeu_em, tipo_resposta")
+            .in_("campanha_id", list(campanha_ids_tuple))
+            .execute()
+        )
+        stats = {}
+        for row in result.data or []:
+            cid = row.get("campanha_id")
+            if not cid:
+                continue
+            if cid not in stats:
+                stats[cid] = {"disparados": 0, "skip_base": 0, "erros": 0,
+                              "positivas": 0, "negativas": 0, "genericas": 0,
+                              "sem_resposta": 0}
+            s = stats[cid]
+            status = (row.get("status") or "").upper()
+            tipo = (row.get("tipo_resposta") or "").upper()
+            disparado = row.get("disparado_em") is not None
+            respondeu = row.get("respondeu_em") is not None
+
+            if status == "SKIP_BASE":
+                s["skip_base"] += 1
+            elif status in ("ERRO", "BLOQUEADO", "ERRO_NUMERO_INVALIDO", "BLOQUEADO_PELO_INDICADO"):
+                s["erros"] += 1
+            elif disparado:
+                s["disparados"] += 1
+                if respondeu:
+                    if tipo in ("POSITIVA_BOTAO", "POSITIVA_TEXTO"):
+                        s["positivas"] += 1
+                    elif tipo == "NEGATIVA":
+                        s["negativas"] += 1
+                    elif tipo == "GENERICA":
+                        s["genericas"] += 1
+                else:
+                    s["sem_resposta"] += 1
+        return stats
+    except Exception as e:
+        st.toast(f"⚠️ Falha lendo status AUTO: {e}", icon="⚠️")
+        return {}
+
+
 def _meta_respostas(total_contatos):
+    """30% arredondado pra cima. Ex: 20 → 6, 24 → 8, 82 → 25."""
     import math
     return max(1, math.ceil(0.3 * int(total_contatos or 0)))
 
 
 # ============================================================================
-# CONFIG TELEFONES DA RECEPÇÃO
+# v9.9 (23/06/2026) — FILTRO GLOBAL DE UNIDADE (pill style)
+# ============================================================================
+# Antes: radio de unidade ficava DEPOIS dos cards de KPI, então os cards
+# mostravam dados de TODAS as unidades mesmo quando filtrava por Mogi/Suzano.
+# Agora: filtro vem ANTES dos cards, e cards/lista refletem a seleção.
+# Padrão visual igual ao da aba Pendências (botões pill com persist).
+# ============================================================================
+
+# ============================================================================
+# v9.11 (30/06/2026) — CONFIG TELEFONES DA RECEPÇÃO
+# ============================================================================
+# Edita configuracoes.recepcao_{mogi,suzano}_telefone via dashboard.
+# O Apps Script Filtro Webhook Bia v3.1 (_getTelefoneRecepcao) consulta esse
+# campo a cada clique de botão pra mandar o alerta pra recepção correta.
 # ============================================================================
 
 @st.cache_data(ttl=15, show_spinner=False)
 def _carregar_recepcao_telefones():
+    """Lê configuracoes.recepcao_{mogi,suzano}_telefone do Supabase.
+    Cache 15s — invalidado manualmente após _salvar_recepcao_telefones()."""
     try:
         sb = _get_supabase_zapi()
         result = (sb.table("configuracoes")
@@ -208,6 +373,7 @@ def _carregar_recepcao_telefones():
 
 
 def _salvar_recepcao_telefones(tel_mogi, tel_suzano):
+    """UPDATE configuracoes SET recepcao_*_telefone WHERE id=1. Só dígitos."""
     try:
         sb = _get_supabase_zapi()
         sb.table("configuracoes").update({
@@ -223,13 +389,18 @@ def _salvar_recepcao_telefones(tel_mogi, tel_suzano):
 
 
 def _so_digitos(s):
+    """Mantém só dígitos. '+55 (11) 99999-9999' → '5511999999999'."""
     if not s:
         return ""
     return "".join(ch for ch in str(s) if ch.isdigit())
 
 
 def _render_config_recepcao():
+    """Renderiza expander 'Telefones da recepção' no topo da aba aguardando.
+    Discreto — fica recolhido por padrão."""
     tel_mogi_atual, tel_suzano_atual = _carregar_recepcao_telefones()
+
+    # Status compacto pra mostrar mesmo recolhido
     status_mogi = f"✅ {tel_mogi_atual}" if tel_mogi_atual else "⚠️ não configurado"
     status_suzano = f"✅ {tel_suzano_atual}" if tel_suzano_atual else "⚠️ não configurado"
 
@@ -245,13 +416,21 @@ def _render_config_recepcao():
 
         col_m, col_s = st.columns(2)
         with col_m:
-            novo_mogi = st.text_input("📍 Mogi", value=tel_mogi_atual, key="cfg_recep_mogi",
-                                        placeholder="5511999999999",
-                                        help="Número com DDI + DDD, só dígitos. Ex: 5511976473948")
+            novo_mogi = st.text_input(
+                "📍 Mogi",
+                value=tel_mogi_atual,
+                key="cfg_recep_mogi",
+                placeholder="5511999999999",
+                help="Número com DDI + DDD, só dígitos. Ex: 5511976473948",
+            )
         with col_s:
-            novo_suzano = st.text_input("📍 Suzano", value=tel_suzano_atual, key="cfg_recep_suzano",
-                                          placeholder="5511999999999",
-                                          help="Número com DDI + DDD, só dígitos. Ex: 5511976473948")
+            novo_suzano = st.text_input(
+                "📍 Suzano",
+                value=tel_suzano_atual,
+                key="cfg_recep_suzano",
+                placeholder="5511999999999",
+                help="Número com DDI + DDD, só dígitos. Ex: 5511976473948",
+            )
 
         novo_mogi_clean = _so_digitos(novo_mogi)
         novo_suzano_clean = _so_digitos(novo_suzano)
@@ -259,9 +438,13 @@ def _render_config_recepcao():
 
         col_btn, col_info = st.columns([1, 3])
         with col_btn:
-            if st.button("💾 Salvar", key="cfg_recep_salvar",
-                         type="primary" if mudou else "secondary",
-                         disabled=not mudou, use_container_width=True):
+            if st.button(
+                "💾 Salvar",
+                key="cfg_recep_salvar",
+                type="primary" if mudou else "secondary",
+                disabled=not mudou,
+                use_container_width=True,
+            ):
                 if _salvar_recepcao_telefones(novo_mogi_clean, novo_suzano_clean):
                     st.toast("Telefones da recepção atualizados", icon="✅")
                     st.rerun()
@@ -271,6 +454,8 @@ def _render_config_recepcao():
 
 
 def _filtro_unidade_zapi(key_persist="_zapi_aguard_unidade_persist"):
+    """Renderiza filtro pill global de unidade no topo da tela.
+    Retorna 'Todas' | 'Mogi' | 'Suzano' (persistido em session_state)."""
     if key_persist not in st.session_state:
         st.session_state[key_persist] = "Todas"
 
@@ -290,9 +475,12 @@ def _filtro_unidade_zapi(key_persist="_zapi_aguard_unidade_persist"):
         (c3, "📍 Suzano", "Suzano"),
     ]:
         with col:
-            if st.button(label, key=f"zapi_und_{key_persist}_{valor}",
-                         type="primary" if atual == valor else "secondary",
-                         use_container_width=True):
+            if st.button(
+                label,
+                key=f"zapi_und_{key_persist}_{valor}",
+                type="primary" if atual == valor else "secondary",
+                use_container_width=True,
+            ):
                 st.session_state[key_persist] = valor
                 st.rerun()
 
@@ -300,6 +488,8 @@ def _filtro_unidade_zapi(key_persist="_zapi_aguard_unidade_persist"):
 
 
 def _aplicar_filtro_unidade_df(df, unidade_sel, coluna="unidade"):
+    """Filtra df por unidade. 'Todas' retorna df inteiro.
+    Match case-insensitive com contains (pega 'mogi', 'Mogi', 'Mogi das Cruzes')."""
     if df is None or df.empty or unidade_sel == "Todas":
         return df
     if coluna not in df.columns:
@@ -309,7 +499,7 @@ def _aplicar_filtro_unidade_df(df, unidade_sel, coluna="unidade"):
 
 
 # ============================================================================
-# TELA: ⏳ AGUARDANDO VALIDAÇÃO
+# TELA: ⏳ AGUARDANDO VALIDAÇÃO (v9.8 — feature MODO MANUAL/AUTO)
 # ============================================================================
 
 def tela_zapi_aguardando_validacao():
@@ -321,10 +511,15 @@ def tela_zapi_aguardando_validacao():
         "Cada clique vira handoff direto pra recepção via Z-API."
     )
 
+    # ───────────────────────────────────────────────────────────────────
+    # TOGGLE GLOBAL — Default das próximas campanhas
+    # ───────────────────────────────────────────────────────────────────
     modo_default_atual = _get_default_modo()
 
     with st.container():
-        st.markdown("""<style>
+        st.markdown(
+            """
+            <style>
             .toggle-global-box {
                 background: linear-gradient(135deg, #f0f9ff 0%, #ecfeff 100%);
                 border: 1px solid #bae6fd;
@@ -332,7 +527,10 @@ def tela_zapi_aguardando_validacao():
                 padding: 14px 18px;
                 margin-bottom: 16px;
             }
-            </style>""", unsafe_allow_html=True)
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
         st.markdown('<div class="toggle-global-box">', unsafe_allow_html=True)
 
         col_lbl, col_radio, _ = st.columns([3, 4, 1])
@@ -360,6 +558,9 @@ def tela_zapi_aguardando_validacao():
 
         st.markdown("</div>", unsafe_allow_html=True)
 
+    # ───────────────────────────────────────────────────────────────────
+    # CARREGA DADOS DAS CAMPANHAS
+    # ───────────────────────────────────────────────────────────────────
     data = _zapi_get("validacao")
     if _mostrar_erro_e_parar(data, "(carregando pendências)"):
         return
@@ -378,41 +579,72 @@ def tela_zapi_aguardando_validacao():
     df["modo"] = df.get("modo", pd.Series([""] * len(df))).fillna("").astype(str).str.upper().str.strip()
     df["validacao_marcada"] = df["validacao_marcada"].fillna("").astype(str).str.upper().str.strip()
 
+    # ───────────────────────────────────────────────────────────────────
+    # v9.11: CONFIG TELEFONES DA RECEPÇÃO — antes do filtro de unidade
+    # ───────────────────────────────────────────────────────────────────
     _render_config_recepcao()
 
+    # ───────────────────────────────────────────────────────────────────
+    # v9.9: FILTRO DE UNIDADE GLOBAL — antes dos cards
+    # ───────────────────────────────────────────────────────────────────
     unid_filtro = _filtro_unidade_zapi()
     st.markdown(
         '<hr style="margin: 12px 0 18px 0; border: none; border-top: 1px solid #E5E7EB;">',
         unsafe_allow_html=True,
     )
 
+    # Aplica filtro de unidade ANTES de tudo (cards leem df já filtrado)
     df = _aplicar_filtro_unidade_df(df, unid_filtro, coluna="unidade")
 
     if df.empty:
         st.info(f"🎉 Nada pendente em **{unid_filtro}**." if unid_filtro != "Todas" else "Nada pendente.")
         return
 
+    # ───────────────────────────────────────────────────────────────────
+    # v9.12: STATUS COMPLETO DAS AUTO (Supabase) — só pra AUTO que já foi puxada
+    # Substitui _get_progresso_campanhas_bia por _get_status_campanhas_auto
+    # ───────────────────────────────────────────────────────────────────
     camp_ids_bia = tuple(
         df[(df["modo"] == "AUTO") & df["bia_puxou_em_dt"].notna()]["campanha_id"].dropna().tolist()
     )
-    progresso_por_camp = _get_progresso_campanhas_bia(camp_ids_bia)
+    stats_por_camp = _get_status_campanhas_auto(camp_ids_bia)
 
+    # ───────────────────────────────────────────────────────────────────
+    # CARDS DE RESUMO — calculados em cima do df JÁ filtrado por unidade
+    # ───────────────────────────────────────────────────────────────────
     _marcadas = df["validacao_marcada"].isin(["VALIDADO", "INVALIDADO", "AUTO_VALIDADO_BIA", "AUTO_INVALIDADO_BIA"])
     qtd_processando = int(_marcadas.sum())
     df_ativas = df[~_marcadas]
 
+    # Subdivisão por modo (entre as ativas)
     qtd_sem_modo = int((df_ativas["modo"] == "").sum())
     qtd_manual = int((df_ativas["modo"] == "MANUAL").sum())
     qtd_auto_puxado = int(((df_ativas["modo"] == "AUTO") & df_ativas["bia_puxou_em_dt"].notna()).sum())
+    qtd_auto_aguardando = int(((df_ativas["modo"] == "AUTO") & df_ativas["bia_puxou_em_dt"].isna()).sum())
 
     col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-    col_m1.metric("⚠️ Sem decisão", qtd_sem_modo, help="Coordenadora ainda não escolheu MANUAL ou AUTO")
-    col_m2.metric("👤 Manual", qtd_manual, help="Aguardando captadora ligar pros indicados")
-    col_m3.metric("🤖 AUTO (rodando)", qtd_auto_puxado, help="Disparador AUTO já puxou o lote, contando cliques recebidos")
-    col_m4.metric("⏳ Em processamento", qtd_processando, help="Já decididas, aguardando trigger 5min disparar voucher/mensagem")
+    col_m1.metric(
+        "⚠️ Sem decisão", qtd_sem_modo,
+        help="Coordenadora ainda não escolheu MANUAL ou AUTO"
+    )
+    col_m2.metric(
+        "👤 Manual", qtd_manual,
+        help="Aguardando captadora ligar pros indicados"
+    )
+    col_m3.metric(
+        "🤖 AUTO (rodando)", qtd_auto_puxado,
+        help="Disparador AUTO já puxou o lote, contando cliques recebidos"
+    )
+    col_m4.metric(
+        "⏳ Em processamento", qtd_processando,
+        help="Já decididas (manual ou AUTO), aguardando trigger 5min disparar voucher/mensagem"
+    )
 
     st.markdown("---")
 
+    # ───────────────────────────────────────────────────────────────────
+    # BANNER DE "PROCESSANDO" (já marcadas, aguardando trigger 5min)
+    # ───────────────────────────────────────────────────────────────────
     df_proc = df[df["validacao_marcada"].isin(["VALIDADO", "INVALIDADO", "AUTO_VALIDADO_BIA", "AUTO_INVALIDADO_BIA"])]
     if not df_proc.empty:
         nomes_proc = ", ".join(df_proc["nome"].tolist()[:5])
@@ -428,7 +660,10 @@ def tela_zapi_aguardando_validacao():
 
     st.markdown(f"### {len(df_ativas)} campanha(s) na fila")
 
-    st.markdown("""<style>
+    # CSS local pros badges e cards
+    st.markdown(
+        """
+    <style>
     .urg-urgente { background: #fee2e2; color: #991b1b; padding: 2px 10px; border-radius: 12px; font-weight: 700; font-size: 12px; }
     .urg-atencao { background: #fef3c7; color: #92400e; padding: 2px 10px; border-radius: 12px; font-weight: 700; font-size: 12px; }
     .urg-ok      { background: #dcfce7; color: #166534; padding: 2px 10px; border-radius: 12px; font-weight: 700; font-size: 12px; }
@@ -438,30 +673,42 @@ def tela_zapi_aguardando_validacao():
     .modo-manual { background: #fef3c7; color: #92400e; padding: 2px 10px; border-radius: 12px; font-weight: 700; font-size: 12px; }
     .modo-auto-rodando { background: #dbeafe; color: #1e40af; padding: 2px 10px; border-radius: 12px; font-weight: 700; font-size: 12px; }
     .modo-auto-aguarda { background: #e0e7ff; color: #3730a3; padding: 2px 10px; border-radius: 12px; font-weight: 700; font-size: 12px; }
+    .modo-auto-terminado { background: #dcfce7; color: #166534; padding: 2px 10px; border-radius: 12px; font-weight: 700; font-size: 12px; }
     .modo-vazio { background: #fee2e2; color: #991b1b; padding: 2px 10px; border-radius: 12px; font-weight: 700; font-size: 12px; }
     .progress-bg { background: #e5e7eb; border-radius: 8px; height: 22px; overflow: hidden; margin-top: 4px; }
     .progress-fill { background: linear-gradient(90deg, #5BC0BE 0%, #3D9991 100%); height: 100%; border-radius: 8px; transition: width 0.6s ease; }
     .card-acao { background: #fafafa; border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px; margin-top: 8px; }
-    </style>""", unsafe_allow_html=True)
+    </style>
+    """,
+        unsafe_allow_html=True,
+    )
 
+    # Ordena: sem decisão primeiro (mais urgente), depois por tempo parado
     def _ordem_prioridade(row):
         if row["modo"] == "":
-            return (0, -row["horas_parado"])
+            return (0, -row["horas_parado"])  # sem decisão, mais antigos primeiro
         if row["modo"] == "AUTO" and row["bia_puxou_em_dt"] is not None:
-            return (1, -row["horas_parado"])
+            return (1, -row["horas_parado"])  # AUTO rodando/terminado
         if row["modo"] == "AUTO":
-            return (2, -row["horas_parado"])
-        return (3, -row["horas_parado"])
+            return (2, -row["horas_parado"])  # AUTO aguardando puxar
+        return (3, -row["horas_parado"])  # MANUAL
 
     df_ativas = df_ativas.assign(
         _prio=df_ativas.apply(_ordem_prioridade, axis=1)
     ).sort_values("_prio").reset_index(drop=True)
 
+    # ───────────────────────────────────────────────────────────────────
+    # RENDERIZA CADA CARD
+    # ───────────────────────────────────────────────────────────────────
     for _, row in df_ativas.iterrows():
-        _renderizar_card_campanha(row, progresso_por_camp, modo_default_atual)
+        _renderizar_card_campanha(row, stats_por_camp, modo_default_atual)
 
 
-def _renderizar_card_campanha(row, progresso_por_camp, modo_default_atual):
+# ============================================================================
+# RENDERIZA UM CARD INDIVIDUAL DE CAMPANHA
+# ============================================================================
+
+def _renderizar_card_campanha(row, stats_por_camp, modo_default_atual):
     tel = row["telefone"]
     nome = row["nome"] or "(sem nome)"
     func = row["funcionaria"] or "—"
@@ -475,21 +722,32 @@ def _renderizar_card_campanha(row, progresso_por_camp, modo_default_atual):
     modo_atual = row["modo"]
     bia_puxou = row["bia_puxou_em_dt"]
 
+    # v9.12: stats vem do dict global de status por campanha
+    stats = stats_por_camp.get(camp_id, {}) if camp_id else {}
+
     urg_label = {"urgente": "🔴 URGENTE", "atencao": "🟡 ATENÇÃO", "ok": "🟢 OK"}[urg]
     priv_label = {"ANONIMO": "🤫 anônima", "IDENTIFICADO": "✨ identificada"}.get(priv, "— sem privacidade")
     priv_class = {"ANONIMO": "priv-anonimo", "IDENTIFICADO": "priv-identificado"}.get(priv, "priv-vazia")
 
+    # Detecta estado ANTES de decidir badge (v9.12)
+    estado = _detectar_estado_campanha(modo_atual, bia_puxou, contatos, stats)
+
+    # Badge de modo (agora com estado auto_terminado)
     if modo_atual == "":
         modo_html = '<span class="modo-vazio">⚠️ SEM DECISÃO</span>'
     elif modo_atual == "MANUAL":
         modo_html = '<span class="modo-manual">👤 MANUAL</span>'
-    elif modo_atual == "AUTO" and bia_puxou is not None:
+    elif estado == "auto_terminado":
+        modo_html = '<span class="modo-auto-terminado">✅ AUTO · TERMINADO</span>'
+    elif estado == "auto_rodando":
         modo_html = '<span class="modo-auto-rodando">🤖 AUTO · RODANDO</span>'
     else:
         modo_html = '<span class="modo-auto-aguarda">🤖 AUTO · AGUARDANDO PUXAR</span>'
 
     with st.container():
-        st.markdown(f"""
+        # Header do card
+        st.markdown(
+            f"""
             <div style="padding: 12px 14px; border: 1px solid #e5e7eb; border-radius: 10px; margin-bottom: 8px;">
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
                 <div>
@@ -505,27 +763,51 @@ def _renderizar_card_campanha(row, progresso_por_camp, modo_default_atual):
                 📨 {contatos} contatos
               </div>
             </div>
-            """, unsafe_allow_html=True)
+            """,
+            unsafe_allow_html=True,
+        )
 
-        estado = _detectar_estado_campanha(modo_atual, bia_puxou)
-
+        # ───────────────────────────────────────────────────────────────
+        # AÇÕES (variam conforme estado)
+        # ───────────────────────────────────────────────────────────────
         if estado == "sem_decisao":
             _render_acao_sem_decisao(camp_id, tel, nome, modo_default_atual)
+
         elif estado == "manual":
             _render_acao_manual(camp_id, tel, nome, bia_puxou)
+
         elif estado == "auto_aguardando":
             _render_acao_auto_aguardando(camp_id, tel, nome)
-        elif estado == "auto_rodando":
-            _render_acao_auto_rodando(camp_id, contatos, bia_puxou, progresso_por_camp)
 
-        ver_contatos = st.toggle("👁️ Ver os 20 contatos enviados", key=f"toggle_ver_{camp_id}")
+        elif estado == "auto_rodando":
+            _render_acao_auto_rodando(camp_id, contatos, bia_puxou, stats)
+
+        elif estado == "auto_terminado":
+            _render_acao_auto_terminado(camp_id, tel, nome, contatos, bia_puxou, stats)
+
+        # ───────────────────────────────────────────────────────────────
+        # VER CONTATOS (toggle pra todos os estados)
+        # ───────────────────────────────────────────────────────────────
+        ver_contatos = st.toggle(
+            "👁️ Ver os 20 contatos enviados",
+            key=f"toggle_ver_{camp_id}",
+        )
         if ver_contatos:
             _render_lista_contatos(camp_id, nome)
 
-        st.markdown("")
+        st.markdown("")  # respiro entre cards
 
 
-def _detectar_estado_campanha(modo, bia_puxou_dt):
+# ============================================================================
+# HELPERS DE ESTADO + RENDERIZAÇÃO DE AÇÕES POR ESTADO
+# ============================================================================
+
+def _detectar_estado_campanha(modo, bia_puxou_dt, total_contatos=0, stats=None):
+    """Retorna: 'sem_decisao' | 'manual' | 'auto_aguardando' | 'auto_rodando' | 'auto_terminado'
+
+    v9.12: adicionado estado 'auto_terminado' quando processados >= total.
+    Processados = disparados + skip_base + erros (tudo que já foi tentado).
+    """
     if modo == "":
         return "sem_decisao"
     if modo == "MANUAL":
@@ -533,34 +815,54 @@ def _detectar_estado_campanha(modo, bia_puxou_dt):
     if modo == "AUTO" and bia_puxou_dt is None:
         return "auto_aguardando"
     if modo == "AUTO" and bia_puxou_dt is not None:
+        # v9.12: Checa se terminou (total processado >= contatos)
+        if stats:
+            processados = (stats.get("disparados", 0) +
+                           stats.get("skip_base", 0) +
+                           stats.get("erros", 0))
+            if total_contatos > 0 and processados >= total_contatos:
+                return "auto_terminado"
         return "auto_rodando"
-    return "sem_decisao"
+    return "sem_decisao"  # fallback
 
 
 def _render_acao_sem_decisao(camp_id, tel, nome, modo_default_atual):
+    """Estado: campanha nova, coordenadora precisa escolher MODO."""
     sugestao = "AUTO" if modo_default_atual == "AUTO" else "MANUAL"
 
-    st.markdown(f"""
+    st.markdown(
+        f"""
         <div class="card-acao">
         <strong>⚠️ Coordenadora precisa escolher o modo:</strong>
         <span style="color: #6b7280; font-size: 12px;">  (default global: <strong>{sugestao}</strong>)</span>
         </div>
-        """, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
 
     col_m, col_a, _ = st.columns([1.2, 1.2, 2])
     with col_m:
-        if st.button("👤 MANUAL (captadora liga)", key=f"set_manual_{camp_id}",
-                     use_container_width=True,
-                     help="Captadora liga pros indicados pra validar. Você aperta Validar/Invalidar depois."):
+        if st.button(
+            "👤 MANUAL (captadora liga)",
+            key=f"set_manual_{camp_id}",
+            use_container_width=True,
+            help="Captadora liga pros indicados pra validar. Você aperta Validar/Invalidar depois.",
+        ):
             _executar_set_modo(tel, "MANUAL", nome)
     with col_a:
-        if st.button("🤖 AUTO (Disparador AUTO)", key=f"set_auto_{camp_id}",
-                     type="primary", use_container_width=True,
-                     help="Disparador AUTO dispara templates pros 20 indicados (1/min)."):
+        if st.button(
+            "🤖 AUTO (Disparador AUTO)",
+            key=f"set_auto_{camp_id}",
+            type="primary",
+            use_container_width=True,
+            help="Disparador AUTO dispara templates pros 20 indicados (1/min). Cada clique vira handoff pra recepção via Z-API.",
+        ):
             _executar_set_modo(tel, "AUTO", nome)
 
 
 def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
+    """Estado: MANUAL clássico — captadora liga, coordenadora aperta Validar/Invalidar."""
+
     st.markdown(
         '<div class="card-acao"><strong>👤 Modo MANUAL:</strong> '
         'captadora liga pros indicados. Após contato, aperte abaixo:</div>',
@@ -569,24 +871,39 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
 
     col_a, col_b, col_c = st.columns([1, 1, 1])
     with col_a:
-        btn_validar = st.button("✅ Validar", key=f"btn_val_{camp_id}",
-                                 use_container_width=True,
-                                 help="Marca VALIDADO. Voucher dispara automático em até 5min.")
+        btn_validar = st.button(
+            "✅ Validar",
+            key=f"btn_val_{camp_id}",
+            use_container_width=True,
+            help="Marca VALIDADO. Voucher dispara automático em até 5min.",
+        )
     with col_b:
-        btn_invalidar = st.button("❌ Invalidar", key=f"btn_inv_{camp_id}",
-                                   use_container_width=True,
-                                   help="Marca INVALIDADO. Mensagem de invalidação dispara em até 5min.")
+        btn_invalidar = st.button(
+            "❌ Invalidar",
+            key=f"btn_inv_{camp_id}",
+            use_container_width=True,
+            help="Marca INVALIDADO. Mensagem de invalidação dispara em até 5min.",
+        )
     with col_c:
+        # Mudar pra AUTO só se Bia ainda não puxou
         if bia_puxou_dt is None:
-            if st.button("↩️ Mudar pra AUTO", key=f"to_auto_{camp_id}",
-                         use_container_width=True,
-                         help="Cancela MANUAL. Disparador AUTO vai trabalhar este lote."):
+            if st.button(
+                "↩️ Mudar pra AUTO",
+                key=f"to_auto_{camp_id}",
+                use_container_width=True,
+                help="Cancela MANUAL. Disparador AUTO vai trabalhar este lote.",
+            ):
                 _executar_set_modo(tel, "AUTO", nome)
         else:
-            st.button("↩️ Mudar pra AUTO", key=f"to_auto_disabled_{camp_id}",
-                      disabled=True, use_container_width=True,
-                      help="Não dá mais — Disparador AUTO já trabalhou esse lote.")
+            st.button(
+                "↩️ Mudar pra AUTO",
+                key=f"to_auto_disabled_{camp_id}",
+                disabled=True,
+                use_container_width=True,
+                help="Não dá mais — Disparador AUTO já trabalhou esse lote.",
+            )
 
+    # Confirmação dupla pra Validar/Invalidar
     if btn_validar or btn_invalidar:
         decisao = "VALIDADO" if btn_validar else "INVALIDADO"
         st.session_state[f"confirm_pending_{camp_id}"] = decisao
@@ -596,8 +913,11 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
         cor_aviso = "#dc2626" if decisao == "VALIDADO" else "#f59e0b"
         msg_aviso = (
             f"⚠️ Confirmar **{decisao}** pra **{nome}**? "
-            + ("Voucher de Revitalização Facial vai disparar." if decisao == "VALIDADO"
-               else "Mensagem de invalidação vai disparar.")
+            + (
+                "Voucher de Revitalização Facial vai disparar."
+                if decisao == "VALIDADO"
+                else "Mensagem de invalidação vai disparar."
+            )
         )
         st.markdown(
             f"<div style='padding: 10px; background: #fff7ed; border-left: 4px solid {cor_aviso}; border-radius: 6px; margin: 8px 0;'>{msg_aviso}</div>",
@@ -605,10 +925,16 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
         )
         col_sim, col_nao = st.columns([1, 1])
         with col_sim:
-            confirmar = st.button("✔️ Confirmar", key=f"confirm_{camp_id}",
-                                   type="primary", use_container_width=True)
+            confirmar = st.button(
+                "✔️ Confirmar",
+                key=f"confirm_{camp_id}",
+                type="primary",
+                use_container_width=True,
+            )
         with col_nao:
-            cancelar = st.button("✖️ Cancelar", key=f"cancel_{camp_id}", use_container_width=True)
+            cancelar = st.button(
+                "✖️ Cancelar", key=f"cancel_{camp_id}", use_container_width=True
+            )
 
         if cancelar:
             st.session_state.pop(f"confirm_pending_{camp_id}", None)
@@ -616,6 +942,7 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
 
         if confirmar:
             with st.spinner(f"Marcando {decisao}..."):
+                # Modo MANUAL explícito (mesmo sendo default no Apps Script)
                 resp = _zapi_action("marcar_validacao", tel=tel, decisao=decisao, modo="MANUAL")
             if resp.get("_erro") or resp.get("erro"):
                 st.error(f"❌ Falhou: {resp.get('_erro') or resp.get('erro')}")
@@ -624,7 +951,9 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
                 st.session_state.pop(f"confirm_pending_{camp_id}", None)
                 _zapi_get.clear()
             else:
-                st.success(f"✅ {decisao} marcado! Trigger vai processar em até 5min.")
+                st.success(
+                    f"✅ {decisao} marcado! Trigger vai processar em até 5min e disparar a mensagem pra cliente."
+                )
                 st.session_state.pop(f"confirm_pending_{camp_id}", None)
                 _zapi_get.clear()
                 st.balloons()
@@ -632,6 +961,7 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
 
 
 def _render_acao_auto_aguardando(camp_id, tel, nome):
+    """Estado: MODO=AUTO mas Disparador ainda não puxou o lote."""
     st.markdown(
         '<div class="card-acao">'
         '<strong>🤖 Modo AUTO selecionado.</strong> '
@@ -645,19 +975,38 @@ def _render_acao_auto_aguardando(camp_id, tel, nome):
 
     col_a, _ = st.columns([1.5, 3])
     with col_a:
-        if st.button("↩️ Mudar pra MANUAL", key=f"to_manual_{camp_id}",
-                     use_container_width=True,
-                     help="Cancela AUTO. Captadora vai ter que ligar manualmente."):
+        if st.button(
+            "↩️ Mudar pra MANUAL",
+            key=f"to_manual_{camp_id}",
+            use_container_width=True,
+            help="Cancela AUTO. Captadora vai ter que ligar manualmente.",
+        ):
             _executar_set_modo(tel, "MANUAL", nome)
 
 
-def _render_acao_auto_rodando(camp_id, contatos, bia_puxou_dt, progresso_por_camp):
-    cliques = progresso_por_camp.get(camp_id, 0)
-    pct = int(min(100, (cliques / contatos * 100) if contatos > 0 else 0))
+def _render_acao_auto_rodando(camp_id, contatos, bia_puxou_dt, stats):
+    """Estado: MODO=AUTO, Disparador já puxou mas ainda não terminou os disparos.
+    Mostra progresso em tempo real + breakdown das respostas.
+
+    v9.12 (01/07/2026): mostra disparados/skip/erros + positivas/genericas/
+    negativas/sem_resposta. Substitui progresso simples da v3.0.
+    """
     agora = datetime.now(TZ_SP)
     horas_rodando = (agora - bia_puxou_dt).total_seconds() / 3600
 
-    st.markdown(f"""
+    disparados = stats.get("disparados", 0)
+    skip = stats.get("skip_base", 0)
+    erros = stats.get("erros", 0)
+    processados = disparados + skip + erros
+    pct = int(min(100, (processados / contatos * 100) if contatos > 0 else 0))
+
+    pos = stats.get("positivas", 0)
+    gen = stats.get("genericas", 0)
+    neg = stats.get("negativas", 0)
+    sem = stats.get("sem_resposta", 0)
+
+    st.markdown(
+        f"""
         <div class="card-acao">
         <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
             <div>
@@ -668,20 +1017,174 @@ def _render_acao_auto_rodando(camp_id, contatos, bia_puxou_dt, progresso_por_cam
             </div>
         </div>
         <div style="margin-top: 8px;">
-            💬 <strong>Cliques recebidos:</strong> {cliques} / {contatos} ({pct}%)
+            📤 <strong>Processados:</strong> {processados}/{contatos} ({pct}%)
             <div class="progress-bg">
                 <div class="progress-fill" style="width: {pct}%;"></div>
             </div>
+            <div style="font-size: 12px; color: #6b7280; margin-top: 4px;">
+                Disparados: <strong>{disparados}</strong> ·
+                🚫 SKIP base: <strong>{skip}</strong> ·
+                ⚠️ Erros: <strong>{erros}</strong>
+            </div>
+        </div>
+        <div style="margin-top: 10px; font-size: 13px;">
+            ✅ Positivas: <strong>{pos}</strong> ·
+            💬 Genéricas: <strong>{gen}</strong> ·
+            ❌ Negativas: <strong>{neg}</strong> ·
+            💤 Sem resposta: <strong>{sem}</strong>
         </div>
         <div style="margin-top: 10px; font-size: 12px; color: #6b7280;">
             ℹ️ Cada clique de botão (AGENDAR / SABER MAIS) gera alerta automático
-            pra recepção via Z-API. Coordenadora não precisa fazer nada aqui.
+            pra recepção via Z-API. Quando terminar os disparos, botões
+            <strong>Validar/Invalidar</strong> aparecem aqui pra coordenadora
+            decidir sobre o voucher da cliente-mãe.
         </div>
         </div>
-        """, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
 
+
+def _render_acao_auto_terminado(camp_id, tel, nome, contatos, bia_puxou_dt, stats):
+    """Estado: AUTO terminou os disparos (processados >= total_contatos).
+    Mostra resumo final + botões ✅ Validar / ❌ Invalidar pra coordenadora
+    decidir sobre o voucher da cliente-mãe.
+
+    v9.12 (01/07/2026): novo estado. Antes não existia — coordenadora ficava
+    sem ação depois que Disparador terminava (mesmo com voucher pendente).
+    """
+    agora = datetime.now(TZ_SP)
+    horas_rodando = (agora - bia_puxou_dt).total_seconds() / 3600
+
+    disparados = stats.get("disparados", 0)
+    skip = stats.get("skip_base", 0)
+    erros = stats.get("erros", 0)
+    pos = stats.get("positivas", 0)
+    gen = stats.get("genericas", 0)
+    neg = stats.get("negativas", 0)
+    sem = stats.get("sem_resposta", 0)
+
+    # Card verde-clarinho pra deixar óbvio que é o momento de decidir
+    st.markdown(
+        f"""
+        <div class="card-acao" style="background: #f0fdf4; border-color: #86efac;">
+        <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+            <div>
+                ✅ <strong>Disparador AUTO terminou</strong>
+                <span style="color: #6b7280; font-size: 12px;">(rodou {horas_rodando:.1f}h)</span>
+            </div>
+            <div style="color: #6b7280; font-size: 12px;">
+                {contatos} indicados
+            </div>
+        </div>
+        <div style="margin-top: 6px; font-size: 12px; color: #6b7280;">
+            📤 Disparados: <strong>{disparados}</strong> ·
+            🚫 SKIP base: <strong>{skip}</strong> ·
+            ⚠️ Erros: <strong>{erros}</strong>
+        </div>
+        <div style="margin-top: 8px; font-size: 13px;">
+            ✅ Positivas: <strong>{pos}</strong> ·
+            💬 Genéricas: <strong>{gen}</strong> ·
+            ❌ Negativas: <strong>{neg}</strong> ·
+            💤 Sem resposta: <strong>{sem}</strong>
+        </div>
+        <div style="margin-top: 10px;">
+            <strong>👉 Coordenadora decide agora sobre o voucher da cliente:</strong>
+        </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col_a, col_b = st.columns([1, 1])
+    with col_a:
+        btn_validar = st.button(
+            "✅ Validar (libera voucher)",
+            key=f"auto_val_{camp_id}",
+            type="primary",
+            use_container_width=True,
+            help="Marca VALIDADO. Voucher de Revitalização Facial dispara em até 5min.",
+        )
+    with col_b:
+        btn_invalidar = st.button(
+            "❌ Invalidar",
+            key=f"auto_inv_{camp_id}",
+            use_container_width=True,
+            help="Marca INVALIDADO. Mensagem de invalidação dispara em até 5min.",
+        )
+
+    if btn_validar or btn_invalidar:
+        decisao = "VALIDADO" if btn_validar else "INVALIDADO"
+        st.session_state[f"confirm_auto_{camp_id}"] = decisao
+
+    if st.session_state.get(f"confirm_auto_{camp_id}"):
+        decisao = st.session_state[f"confirm_auto_{camp_id}"]
+        cor_aviso = "#dc2626" if decisao == "VALIDADO" else "#f59e0b"
+        msg_aviso = (
+            f"⚠️ Confirmar **{decisao}** pra **{nome}**? "
+            + (
+                "Voucher de Revitalização Facial vai disparar."
+                if decisao == "VALIDADO"
+                else "Mensagem de invalidação vai disparar."
+            )
+        )
+        st.markdown(
+            f"<div style='padding: 10px; background: #fff7ed; border-left: 4px solid {cor_aviso}; border-radius: 6px; margin: 8px 0;'>{msg_aviso}</div>",
+            unsafe_allow_html=True,
+        )
+        col_sim, col_nao = st.columns([1, 1])
+        with col_sim:
+            confirmar = st.button(
+                "✔️ Confirmar",
+                key=f"confirm_auto_{camp_id}_ok",
+                type="primary",
+                use_container_width=True,
+            )
+        with col_nao:
+            cancelar = st.button(
+                "✖️ Cancelar",
+                key=f"cancel_auto_{camp_id}",
+                use_container_width=True,
+            )
+
+        if cancelar:
+            st.session_state.pop(f"confirm_auto_{camp_id}", None)
+            st.rerun()
+
+        if confirmar:
+            with st.spinner(f"Marcando {decisao}..."):
+                # Modo AUTO — deixa o Apps Script saber que veio do fluxo AUTO
+                resp = _zapi_action("marcar_validacao", tel=tel, decisao=decisao, modo="AUTO")
+            if resp.get("_erro") or resp.get("erro"):
+                st.error(f"❌ Falhou: {resp.get('_erro') or resp.get('erro')}")
+            elif resp.get("ja_marcado"):
+                st.warning(f"ℹ️ Já estava marcado como {decisao} (alguém adiantou).")
+                st.session_state.pop(f"confirm_auto_{camp_id}", None)
+                _zapi_get.clear()
+            else:
+                st.success(
+                    f"✅ {decisao} marcado! Trigger vai processar em até 5min e disparar a mensagem pra cliente."
+                )
+                st.session_state.pop(f"confirm_auto_{camp_id}", None)
+                _zapi_get.clear()
+                _get_status_campanhas_auto.clear()
+                st.balloons()
+            st.rerun()
+
+
+# ============================================================================
+# AÇÕES AUXILIARES
+# ============================================================================
 
 def _executar_set_modo(tel, modo, nome):
+    """
+    Chama set_modo_campanha no Apps Script + trata resposta + rerun.
+
+    v3.0 (30/06/2026): removida chamada ao webhook n8n (Railway morreu na
+    demolição). Agora o cron `puxarLotesAuto` do Apps Script Filtro Webhook
+    Bia (10min) puxa lotes em AUTO automaticamente e o `dispararProximoDaFila`
+    (1min) dispara templates. Coordenadora só marca o modo aqui.
+    """
     with st.spinner(f"Definindo modo {modo} pra {nome}..."):
         resp = _zapi_action("set_modo_campanha", tel=tel, modo=modo)
 
@@ -690,16 +1193,20 @@ def _executar_set_modo(tel, modo, nome):
         return
 
     if modo == "AUTO":
-        st.toast(f"🤖 AUTO marcado pra {nome}. Disparador puxa em até 10min.", icon="🚀")
+        st.toast(
+            f"🤖 AUTO marcado pra {nome}. Disparador puxa em até 10min, depois envia 1 template/min.",
+            icon="🚀",
+        )
     else:
         st.toast(f"Modo {modo} aplicado pra {nome}", icon="✅")
 
     _zapi_get.clear()
-    _get_progresso_campanhas_bia.clear()
+    _get_status_campanhas_auto.clear()
     st.rerun()
 
 
 def _render_lista_contatos(camp_id, nome):
+    """Bloco expansível com os 20 contatos da campanha."""
     with st.spinner(f"Carregando contatos da {nome}..."):
         contatos_data = _zapi_get("contatos_cliente", campanha_id=camp_id)
     if _mostrar_erro_e_parar(contatos_data, "(carregando contatos)"):
@@ -722,14 +1229,30 @@ def _render_lista_contatos(camp_id, nome):
 # ============================================================================
 # TELA: 🏆 RANKING FUNCIONÁRIAS
 # ============================================================================
+# Lê do endpoint funcionarias_real (Apps Script v9.3) que calcula em tempo real
+# a partir de CLIENTES + CLIENTES_ARQUIVO + INDICACOES + INDICACOES_ARQUIVO,
+# normalizando lowercase (case-insensitive) e filtrando 'teste'.
+#
+# Critério "trouxe cliente" = coluna DATA BATEU META preenchida.
+# A aba FUNCIONARIAS NÃO é usada aqui (cálculo dela puxa errado por homônimas
+# e ignora arquivados).
+# ============================================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _zapi_get_ranking(data_inicio: str = "", data_fim: str = ""):
+    """
+    Chama o endpoint funcionarias_real do Apps Script com filtro opcional de período.
+    Cache 5min por combinação de datas (cada filtro tem seu próprio cache).
+
+    Args:
+        data_inicio: ISO date YYYY-MM-DD ou string vazia pra sem filtro
+        data_fim: idem
+    """
     try:
         url = st.secrets["APPS_SCRIPT_URL_ZAPI"]
         token = st.secrets["APPS_SCRIPT_TOKEN_ZAPI"]
     except Exception:
-        return {"_erro": "Configuração ausente"}
+        return {"_erro": "Configuração ausente: APPS_SCRIPT_URL_ZAPI / APPS_SCRIPT_TOKEN_ZAPI"}
 
     params = {"endpoint": "funcionarias_real", "token": token}
     if data_inicio:
@@ -738,7 +1261,12 @@ def _zapi_get_ranking(data_inicio: str = "", data_fim: str = ""):
         params["data_fim"] = data_fim
 
     try:
-        resp = requests.get(url, params=params, timeout=30, allow_redirects=True)
+        resp = requests.get(
+            url,
+            params=params,
+            timeout=30,
+            allow_redirects=True,
+        )
         if resp.status_code != 200:
             return {"_erro": f"HTTP {resp.status_code} ao calcular ranking"}
         data = resp.json()
@@ -746,21 +1274,22 @@ def _zapi_get_ranking(data_inicio: str = "", data_fim: str = ""):
             return {"_erro": f"Z-API: {data['erro']}"}
         return data
     except requests.exceptions.Timeout:
-        return {"_erro": "Apps Script demorou demais (>30s)."}
+        return {"_erro": "Apps Script demorou demais (>30s) — provavelmente carga alta. Tente novamente."}
     except requests.exceptions.RequestException as e:
         return {"_erro": f"Erro de rede: {e}"}
     except ValueError:
-        return {"_erro": "Resposta não é JSON válido."}
+        return {"_erro": "Resposta do Apps Script não é JSON válido."}
 
 
 def tela_zapi_ranking():
     st.markdown("## 🏆 Ranking de funcionárias")
     st.caption(
         "Calculado em tempo real a partir de CLIENTES + arquivo + INDICACOES + arquivo. "
-        "Conta como **cliente** quem bateu meta. "
+        "Conta como **cliente** quem bateu meta (enviou os 20 contatos válidos). "
         "Conta como **indicação** cada contato indicado por essas clientes."
     )
 
+    # ─── Seletor de período ──────────────────────────────────────────────
     from datetime import date, timedelta
 
     hoje = date.today()
@@ -780,7 +1309,12 @@ def tela_zapi_ranking():
 
     col_preset, col_atualizar = st.columns([4, 1])
     with col_preset:
-        preset_escolhido = st.selectbox("Período:", list(PRESETS.keys()), index=0, key="rank_periodo_preset")
+        preset_escolhido = st.selectbox(
+            "Período:",
+            list(PRESETS.keys()),
+            index=0,
+            key="rank_periodo_preset",
+        )
     with col_atualizar:
         st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
         if st.button("🔄 Atualizar", key="rank_refresh", use_container_width=True):
@@ -793,11 +1327,21 @@ def tela_zapi_ranking():
     if preset_escolhido == "🎯 Personalizado":
         col_di, col_df = st.columns(2)
         with col_di:
-            di = st.date_input("Data início:", value=hoje - timedelta(days=30),
-                               max_value=hoje, key="rank_data_inicio", format="DD/MM/YYYY")
+            di = st.date_input(
+                "Data início:",
+                value=hoje - timedelta(days=30),
+                max_value=hoje,
+                key="rank_data_inicio",
+                format="DD/MM/YYYY",
+            )
         with col_df:
-            df_data = st.date_input("Data fim:", value=hoje, max_value=hoje,
-                                     key="rank_data_fim", format="DD/MM/YYYY")
+            df_data = st.date_input(
+                "Data fim:",
+                value=hoje,
+                max_value=hoje,
+                key="rank_data_fim",
+                format="DD/MM/YYYY",
+            )
         if di > df_data:
             st.error("⚠️ Data início não pode ser maior que data fim.")
             return
@@ -809,6 +1353,7 @@ def tela_zapi_ranking():
             data_inicio_str = di.isoformat()
             data_fim_str = df_data.isoformat()
 
+    # Label legível do período aplicado
     if data_inicio_str and data_fim_str:
         di_fmt = "/".join(reversed(data_inicio_str.split("-")))
         df_fmt = "/".join(reversed(data_fim_str.split("-")))
@@ -825,6 +1370,7 @@ def tela_zapi_ranking():
     if _mostrar_erro_e_parar(data, "(carregando ranking)"):
         return
 
+    # ─── FIX v9.9: endpoint retorna `linhas`, não `ranking`. ──────────────
     linhas = data.get("linhas", [])
     if not linhas:
         st.warning("Nenhum dado no ranking ainda.")
@@ -832,6 +1378,9 @@ def tela_zapi_ranking():
 
     df = pd.DataFrame(linhas)
 
+    # ─── FIX v9.9: adaptar nomes de campos ──────────────────────────────
+    # Endpoint retorna: disparos, indicacoes_validas, vouchers_validados, taxa_conversao
+    # Dashboard usa internamente: clientes_com_indicacoes, indic_por_cliente
     if "disparos" in df.columns:
         df = df.rename(columns={"disparos": "clientes_com_indicacoes"})
     df["indic_por_cliente"] = df.apply(
@@ -840,12 +1389,18 @@ def tela_zapi_ranking():
         axis=1,
     )
 
-    unid_filtro = st.radio("Filtrar por unidade:", ["Todas", "Mogi", "Suzano"],
-                            horizontal=True, key="rank_unid_filtro")
+    # ─── Filtro por unidade ───
+    unid_filtro = st.radio(
+        "Filtrar por unidade:",
+        ["Todas", "Mogi", "Suzano"],
+        horizontal=True,
+        key="rank_unid_filtro",
+    )
     df_filtrado = df.copy()
     if unid_filtro != "Todas":
         df_filtrado = df_filtrado[df_filtrado["unidade"].str.lower() == unid_filtro.lower()]
 
+    # ─── Cards de resumo — calculados a partir do DF filtrado ───
     n_func = len(df_filtrado)
     n_cli = int(df_filtrado["clientes_com_indicacoes"].sum())
     n_ind = int(df_filtrado["indicacoes_validas"].sum())
@@ -855,12 +1410,16 @@ def tela_zapi_ranking():
 
     col_a, col_b, col_c, col_d = st.columns(4)
     col_a.metric("👥 Funcionárias", n_func, help="Funcionárias com pelo menos 1 cliente ou indicação no período")
-    col_b.metric("🎯 Bateram meta", n_cli, help="Clientes que enviaram 20 contatos válidos")
-    col_c.metric("📨 Indicações", n_ind_fmt, help="Total de contatos indicados pelas clientes")
-    col_d.metric("🎁 Vouchers", n_vouch, help="Clientes que tiveram voucher liberado")
+    col_b.metric("🎯 Bateram meta", n_cli,
+        help="Clientes que enviaram 20 contatos válidos (= 'disparos' no endpoint)")
+    col_c.metric("📨 Indicações", n_ind_fmt,
+        help="Total de contatos indicados pelas clientes que bateram meta")
+    col_d.metric("🎁 Vouchers", n_vouch,
+        help="Clientes que tiveram voucher liberado (status FINALIZADO)")
 
     st.markdown("---")
 
+    # Substitui df pelo filtrado pra resto da tela usar
     df = df_filtrado
 
     if df.empty:
@@ -869,6 +1428,7 @@ def tela_zapi_ranking():
 
     df = df.sort_values("indicacoes_validas", ascending=False).reset_index(drop=True)
 
+    # ─── Top 5 com cards medalha ───
     st.markdown("### 🥇 Top 5")
     top5 = df.head(5)
     medalhas = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
@@ -877,22 +1437,30 @@ def tela_zapi_ranking():
         with cols[i]:
             n_ind_val = int(r['indicacoes_validas'])
             n_ind_str = f"{n_ind_val:,}".replace(",", ".")
-            st.markdown(f"""
+            st.markdown(
+                f"""
                 <div style="padding: 14px; border: 1px solid #e5e7eb; border-radius: 10px;
                             text-align: center; background: #fafafa; min-height: 150px;">
                   <div style="font-size: 28px;">{medalhas[i]}</div>
-                  <div style="font-weight: 700; font-size: 14px; margin-top: 4px;">{r['funcionaria']}</div>
+                  <div style="font-weight: 700; font-size: 14px; margin-top: 4px;">
+                    {r['funcionaria']}
+                  </div>
                   <div style="color: #6b7280; font-size: 12px;">{r['unidade']}</div>
-                  <div style="margin-top: 8px; font-size: 22px; font-weight: 700; color: #059669;">{n_ind_str}</div>
+                  <div style="margin-top: 8px; font-size: 22px; font-weight: 700; color: #059669;">
+                    {n_ind_str}
+                  </div>
                   <div style="color: #6b7280; font-size: 11px;">indicações</div>
                   <div style="margin-top: 4px; font-size: 12px; color: #374151;">
                     {int(r['clientes_com_indicacoes'])} cliente(s) c/ meta
                   </div>
                 </div>
-                """, unsafe_allow_html=True)
+                """,
+                unsafe_allow_html=True,
+            )
 
     st.markdown("---")
 
+    # ─── Tabela completa ───
     st.markdown("### 📋 Ranking completo")
     df_tabela = df.copy()
     df_tabela.insert(0, "#", range(1, len(df_tabela) + 1))
@@ -925,10 +1493,16 @@ def tela_zapi_ranking():
     if "Conversão %" in df_tabela.columns:
         column_config["Conversão %"] = st.column_config.TextColumn()
 
-    st.dataframe(df_tabela, use_container_width=True, hide_index=True, column_config=column_config)
+    st.dataframe(
+        df_tabela,
+        use_container_width=True,
+        hide_index=True,
+        column_config=column_config,
+    )
 
     st.markdown("---")
 
+    # ─── Gráfico de barras horizontal ───
     st.markdown("### 📊 Indicações por funcionária")
     try:
         import plotly.express as px
@@ -959,11 +1533,15 @@ def tela_zapi_ranking():
     except Exception as e:
         st.info(f"Gráfico indisponível: {e}")
 
-    st.caption(f"📅 Calculado em {data.get('gerado_em', '—')} · Cache 5min")
+    # Footer com info do dado
+    st.caption(
+        f"📅 Calculado em {data.get('gerado_em', '—')} · "
+        f"Cache 5min (clica em 🔄 Atualizar pra forçar refresh)"
+    )
 
 
 # ============================================================================
-# TELA: 📨 INDICAÇÕES
+# TELA: 📨 INDICAÇÕES (v9.5)
 # ============================================================================
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -972,11 +1550,12 @@ def _zapi_get_indicacoes(data_inicio: str = "", data_fim: str = "",
                           busca: str = "", status: str = "",
                           unidade: str = "", funcionaria: str = "",
                           limit: int = 5000):
+    """Chama o endpoint indicacoes com filtros. Cache 2min por combinação."""
     try:
         url = st.secrets["APPS_SCRIPT_URL_ZAPI"]
         token = st.secrets["APPS_SCRIPT_TOKEN_ZAPI"]
     except Exception:
-        return {"_erro": "Configuração ausente"}
+        return {"_erro": "Configuração ausente: APPS_SCRIPT_URL_ZAPI / APPS_SCRIPT_TOKEN_ZAPI"}
 
     params = {"endpoint": "indicacoes", "token": token, "limit": str(limit)}
     if data_inicio:     params["data_inicio"] = data_inicio
@@ -996,18 +1575,19 @@ def _zapi_get_indicacoes(data_inicio: str = "", data_fim: str = "",
             return {"_erro": f"Z-API: {data['erro']}"}
         return data
     except requests.exceptions.Timeout:
-        return {"_erro": "Apps Script demorou demais (>45s)."}
+        return {"_erro": "Apps Script demorou demais (>45s). Reduza o período ou desmarque o arquivo."}
     except requests.exceptions.RequestException as e:
         return {"_erro": f"Erro de rede: {e}"}
     except ValueError:
-        return {"_erro": "Resposta não é JSON válido."}
+        return {"_erro": "Resposta do Apps Script não é JSON válido."}
 
 
 def _xlsx_indicacoes(df_export, sufixo_arquivo):
+    """Gera XLSX em memória pra download das indicações filtradas."""
     if df_export is None or df_export.empty:
         st.download_button("📥 Exportar XLSX (sem dados)", data=b"",
-                           file_name="vazio.xlsx", disabled=True,
-                           key=f"exp_ind_void_{sufixo_arquivo}")
+            file_name="vazio.xlsx", disabled=True,
+            key=f"exp_ind_void_{sufixo_arquivo}")
         return
 
     buf = BytesIO()
@@ -1015,10 +1595,8 @@ def _xlsx_indicacoes(df_export, sufixo_arquivo):
         d = df_export.copy()
         for col in d.columns:
             if pd.api.types.is_datetime64_any_dtype(d[col]):
-                try:
-                    d[col] = d[col].dt.tz_localize(None)
-                except (TypeError, AttributeError):
-                    pass
+                try: d[col] = d[col].dt.tz_localize(None)
+                except (TypeError, AttributeError): pass
         d.to_excel(writer, index=False, sheet_name="indicacoes")
 
     ts = datetime.now(TZ_SP).strftime("%Y%m%d-%H%M")
@@ -1035,8 +1613,12 @@ def _xlsx_indicacoes(df_export, sufixo_arquivo):
 
 def tela_zapi_indicacoes():
     st.markdown("## 📨 Indicações")
-    st.caption("Cada linha é um contato indicado por um cliente. Inclua o arquivo pra ver histórico completo.")
+    st.caption(
+        "Cada linha é um contato indicado por um cliente. "
+        "Inclua o arquivo pra ver histórico completo (3.518 indicações de maio)."
+    )
 
+    # ─── Filtros linha 1: período + arquivo + atualizar ────────────────
     hoje = date.today()
     primeiro_mes = hoje.replace(day=1)
     ult_dia_mp = primeiro_mes - timedelta(days=1)
@@ -1058,7 +1640,7 @@ def tela_zapi_indicacoes():
     with col_arq:
         st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
         incluir_arq = st.toggle("📦 Incluir arquivo (maio)", value=False, key="ind_inc_arq",
-                                 help="Ativa pra incluir os 3.518 contatos das campanhas arquivadas")
+            help="Ativa pra incluir os 3.518 contatos das campanhas arquivadas")
     with col_btn:
         st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
         if st.button("🔄 Atualizar", key="ind_refresh", use_container_width=True):
@@ -1071,10 +1653,10 @@ def tela_zapi_indicacoes():
         cdi, cdf = st.columns(2)
         with cdi:
             di = st.date_input("Data início:", value=hoje - timedelta(days=30),
-                               max_value=hoje, key="ind_di", format="DD/MM/YYYY")
+                max_value=hoje, key="ind_di", format="DD/MM/YYYY")
         with cdf:
             df_data = st.date_input("Data fim:", value=hoje,
-                                     max_value=hoje, key="ind_df", format="DD/MM/YYYY")
+                max_value=hoje, key="ind_df", format="DD/MM/YYYY")
         if di > df_data:
             st.error("⚠️ Data início não pode ser maior que data fim.")
             return
@@ -1086,16 +1668,21 @@ def tela_zapi_indicacoes():
             data_inicio_str = di.isoformat()
             data_fim_str = df_data.isoformat()
 
+    # ─── Filtros linha 2: busca + unidade + funcionária ────────────────
     col_b, col_u, col_f = st.columns([3, 2, 2])
     with col_b:
-        busca = st.text_input("🔍 Buscar:", placeholder="Nome ou telefone (cliente ou indicado)", key="ind_busca")
+        busca = st.text_input("🔍 Buscar:", placeholder="Nome ou telefone (cliente ou indicado)",
+            key="ind_busca")
     with col_u:
-        unid_filtro = st.radio("Unidade:", ["Todas", "Mogi", "Suzano"], horizontal=True, key="ind_unid")
+        unid_filtro = st.radio("Unidade:", ["Todas", "Mogi", "Suzano"],
+            horizontal=True, key="ind_unid")
     with col_f:
-        func_filtro = st.text_input("Funcionária:", placeholder="Ex: rafaela", key="ind_func")
+        func_filtro = st.text_input("Funcionária:", placeholder="Ex: rafaela",
+            key="ind_func")
 
     unidade_str = "" if unid_filtro == "Todas" else unid_filtro.lower()
 
+    # ─── Chamada ao endpoint ─────────────────────────────────────────────
     with st.spinner("Carregando indicações..."):
         data = _zapi_get_indicacoes(
             data_inicio=data_inicio_str,
@@ -1116,6 +1703,7 @@ def tela_zapi_indicacoes():
     total_arquivo = data.get("total_arquivo", 0)
     limit_aplicado = data.get("limit_aplicado", 5000)
 
+    # ─── Cards ───────────────────────────────────────────────────────────
     base_total = total_planilha + (total_arquivo if incluir_arq else 0)
     total_filtrado_fmt = f"{total_filtrado:,}".replace(",", ".")
     base_total_fmt = f"{base_total:,}".replace(",", ".")
@@ -1124,9 +1712,10 @@ def tela_zapi_indicacoes():
     col_a, col_b_card, col_c, col_d = st.columns(4)
     col_a.metric("📨 Filtradas", total_filtrado_fmt)
     col_b_card.metric("📊 Base total", base_total_fmt,
-                       help=f"INDICACOES atual: {total_planilha}\n" +
-                            (f"INDICACOES_ARQUIVO: {total_arquivo}" if incluir_arq else "(arquivo não incluído)"))
-    col_c.metric("👁️ Mostrando", n_linhas_fmt, help=f"Limite por chamada: {limit_aplicado}.")
+        help=f"INDICACOES atual: {total_planilha}\n" +
+             (f"INDICACOES_ARQUIVO: {total_arquivo}" if incluir_arq else "(arquivo não incluído)"))
+    col_c.metric("👁️ Mostrando", n_linhas_fmt,
+        help=f"Limite por chamada: {limit_aplicado}.")
     col_d.metric("📦 Arquivo", "Incluído" if incluir_arq else "Não incluído")
 
     if total_filtrado > len(linhas):
@@ -1136,6 +1725,7 @@ def tela_zapi_indicacoes():
         st.info("Nenhuma indicação encontrada com os filtros atuais.")
         return
 
+    # ─── Tabela ──────────────────────────────────────────────────────────
     df = pd.DataFrame(linhas)
 
     if "data" in df.columns:
@@ -1175,16 +1765,18 @@ def tela_zapi_indicacoes():
 
 
 # ============================================================================
-# TELA: 📊 MÉTRICAS Z-API (contrato flat + fix barras funil)
+# TELA: 📊 MÉTRICAS Z-API (v9.6 + fix contrato flat)
 # ============================================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _zapi_get_metricas(data_inicio: str = "", data_fim: str = ""):
+    """Chama o endpoint metricas_funil com filtro opcional de período.
+    Cache 5min por combinação de datas."""
     try:
         url = st.secrets["APPS_SCRIPT_URL_ZAPI"]
         token = st.secrets["APPS_SCRIPT_TOKEN_ZAPI"]
     except Exception:
-        return {"_erro": "Configuração ausente"}
+        return {"_erro": "Configuração ausente: APPS_SCRIPT_URL_ZAPI / APPS_SCRIPT_TOKEN_ZAPI"}
 
     params = {"endpoint": "metricas_funil", "token": token}
     if data_inicio: params["data_inicio"] = data_inicio
@@ -1203,7 +1795,7 @@ def _zapi_get_metricas(data_inicio: str = "", data_fim: str = ""):
     except requests.exceptions.RequestException as e:
         return {"_erro": f"Erro de rede: {e}"}
     except ValueError:
-        return {"_erro": "Resposta não é JSON válido."}
+        return {"_erro": "Resposta do Apps Script não é JSON válido."}
 
 
 def tela_zapi_metricas():
@@ -1213,13 +1805,17 @@ def tela_zapi_metricas():
         "convertem e onde travam. Cálculo em tempo real a partir de CLIENTES + arquivo."
     )
 
+    # ─── Filtro de período ──────────────────────────────────────────────
     from datetime import date, timedelta
     hoje = date.today()
 
     col_tog, col_di, col_df, col_btn = st.columns([2, 2, 2, 1])
     with col_tog:
-        usar_filtro = st.toggle("🎯 Filtrar por período", value=False, key="met_usar_filtro",
-                                 help="Filtra por Data Cadastro")
+        usar_filtro = st.toggle(
+            "🎯 Filtrar por período",
+            value=False, key="met_usar_filtro",
+            help="Filtra por Data Cadastro (quando cliente entrou no programa)"
+        )
 
     data_inicio_str = ""
     data_fim_str = ""
@@ -1227,10 +1823,10 @@ def tela_zapi_metricas():
     if usar_filtro:
         with col_di:
             di = st.date_input("Data início:", value=hoje - timedelta(days=30),
-                               max_value=hoje, key="met_di", format="DD/MM/YYYY")
+                max_value=hoje, key="met_di", format="DD/MM/YYYY")
         with col_df:
-            df_data = st.date_input("Data fim:", value=hoje, max_value=hoje,
-                                     key="met_df", format="DD/MM/YYYY")
+            df_data = st.date_input("Data fim:", value=hoje,
+                max_value=hoje, key="met_df", format="DD/MM/YYYY")
         if di > df_data:
             st.error("⚠️ Data início não pode ser maior que data fim.")
             return
@@ -1258,6 +1854,7 @@ def tela_zapi_metricas():
     if _mostrar_erro_e_parar(data, "(carregando métricas)"):
         return
 
+    # ─── Lê o funil no formato flat que o Apps Script retorna ──────────
     funil = data.get("funil", {}) or {}
 
     n_convidados = int(funil.get("iniciaram_conversa", 0) or 0)
@@ -1286,20 +1883,28 @@ def tela_zapi_metricas():
     n_desistiu_fmt = f"{n_desistiu:,}".replace(",", ".")
 
     col_a, col_b, col_c, col_d = st.columns(4)
-    col_a.metric("👥 Convidados", n_convidados_fmt,
-                  help="Total de clientes que iniciaram conversa")
-    col_b.metric("🎁 Voucher liberado", n_validados_fmt,
-                  delta=f"{pct_voucher}% conversão", delta_color="normal")
-    col_c.metric("🚀 Em andamento", n_andamento_fmt,
-                  help="Ainda não terminaram o funil")
-    col_d.metric("💤 Desistiram", n_desistiu_fmt,
-                  delta=f"-{_pct(n_desistiu, n_convidados)}%",
-                  delta_color="inverse",
-                  help="Pararam de responder após cobrança")
+    col_a.metric(
+        "👥 Convidados", n_convidados_fmt,
+        help="Total de clientes que iniciaram conversa (Data Cadastro dentro do período)"
+    )
+    col_b.metric(
+        "🎁 Voucher liberado", n_validados_fmt,
+        delta=f"{pct_voucher}% conversão", delta_color="normal"
+    )
+    col_c.metric(
+        "🚀 Em andamento", n_andamento_fmt,
+        help="Ainda não terminaram o funil (privacidade, contatos, validação)"
+    )
+    col_d.metric(
+        "💤 Desistiram", n_desistiu_fmt,
+        delta=f"-{_pct(n_desistiu, n_convidados)}%",
+        delta_color="inverse",
+        help="Pararam de responder após cobrança (_COBRADOSEMRESPOSTA)"
+    )
 
     st.markdown("---")
 
-    # ─── FUNIL VISUAL (4 barras) — FIX: n_fmt calculado antes, sem .replace no HTML ───
+    # ─── FUNIL VISUAL (4 barras) — fix: n_fmt calculado antes, sem replace no HTML ───
     st.markdown("### 🔻 Funil de conversão")
 
     niveis = [
@@ -1332,27 +1937,32 @@ def tela_zapi_metricas():
     st.markdown("### 📊 Distribuição por status final")
 
     col_v, col_i, col_d_col, col_and = st.columns(4)
-    col_v.metric("✅ Validados", n_validados, help="STATUS_REC = FINALIZADO")
+    col_v.metric("✅ Validados", n_validados,
+        help="STATUS_REC = FINALIZADO")
     col_i.metric("❌ Invalidados", n_invalid,
-                  help="STATUS_REC = INVALIDADO_AVISADO ou INVALIDADO_COBRADO",
-                  delta=f"{_pct(n_invalid, n_convidados)}%",
-                  delta_color="inverse" if n_invalid > 0 else "off")
+        help="STATUS_REC = INVALIDADO_AVISADO ou INVALIDADO_COBRADO",
+        delta=f"{_pct(n_invalid, n_convidados)}%",
+        delta_color="inverse" if n_invalid > 0 else "off")
     col_d_col.metric("💤 Sem resposta", n_desistiu,
-                      delta=f"{_pct(n_desistiu, n_convidados)}%",
-                      delta_color="inverse" if n_desistiu > 0 else "off",
-                      help="_COBRADOSEMRESPOSTA")
+        delta=f"{_pct(n_desistiu, n_convidados)}%",
+        delta_color="inverse" if n_desistiu > 0 else "off",
+        help="_COBRADOSEMRESPOSTA (pararam de responder após cobrança)")
     col_and.metric("🚀 Ainda em andamento", n_andamento,
-                    help="Aguardando privacidade, contatos ou validação")
+        help="Aguardando privacidade, contatos ou validação")
 
     st.markdown("---")
 
     # ─── TAXAS ───
     st.markdown("### 📈 Taxas de conversão")
     col_t1, col_t2, col_t3, col_t4 = st.columns(4)
-    col_t1.metric("🔐 % escolheu privacidade", f"{pct_priv}%")
-    col_t2.metric("📨 % enviou pelo menos 1", f"{pct_enviou1}%")
-    col_t3.metric("🎯 % bateu meta", f"{pct_meta}%")
-    col_t4.metric("🎁 % conversão total", f"{pct_voucher}%")
+    col_t1.metric("🔐 % escolheu privacidade", f"{pct_priv}%",
+        help="Convidados → escolheram 1 ou 2")
+    col_t2.metric("📨 % enviou pelo menos 1", f"{pct_enviou1}%",
+        help="Convidados → mandaram ao menos 1 contato")
+    col_t3.metric("🎯 % bateu meta", f"{pct_meta}%",
+        help="Convidados → completaram os 20 contatos")
+    col_t4.metric("🎁 % conversão total", f"{pct_voucher}%",
+        help="Convidados → viraram voucher liberado")
 
     # ─── Footer ───
     gerado = data.get("gerado_em", "")
@@ -1363,15 +1973,16 @@ def tela_zapi_metricas():
             gerado_fmt = gerado_dt.strftime("%d/%m/%Y %H:%M:%S")
         except Exception:
             gerado_fmt = gerado
-        st.caption(f"📅 Calculado em {gerado_fmt} · Cache 5min")
+        st.caption(f"📅 Calculado em {gerado_fmt} · Cache 5min (clica em 🔄 Atualizar pra forçar refresh)")
     else:
         st.caption("Cache 5min. Clica em 🔄 Atualizar pra forçar refresh.")
 
 
 # ============================================================================
-# TELA: 👥 CLIENTES NO PROGRAMA
+# TELA: 👥 CLIENTES NO PROGRAMA (v9.8)
 # ============================================================================
 
+# Classificação visual: status → categoria amigável com emoji
 _CATEGORIAS_CLIENTES = [
     ("🔵 Aguardando validação", lambda s: s == 'AGUARDANDO_VALIDACAO'),
     ("🟠 Invalidado (vai encerrar)", lambda s: s == 'INVALIDADO_COBRADO'),
@@ -1395,13 +2006,17 @@ def _categoria_cliente(status):
 
 
 def _eh_ativo(status):
+    """Cliente em estado ativo (não terminal). Os terminais são FIN/ENC/DES."""
     s = str(status).upper() if status else ''
     return s not in ('FINALIZADO', 'ENCERRADO', '_COBRADOSEMRESPOSTA')
 
 
 def tela_zapi_clientes_programa():
     st.markdown("## 👥 Clientes no programa")
-    st.caption("Todos os clientes em CLIENTES (atual). Ordenado por tempo no status atual.")
+    st.caption(
+        "Todos os clientes em CLIENTES (atual). "
+        "Ordenado por tempo no status atual — mais urgente no topo."
+    )
 
     col_btn, _ = st.columns([1, 5])
     with col_btn:
@@ -1420,8 +2035,10 @@ def tela_zapi_clientes_programa():
         st.info("Nenhum cliente em CLIENTES no momento.")
         return
 
+    # Monta DataFrame
     df = pd.DataFrame(linhas)
 
+    # Filtra 'teste' (consistente com outras telas)
     if 'Funcionaria' in df.columns:
         df = df[df['Funcionaria'].astype(str).str.lower().str.strip() != 'teste']
 
@@ -1429,15 +2046,18 @@ def tela_zapi_clientes_programa():
         st.info("Nenhum cliente real (só 'teste').")
         return
 
+    # Enriquece com categoria + tempo no status
     status_col = 'STATUS DE AONDE PAROU' if 'STATUS DE AONDE PAROU' in df.columns else 'status_rec'
     df['_categoria'] = df[status_col].apply(_categoria_cliente)
     df['_ativo'] = df[status_col].apply(_eh_ativo)
 
+    # Tempo no status
     if 'DATA E HORA' in df.columns:
         df['_data_hora'] = pd.to_datetime(df['DATA E HORA'], errors='coerce', utc=True).dt.tz_convert(TZ_SP)
         agora = datetime.now(TZ_SP)
         df['_horas'] = (agora - df['_data_hora']).dt.total_seconds() / 3600
 
+    # ─── Cards de resumo ───
     n_total = len(df)
     n_ativos = df['_ativo'].sum()
     n_voucher = (df.get('Voucher Liberado', '').astype(str).str.upper() == 'SIM').sum() if 'Voucher Liberado' in df.columns else 0
@@ -1446,23 +2066,32 @@ def tela_zapi_clientes_programa():
     col_a, col_b, col_c, col_d = st.columns(4)
     col_a.metric("👥 Total em CLIENTES", n_total)
     col_b.metric("🔵 Em ação ativa", int(n_ativos),
-                  help="Não-terminais: ainda precisam de algo")
+        help="Não-terminais: ainda precisam de algo (cobrança automática ou validação)")
     col_c.metric("✅ Voucher liberado", int(n_voucher))
     col_d.metric("💤 Desistiu", int(n_desistiu))
 
     st.markdown("---")
 
+    # ─── Filtros ───
     categorias_disponiveis = sorted(df['_categoria'].unique().tolist())
 
     col_cat, col_unid, col_busca = st.columns([3, 2, 3])
     with col_cat:
-        cats_selecionadas = st.multiselect("📂 Categoria:", categorias_disponiveis, default=[],
-                                            key="cliprog_cats", placeholder="Todas as categorias")
+        cats_selecionadas = st.multiselect(
+            "📂 Categoria:",
+            categorias_disponiveis,
+            default=[],
+            key="cliprog_cats",
+            placeholder="Todas as categorias",
+        )
     with col_unid:
-        unid_filtro = st.radio("📍 Unidade:", ["Todas", "Mogi", "Suzano"], horizontal=True, key="cliprog_unid")
+        unid_filtro = st.radio("📍 Unidade:", ["Todas", "Mogi", "Suzano"],
+            horizontal=True, key="cliprog_unid")
     with col_busca:
-        busca = st.text_input("🔍 Buscar:", placeholder="Nome ou telefone", key="cliprog_busca")
+        busca = st.text_input("🔍 Buscar:", placeholder="Nome ou telefone",
+            key="cliprog_busca")
 
+    # Aplica filtros
     df_f = df.copy()
     if cats_selecionadas:
         df_f = df_f[df_f['_categoria'].isin(cats_selecionadas)]
@@ -1474,6 +2103,7 @@ def tela_zapi_clientes_programa():
         mask_tel = df_f['Telefone'].astype(str).str.contains(b, na=False) if 'Telefone' in df_f.columns else False
         df_f = df_f[mask_nome | mask_tel]
 
+    # Ordena por horas_no_status DESC (mais antigo primeiro)
     if '_horas' in df_f.columns:
         df_f = df_f.sort_values('_horas', ascending=False)
 
@@ -1483,10 +2113,12 @@ def tela_zapi_clientes_programa():
         st.info("Nenhum cliente com esses filtros.")
         return
 
+    # ─── Tabela display ───
     df_display = df_f.copy()
     if '_horas' in df_display.columns:
         df_display['⏱️ Tempo'] = df_display['_horas'].apply(_fmt_tempo_horas)
 
+    # Renomeia + seleciona colunas
     col_renames = {
         '_categoria': '🚦 Status',
         'Nome': '👤 Nome',
@@ -1504,11 +2136,13 @@ def tela_zapi_clientes_programa():
     cols_existentes = [c for c in cols_display if c in df_display.columns]
     df_display = df_display[cols_existentes]
 
+    # Capitaliza unidade e funcionária
     if '📍 Unidade' in df_display.columns:
         df_display['📍 Unidade'] = df_display['📍 Unidade'].astype(str).str.title()
     if '👩 Funcionária' in df_display.columns:
         df_display['👩 Funcionária'] = df_display['👩 Funcionária'].astype(str).str.title()
 
+    # Botão export ANTES da tabela
     col_exp, _ = st.columns([2, 5])
     with col_exp:
         sufixo = (unid_filtro.lower() if unid_filtro != "Todas" else "todas")
@@ -1518,9 +2152,13 @@ def tela_zapi_clientes_programa():
 
     st.markdown("---")
 
+    # ─── Ação por cliente ───
     st.markdown("### 🎯 Ação em cliente")
-    st.caption("Selecione um cliente abaixo pra ver contatos enviados ou marcar validação.")
+    st.caption(
+        "Selecione um cliente abaixo pra ver contatos enviados ou marcar validação."
+    )
 
+    # Monta lista de opções (nome + telefone + status)
     df_f_reset = df_f.reset_index(drop=True)
     opcoes = ["— Selecione um cliente —"]
     for _, r in df_f_reset.iterrows():
@@ -1542,6 +2180,7 @@ def tela_zapi_clientes_programa():
     status_atual = str(cli.get(status_col, ''))
     total_ind = int(cli.get('Total Indicacoes', 0) or 0)
 
+    # Card com info do cliente
     st.info(
         f"**{nome_cli}** — {tel_cli} — {cli['_categoria']}\n\n"
         f"Unidade: {str(cli.get('Unidade', '?')).title()} · "
@@ -1550,8 +2189,10 @@ def tela_zapi_clientes_programa():
         f"Voucher: {cli.get('Voucher Liberado', '?')}"
     )
 
+    # Botões de ação (varia por status)
     col_a1, col_a2, col_a3 = st.columns(3)
 
+    # Ver contatos (sempre disponível se tiver indicações)
     with col_a1:
         if total_ind > 0:
             if st.button(f"📞 Ver {total_ind} contato{'s' if total_ind != 1 else ''}",
@@ -1560,26 +2201,29 @@ def tela_zapi_clientes_programa():
         else:
             st.button("📞 Sem contatos ainda", disabled=True, use_container_width=True)
 
+    # Validar / Invalidar (só se aguardando)
     status_upper = status_atual.upper()
     aguardando_val = status_upper == 'AGUARDANDO_VALIDACAO'
 
     with col_a2:
         if aguardando_val:
-            if st.button("✅ Validar (libera voucher)", key="cliprog_validar",
-                         type="primary", use_container_width=True):
+            if st.button("✅ Validar (libera voucher)",
+                         key="cliprog_validar", type="primary", use_container_width=True):
                 st.session_state['cliprog_confirma_validacao'] = ('VALIDADO', tel_cli, nome_cli)
         else:
             st.button("✅ Validar", disabled=True, use_container_width=True,
-                      help="Disponível só pra clientes em AGUARDANDO_VALIDACAO")
+                help="Disponível só pra clientes em AGUARDANDO_VALIDACAO")
 
     with col_a3:
         if aguardando_val:
-            if st.button("❌ Invalidar", key="cliprog_invalidar", use_container_width=True):
+            if st.button("❌ Invalidar",
+                         key="cliprog_invalidar", use_container_width=True):
                 st.session_state['cliprog_confirma_validacao'] = ('INVALIDADO', tel_cli, nome_cli)
         else:
             st.button("❌ Invalidar", disabled=True, use_container_width=True,
-                      help="Disponível só pra clientes em AGUARDANDO_VALIDACAO")
+                help="Disponível só pra clientes em AGUARDANDO_VALIDACAO")
 
+    # ─── Mostrar contatos (se solicitado) ───
     if st.session_state.get('cliprog_mostrar_contatos') == camp_id and camp_id:
         st.markdown(f"#### 📞 Contatos enviados por {nome_cli}")
         with st.spinner("Buscando contatos..."):
@@ -1591,6 +2235,7 @@ def tela_zapi_clientes_programa():
             contatos = contatos_data.get("linhas", []) if isinstance(contatos_data, dict) else []
             if contatos:
                 df_c = pd.DataFrame(contatos)
+                # Mostra colunas úteis
                 cols_c = [c for c in ['nome_indicado', 'telefone_indicado', 'status', 'motivo'] if c in df_c.columns]
                 df_c_display = df_c[cols_c].rename(columns={
                     'nome_indicado': '👤 Nome',
@@ -1606,6 +2251,7 @@ def tela_zapi_clientes_programa():
             st.session_state['cliprog_mostrar_contatos'] = None
             st.rerun()
 
+    # ─── Confirmação dupla de validação ───
     pendente = st.session_state.get('cliprog_confirma_validacao')
     if pendente:
         decisao, tel_p, nome_p = pendente
@@ -1634,6 +2280,7 @@ def tela_zapi_clientes_programa():
 
 
 def _fmt_tempo_horas(h):
+    """Formata horas em string legível: '45min', '3h', '2d 4h'"""
     if pd.isna(h):
         return "—"
     if h < 1:
@@ -1646,9 +2293,10 @@ def _fmt_tempo_horas(h):
 
 
 def _xlsx_clientes_prog(df_export, sufixo):
+    """Export XLSX de clientes no programa."""
     if df_export is None or df_export.empty:
         st.download_button("📥 Exportar XLSX (sem dados)", data=b"",
-                           file_name="vazio.xlsx", disabled=True, key=f"exp_clip_void_{sufixo}")
+            file_name="vazio.xlsx", disabled=True, key=f"exp_clip_void_{sufixo}")
         return
 
     buf = BytesIO()
@@ -1656,10 +2304,8 @@ def _xlsx_clientes_prog(df_export, sufixo):
         d = df_export.copy()
         for col in d.columns:
             if pd.api.types.is_datetime64_any_dtype(d[col]):
-                try:
-                    d[col] = d[col].dt.tz_localize(None)
-                except (TypeError, AttributeError):
-                    pass
+                try: d[col] = d[col].dt.tz_localize(None)
+                except (TypeError, AttributeError): pass
         d.to_excel(writer, index=False, sheet_name="clientes")
 
     ts = datetime.now(TZ_SP).strftime("%Y%m%d-%H%M")
@@ -1675,24 +2321,29 @@ def _xlsx_clientes_prog(df_export, sufixo):
 
 
 # ============================================================================
-# ENTRY POINTS
+# ENTRY POINTS — chamados pelo dashboard_maislaser.py dentro da tab
 # ============================================================================
 
 def render_aba_zapi_aguardando():
+    """Renderiza a tela principal do robô Z-API: aguardando validação."""
     tela_zapi_aguardando_validacao()
 
 
 def render_aba_zapi_ranking():
+    """Renderiza a tela de ranking de funcionárias."""
     tela_zapi_ranking()
 
 
 def render_aba_zapi_indicacoes():
+    """Renderiza a tela de indicações com filtros e export."""
     tela_zapi_indicacoes()
 
 
 def render_aba_zapi_metricas():
+    """Renderiza a tela de métricas do funil Z-API."""
     tela_zapi_metricas()
 
 
 def render_aba_zapi_clientes():
+    """Renderiza a tela de clientes no programa."""
     tela_zapi_clientes_programa()
