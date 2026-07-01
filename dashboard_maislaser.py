@@ -44,6 +44,7 @@ from aba_zapi import (
 )
 from aba_historico_disparos import render_aba_historico_disparos
 from aba_disparador_auto import render_aba_disparador_auto
+from aba_conversas import render_aba_conversas
 
 
 # ============================================================================
@@ -60,7 +61,7 @@ st.set_page_config(
 TZ_SP = timezone(timedelta(hours=-3))
 COR_PRIMARIA = "#5BC0BE"
 COR_PRIMARIA_DARK = "#3D9991"
-VERSAO_DASHBOARD = "v6.1"
+VERSAO_DASHBOARD = "v6.2"
 
 # v6.1: só 2 robôs (Bia conversacional morreu na demolição)
 ROBOS = {
@@ -504,11 +505,13 @@ def main():
 
     elif robo == 'zapi':
         # v6.0: aba "📜 Histórico Bia" substituída por "🤖 Disparador AUTO"
-        tab_aguard, tab_clientes, tab_indic, tab_disp_auto, tab_rank, tab_metr = st.tabs([
+        # v3.6: aba "💬 Conversas" ao lado do Disparador AUTO
+        tab_aguard, tab_clientes, tab_indic, tab_disp_auto, tab_conv, tab_rank, tab_metr = st.tabs([
             "⏳ Aguardando validação",
             "👥 Clientes no programa",
             "📨 Indicações",
             "🤖 Disparador AUTO",
+            "💬 Conversas",
             "🏆 Ranking funcionárias",
             "📊 Métricas",
         ])
@@ -524,6 +527,9 @@ def main():
 
         with tab_disp_auto:
             render_aba_disparador_auto()
+
+        with tab_conv:
+            render_aba_conversas()
 
         with tab_rank:
             render_aba_zapi_ranking()
