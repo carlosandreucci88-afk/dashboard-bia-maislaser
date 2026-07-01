@@ -13,7 +13,7 @@ Fonte: SÓ bia_disparos (não tem tabela de mensagens histórica). A timeline é
 RECONSTRUÍDA a partir dos timestamps das colunas.
 
 Colunas usadas:
-  • disparado_em          → Bia enviou cortesia_v1 (template)
+  • disparado_em          → Bia enviou cortesia_v3 (template)
   • ultima_msg_cliente    → Texto exato da última msg do cliente
   • texto_livre_avisado_em → Momento em que Bia respondeu texto livre
   • tipo_resposta         → Determina qual foi a resposta (ops/despedida)
@@ -186,14 +186,14 @@ def _construir_timeline(row):
     """Retorna lista de eventos [{ts, tipo, ator, texto}] ordenados por timestamp."""
     eventos = []
 
-    # 1. Bia enviou template cortesia_v1
+    # 1. Bia enviou template cortesia_v3
     disp = row.get('disparado_em_sp')
     if pd.notna(disp):
         nome_cad = row.get('nome_cadastrante') or 'um amigo'
         unidade = _norm_unidade(row.get('unidade'))
         eventos.append({
             'ts': disp, 'ator': 'bia',
-            'tipo': '🚀 Template cortesia_v1',
+            'tipo': '🚀 Template cortesia_v3',
             'texto': f'Você foi presenteada! Cortesia de {nome_cad} na Maislaser {unidade}. '
                      f'Botões: [AGENDAR] [SABER MAIS]'
         })
