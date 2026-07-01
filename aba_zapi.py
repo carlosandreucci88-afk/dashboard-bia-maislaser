@@ -43,6 +43,11 @@ v9.11 (30/06/2026): CONFIG TELEFONES DA RECEPÇÃO
   • Expander no topo da aba pra editar recepcao_{mogi,suzano}_telefone
   • Apps Script Filtro Webhook Bia v3.1+ lê esses valores a cada clique
 
+v9.15 (01/07/2026): EXPORT SEM RESPOSTA
+  • Botão de download XLSX (nome + telefone) no card AUTO terminado
+  • Puxa direto do Supabase os que têm disparado_em NOT NULL e respondeu_em NULL
+  • Aparece só se sem_resposta > 0
+
 v9.14 (01/07/2026): FILTRO UNIDADE EM MÉTRICAS
   • Filtro pill Todas / Mogi / Suzano no topo da aba Métricas
   • Passa parâmetro `unidade` pro endpoint metricas_funil (Apps Script
@@ -378,6 +383,39 @@ def _meta_respostas(total_contatos):
     """30% arredondado pra cima. Ex: 20 → 6, 24 → 8, 82 → 25."""
     import math
     return max(1, math.ceil(0.3 * int(total_contatos or 0)))
+
+
+# ============================================================================
+# v9.15 — EXPORT XLSX DOS SEM RESPOSTA (nome + telefone)
+# ============================================================================
+def _xlsx_sem_resposta_campanha(campanha_id):
+    """Retorna (bytes_xlsx, count) dos indicados dessa campanha que foram
+    disparados mas não responderam. None se erro ou zero."""
+    try:
+        sb = _get_supabase_zapi()
+        result = (
+            sb.table("bia_disparos")
+            .select("nome_indicado, telefone")
+            .eq("campanha_id", campanha_id)
+            .not_.is_("disparado_em", "null")
+            .is_("respondeu_em", "null")
+            .execute()
+        )
+        rows = result.data or []
+        if not rows:
+            return None, 0
+
+        df = pd.DataFrame(rows)
+        df = df.rename(columns={"nome_indicado": "Nome", "telefone": "Telefone"})
+        df["Telefone"] = df["Telefone"].apply(_formatar_telefone)
+
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="sem_resposta")
+        return buf.getvalue(), len(rows)
+    except Exception as e:
+        st.toast(f"⚠️ Falha gerando XLSX: {e}", icon="⚠️")
+        return None, 0
 
 
 # ============================================================================
@@ -1142,6 +1180,21 @@ def _render_acao_auto_terminado(camp_id, tel, nome, contatos, bia_puxou_dt, stat
         """,
         unsafe_allow_html=True,
     )
+
+    # v9.15: botão de download dos sem resposta (nome + telefone)
+    if sem > 0:
+        xlsx_bytes, xlsx_count = _xlsx_sem_resposta_campanha(camp_id)
+        if xlsx_bytes:
+            from datetime import datetime as _dt
+            ts = _dt.now(TZ_SP).strftime("%Y%m%d-%H%M")
+            st.download_button(
+                label=f"📥 Baixar XLSX dos {xlsx_count} sem resposta",
+                data=xlsx_bytes,
+                file_name=f"sem_resposta_{camp_id[:20]}_{ts}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"dl_sem_resp_{camp_id}",
+                help="Baixa nome + telefone dos indicados que não responderam ao template",
+            )
 
     col_a, col_b = st.columns([1, 1])
     with col_a:
