@@ -1718,8 +1718,21 @@ def tela_zapi_metricas():
     ]
 
     for label, n, pct in niveis:
+        n_fmt = f"{n:,}".replace(",", ".")
         st.markdown(
             f"""<div style="margin: 8px 0;">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                    <strong>{label}</strong>
+                    <span style="color: #5BC0BE; font-weight: 700;">{n_fmt} ({pct}%)</span>
+                </div>
+                <div style="background: #e5e7eb; border-radius: 8px; height: 28px; overflow: hidden;">
+                    <div style="background: linear-gradient(90deg, #5BC0BE 0%, #4AA8A6 100%);
+                                width: {pct}%; height: 100%; border-radius: 8px;
+                                transition: width 0.6s ease;"></div>
+                </div>
+            </div>""",
+            unsafe_allow_html=True
+        )
                 <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
                     <strong>{label}</strong>
                     <span style="color: #5BC0BE; font-weight: 700;">{n:,} ({pct}%)</span>
