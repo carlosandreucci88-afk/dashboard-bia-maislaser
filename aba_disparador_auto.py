@@ -400,6 +400,12 @@ def _render_resumo(df_camp, df_disp_raw):
                               value=st.session_state["_disp_auto_busca_persist"],
                               key="disp_auto_busca")
 
+    # Reset página se filtros mudaram
+    filtros_atuais = (estado_sel, busca.strip().lower())
+    if st.session_state.get("_disp_auto_last_filters") != filtros_atuais:
+        st.session_state["_disp_auto_pagina"] = 1
+        st.session_state["_disp_auto_last_filters"] = filtros_atuais
+
     st.session_state["_disp_auto_estado_persist"] = estado_sel
     st.session_state["_disp_auto_busca_persist"] = busca
 
@@ -421,6 +427,24 @@ def _render_resumo(df_camp, df_disp_raw):
         st.info("Nenhuma campanha com esses filtros.")
         return
 
+    # ─────────────────────────────────────────────────────────────
+    # PAGINAÇÃO — 10 campanhas por página
+    # ─────────────────────────────────────────────────────────────
+    ITEMS_POR_PAGINA = 10
+    total_paginas = max(1, (len(df_f) + ITEMS_POR_PAGINA - 1) // ITEMS_POR_PAGINA)
+
+    if "_disp_auto_pagina" not in st.session_state:
+        st.session_state["_disp_auto_pagina"] = 1
+
+    # Reset pra página 1 se filtros mudaram e reduziram total
+    if st.session_state["_disp_auto_pagina"] > total_paginas:
+        st.session_state["_disp_auto_pagina"] = 1
+
+    pagina_atual = st.session_state["_disp_auto_pagina"]
+    inicio = (pagina_atual - 1) * ITEMS_POR_PAGINA
+    fim = inicio + ITEMS_POR_PAGINA
+    df_pag = df_f.iloc[inicio:fim]
+
     # CSS dos cards
     st.markdown("""
     <style>
@@ -440,8 +464,8 @@ def _render_resumo(df_camp, df_disp_raw):
     </style>
     """, unsafe_allow_html=True)
 
-    # Cards das campanhas
-    for _, row in df_f.head(100).iterrows():
+    # Cards das campanhas (só da página atual)
+    for _, row in df_pag.iterrows():
         nome = row['nome_cadastrante']
         tel_cad = row['telefone_cadastrante']
         unid = _norm_unidade(row['unidade'])
@@ -501,8 +525,31 @@ def _render_resumo(df_camp, df_disp_raw):
                 st.session_state['_disp_auto_drill_id'] = row['campanha_id']
                 st.rerun()
 
-    if len(df_f) > 100:
-        st.caption(f"Mostrando 100 de {len(df_f)}. Use os filtros pra refinar.")
+    # ─────────────────────────────────────────────────────────────
+    # CONTROLES DE PAGINAÇÃO — embaixo da lista
+    # ─────────────────────────────────────────────────────────────
+    if total_paginas > 1:
+        st.markdown("<br>", unsafe_allow_html=True)
+        col_prev, col_info, col_next = st.columns([1, 2, 1])
+        with col_prev:
+            if st.button("← Anterior", key="disp_auto_prev",
+                         disabled=(pagina_atual == 1),
+                         use_container_width=True):
+                st.session_state["_disp_auto_pagina"] -= 1
+                st.rerun()
+        with col_info:
+            st.markdown(
+                f"<div style='text-align: center; padding-top: 6px; color: #6b7280;'>"
+                f"Página <strong>{pagina_atual}</strong> de <strong>{total_paginas}</strong> "
+                f"· mostrando {inicio + 1}–{min(fim, len(df_f))} de {len(df_f)}</div>",
+                unsafe_allow_html=True,
+            )
+        with col_next:
+            if st.button("Próxima →", key="disp_auto_next",
+                         disabled=(pagina_atual == total_paginas),
+                         use_container_width=True):
+                st.session_state["_disp_auto_pagina"] += 1
+                st.rerun()
 
 
 # ============================================================================
