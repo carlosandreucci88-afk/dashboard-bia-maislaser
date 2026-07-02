@@ -43,6 +43,13 @@ v9.11 (30/06/2026): CONFIG TELEFONES DA RECEPÇÃO
   • Expander no topo da aba pra editar recepcao_{mogi,suzano}_telefone
   • Apps Script Filtro Webhook Bia v3.1+ lê esses valores a cada clique
 
+v9.16 (02/07/2026): TOLERÂNCIA NO AUTO_TERMINADO
+  • Muda regra "processados >= total_contatos" pra "processados >= total_contatos - 2"
+  • Cobre caso onde 1-2 indicados cadastrados nunca viram linha em bia_disparos
+    (telefone inválido, duplicado, formato errado — cliente-mãe cadastrou 182
+    mas só 181 viraram registro).
+  • Sem esse fix, campanha fica travada em "rodando" pra sempre.
+
 v9.15 (01/07/2026): EXPORT SEM RESPOSTA
   • Botão de download XLSX (nome + telefone) no card AUTO terminado
   • Puxa direto do Supabase os que têm disparado_em NOT NULL e respondeu_em NULL
@@ -905,7 +912,10 @@ def _detectar_estado_campanha(modo, bia_puxou_dt, total_contatos=0, stats=None):
             processados = (stats.get("disparados", 0) +
                            stats.get("skip_base", 0) +
                            stats.get("erros", 0))
-            if total_contatos > 0 and processados >= total_contatos:
+            # v9.16: tolerância de 2 linhas — cobre casos onde 1-2 indicados
+            # foram cadastrados mas nunca viraram linha em bia_disparos
+            # (telefone inválido/duplicado/formato errado no cadastro).
+            if total_contatos > 0 and processados >= max(1, total_contatos - 2):
                 return "auto_terminado"
         return "auto_rodando"
     return "sem_decisao"  # fallback
