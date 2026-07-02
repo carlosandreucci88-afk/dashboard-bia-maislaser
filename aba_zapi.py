@@ -1425,100 +1425,29 @@ def _render_lista_contatos(camp_id, nome):
 @st.cache_data(ttl=300, show_spinner=False)
 def _zapi_get_ranking_supabase(data_inicio: str = "", data_fim: str = ""):
     """
-    Calcula ranking direto no Supabase.
-    Retorna formato idêntico ao endpoint funcionarias_real do Apps Script.
+    Calcula ranking direto no Supabase via RPC get_ranking_funcionarias.
+    A agregação roda server-side (Postgres) — retorna ~15 linhas em <100ms.
     """
     from datetime import datetime as _dt
-    import pandas as pd
 
     sb = _get_supabase_zapi()
 
-    # ─────────────────────────────────────────────────────
-    # 1) Busca funcionárias ativas
-    # ─────────────────────────────────────────────────────
-    resp_func = sb.table("funcionarias").select("nome,unidade,ativa").eq("ativa", True).execute()
-    funcs = resp_func.data or []
-    funcs = [f for f in funcs if str(f.get("nome", "")).strip().lower() != "teste"]
-
-    if not funcs:
-        return {
-            "total": 0,
-            "periodo": {"data_inicio": data_inicio or None, "data_fim": data_fim or None},
-            "gerado_em": _dt.utcnow().isoformat(),
-            "linhas": [],
-            "_fonte": "supabase",
-        }
-
-    # ─────────────────────────────────────────────────────
-    # 2) Busca CLIENTES (com filtro de período em data_bateu_meta)
-    # ─────────────────────────────────────────────────────
-    q_cli = sb.table("clientes").select("funcionaria,unidade,status_de_aonde_parou,data_bateu_meta")
+    # Prepara params da RPC (só passa se preenchidos)
+    params = {}
     if data_inicio:
-        q_cli = q_cli.gte("data_bateu_meta", f"{data_inicio}T00:00:00")
+        params["p_data_inicio"] = f"{data_inicio}T00:00:00"
     if data_fim:
-        q_cli = q_cli.lte("data_bateu_meta", f"{data_fim}T23:59:59")
-    resp_cli = q_cli.execute()
-    df_cli = pd.DataFrame(resp_cli.data or [])
+        params["p_data_fim"] = f"{data_fim}T23:59:59"
 
-    # ─────────────────────────────────────────────────────
-    # 3) Busca INDICACOES (com filtro de período em data)
-    # ─────────────────────────────────────────────────────
-    q_ind = sb.table("indicacoes").select("funcionaria,unidade,status,data")
-    if data_inicio:
-        q_ind = q_ind.gte("data", f"{data_inicio}T00:00:00")
-    if data_fim:
-        q_ind = q_ind.lte("data", f"{data_fim}T23:59:59")
-    resp_ind = q_ind.execute()
-    df_ind = pd.DataFrame(resp_ind.data or [])
-
-    # ─────────────────────────────────────────────────────
-    # 4) Agrega em Python por funcionaria+unidade
-    # ─────────────────────────────────────────────────────
-    linhas = []
-    for f in funcs:
-        nome_func = str(f.get("nome", "")).strip()
-        unid_func = str(f.get("unidade", "")).strip()
-        unid_lower = "mogi" if "mogi" in unid_func.lower() else "suzano"
-
-        # disparos: clientes cuja funcionaria = nome_func e unidade contém unid_lower
-        disparos = 0
-        vouchers = 0
-        if not df_cli.empty:
-            mask_cli = (
-                (df_cli["funcionaria"].fillna("").astype(str) == nome_func)
-                & (df_cli["unidade"].fillna("").astype(str).str.lower().str.contains(unid_lower, na=False))
-            )
-            sub_cli = df_cli[mask_cli]
-            disparos = len(sub_cli)
-            vouchers = int((sub_cli["status_de_aonde_parou"].fillna("").astype(str) == "FINALIZADO").sum())
-
-        # indicacoes válidas
-        indicacoes = 0
-        if not df_ind.empty:
-            mask_ind = (
-                (df_ind["funcionaria"].fillna("").astype(str) == nome_func)
-                & (df_ind["unidade"].fillna("").astype(str).str.lower().str.contains(unid_lower, na=False))
-                & (df_ind["status"].fillna("").astype(str) == "VALIDO")
-            )
-            indicacoes = int(mask_ind.sum())
-
-        taxa = f"{(vouchers / disparos * 100):.1f}" if disparos > 0 else "0.0"
-
-        linhas.append({
-            "funcionaria": nome_func,
-            "unidade": unid_func,
-            "disparos": int(disparos),
-            "indicacoes_validas": int(indicacoes),
-            "vouchers_validados": int(vouchers),
-            "taxa_conversao": taxa,
-        })
+    resp = sb.rpc("get_ranking_funcionarias", params).execute()
+    linhas = resp.data or []
 
     return {
         "total": len(linhas),
         "periodo": {"data_inicio": data_inicio or None, "data_fim": data_fim or None},
         "gerado_em": _dt.utcnow().isoformat(),
         "linhas": linhas,
-        "_fonte": "supabase",
+        "_fonte": "supabase_rpc",
     }
 
 
