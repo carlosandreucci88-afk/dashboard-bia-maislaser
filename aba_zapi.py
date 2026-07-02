@@ -2676,7 +2676,218 @@ def _xlsx_clientes_prog(df_export, sufixo):
 # ENTRY POINTS — chamados pelo dashboard_maislaser.py dentro da tab
 # ============================================================================
 
-def render_aba_zapi_aguardando():
+# ============================================================================
+# TELA: 👥 GESTÃO DE FUNCIONÁRIAS (v10.4 — Fase 4.6, CRUD Supabase)
+# ============================================================================
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _zapi_get_funcionarias_lista(_marker: int = 0):
+    """
+    Lista todas as funcionárias do Supabase (ativas + arquivadas).
+    O parâmetro _marker é usado só pra invalidar cache manualmente.
+    """
+    try:
+        sb = _get_supabase_zapi()
+        resp = sb.table("funcionarias").select("id,nome,unidade,ativa,criado_em") \
+            .order("ativa", desc=True).order("unidade").order("nome").execute()
+        return resp.data or []
+    except Exception as e:
+        return {"_erro": f"Falha ao ler funcionárias: {e}"}
+
+
+def _zapi_funcionaria_criar(nome: str, unidade: str):
+    """INSERT nova funcionária no Supabase."""
+    sb = _get_supabase_zapi()
+    nome_norm = nome.strip()
+    unid_norm = unidade.strip().lower()
+    return sb.table("funcionarias").insert({
+        "nome": nome_norm,
+        "unidade": unid_norm,
+        "ativa": True,
+    }).execute()
+
+
+def _zapi_funcionaria_atualizar(func_id: int, campos: dict):
+    """UPDATE parcial via ID."""
+    sb = _get_supabase_zapi()
+    return sb.table("funcionarias").update(campos).eq("id", func_id).execute()
+
+
+def tela_zapi_funcionarias_crud():
+    st.markdown("## 👥 Gestão de Funcionárias")
+    st.caption(
+        "Cadastro das funcionárias que atendem clientes no programa. "
+        "Arquivadas somem do ranking mas mantêm o histórico intacto."
+    )
+
+    # ─────────────────────────────────────────────────────────
+    # BLOCO: Formulário de nova funcionária
+    # ─────────────────────────────────────────────────────────
+    with st.expander("➕ Adicionar nova funcionária", expanded=False):
+        col_n, col_u, col_b = st.columns([3, 2, 1])
+        with col_n:
+            novo_nome = st.text_input(
+                "Nome:",
+                placeholder="Ex: Camila",
+                key="func_novo_nome",
+                help="Nome único por unidade — sem duplicar",
+            )
+        with col_u:
+            nova_unid = st.radio(
+                "Unidade:",
+                ["mogi", "suzano"],
+                horizontal=True,
+                key="func_nova_unid",
+            )
+        with col_b:
+            st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
+            criar_btn = st.button(
+                "✅ Criar",
+                key="func_criar_btn",
+                use_container_width=True,
+                type="primary",
+            )
+
+        if criar_btn:
+            nome_limpo = (novo_nome or "").strip()
+            if not nome_limpo:
+                st.error("⚠️ Nome não pode ficar vazio.")
+            elif nome_limpo.lower() == "teste":
+                st.error("⚠️ Nome 'teste' é reservado.")
+            else:
+                try:
+                    _zapi_funcionaria_criar(nome_limpo, nova_unid)
+                    st.success(f"✅ **{nome_limpo}** ({nova_unid}) criada!")
+                    _zapi_get_funcionarias_lista.clear()
+                    st.rerun()
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "duplicate" in msg or "unique" in msg or "uq_funcionaria" in msg:
+                        st.error(f"⚠️ Já existe uma **{nome_limpo}** em {nova_unid}.")
+                    else:
+                        st.error(f"❌ Erro ao criar: {e}")
+
+    st.divider()
+
+    # ─────────────────────────────────────────────────────────
+    # BLOCO: Filtro + atualizar
+    # ─────────────────────────────────────────────────────────
+    col_f, col_r = st.columns([4, 1])
+    with col_f:
+        filtro_status = st.radio(
+            "Mostrar:",
+            ["✅ Ativas", "📦 Arquivadas", "🌐 Todas"],
+            horizontal=True,
+            key="func_filtro_status",
+        )
+    with col_r:
+        st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
+        if st.button("🔄 Atualizar", key="func_refresh", use_container_width=True):
+            _zapi_get_funcionarias_lista.clear()
+            st.rerun()
+
+    # ─────────────────────────────────────────────────────────
+    # BLOCO: Lista com ações inline
+    # ─────────────────────────────────────────────────────────
+    funcs = _zapi_get_funcionarias_lista()
+    if isinstance(funcs, dict) and funcs.get("_erro"):
+        st.error(funcs["_erro"])
+        return
+
+    # Aplica filtro
+    if filtro_status == "✅ Ativas":
+        funcs = [f for f in funcs if f.get("ativa")]
+    elif filtro_status == "📦 Arquivadas":
+        funcs = [f for f in funcs if not f.get("ativa")]
+
+    if not funcs:
+        st.info("Nenhuma funcionária no filtro selecionado.")
+        return
+
+    st.caption(f"**{len(funcs)}** funcionária(s) mostrada(s)")
+
+    # Cabeçalho da tabela
+    h1, h2, h3, h4 = st.columns([3, 2, 2, 2])
+    h1.markdown("**Nome**")
+    h2.markdown("**Unidade**")
+    h3.markdown("**Status**")
+    h4.markdown("**Ações**")
+    st.markdown(
+        '<hr style="margin: 4px 0 8px 0; border: none; border-top: 1px solid #E5E7EB;">',
+        unsafe_allow_html=True,
+    )
+
+    for f in funcs:
+        fid = f.get("id")
+        nome = f.get("nome", "?")
+        unidade = f.get("unidade", "?")
+        ativa = bool(f.get("ativa", False))
+
+        c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
+        c1.markdown(f"**{nome}**")
+        c2.markdown(unidade)
+        c3.markdown("✅ Ativa" if ativa else "📦 Arquivada")
+
+        with c4:
+            col_a, col_b = st.columns(2)
+            with col_a:
+                # Popover de mudar unidade
+                with st.popover("🔀 Unidade", use_container_width=True):
+                    st.caption(f"Mudar unidade de **{nome}**")
+                    outra = "suzano" if unidade == "mogi" else "mogi"
+                    if st.button(
+                        f"Mover pra **{outra}**",
+                        key=f"func_movunid_{fid}",
+                        use_container_width=True,
+                    ):
+                        try:
+                            _zapi_funcionaria_atualizar(fid, {"unidade": outra})
+                            st.success(f"✅ {nome} agora em {outra}")
+                            _zapi_get_funcionarias_lista.clear()
+                            st.rerun()
+                        except Exception as e:
+                            msg = str(e).lower()
+                            if "duplicate" in msg or "unique" in msg:
+                                st.error(f"⚠️ Já existe **{nome}** em {outra}.")
+                            else:
+                                st.error(f"❌ Erro: {e}")
+
+            with col_b:
+                if ativa:
+                    if st.button(
+                        "📦",
+                        key=f"func_arq_{fid}",
+                        use_container_width=True,
+                        help="Arquivar (soft delete — mantém histórico)",
+                    ):
+                        try:
+                            _zapi_funcionaria_atualizar(fid, {"ativa": False})
+                            _zapi_get_funcionarias_lista.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ {e}")
+                else:
+                    if st.button(
+                        "♻️",
+                        key=f"func_react_{fid}",
+                        use_container_width=True,
+                        help="Reativar",
+                    ):
+                        try:
+                            _zapi_funcionaria_atualizar(fid, {"ativa": True})
+                            _zapi_get_funcionarias_lista.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ {e}")
+
+    st.divider()
+    st.caption(
+        "ℹ️ Arquivar não deleta — só esconde do ranking. "
+        "O histórico de indicações continua intacto. Reative quando quiser."
+    )
+
+
+
     """Renderiza a tela principal do robô Z-API: aguardando validação."""
     tela_zapi_aguardando_validacao()
 
@@ -2699,3 +2910,8 @@ def render_aba_zapi_metricas():
 def render_aba_zapi_clientes():
     """Renderiza a tela de clientes no programa."""
     tela_zapi_clientes_programa()
+
+
+def render_aba_zapi_funcionarias():
+    """Renderiza a tela de gestão CRUD de funcionárias (Fase 4.6)."""
+    tela_zapi_funcionarias_crud()
