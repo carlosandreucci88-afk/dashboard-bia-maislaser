@@ -2052,10 +2052,11 @@ def tela_zapi_indicacoes():
 # TELA: 📊 MÉTRICAS Z-API (v9.6 + fix contrato flat)
 # ============================================================================
 
-def _zapi_get_metricas_supabase(data_inicio: str = "", data_fim: str = "", unidade: str = ""):
+@st.cache_data(ttl=300, show_spinner=False)
+def _zapi_get_metricas_all_supabase(data_inicio: str = "", data_fim: str = ""):
     """
-    Calcula métricas do funil direto no Supabase via RPC get_metricas_funil.
-    Uma única query agregada — <50ms consistente.
+    Retorna dict com métricas das 3 unidades: todas, mogi, suzano.
+    Chama RPC get_metricas_funil_all uma única vez.
     """
     from datetime import datetime as _dt
     sb = _get_supabase_zapi()
@@ -2065,51 +2066,75 @@ def _zapi_get_metricas_supabase(data_inicio: str = "", data_fim: str = "", unida
         params["p_data_inicio"] = f"{data_inicio}T00:00:00"
     if data_fim:
         params["p_data_fim"] = f"{data_fim}T23:59:59"
-    if unidade:
-        params["p_unidade"] = unidade
 
-    resp = sb.rpc("get_metricas_funil", params).execute()
-    row = (resp.data or [{}])[0] if resp.data else {}
+    resp = sb.rpc("get_metricas_funil_all", params).execute()
+    linhas = resp.data or []
 
-    return {
-        "periodo": {
-            "data_inicio": data_inicio or None,
-            "data_fim": data_fim or None,
-        },
-        "unidade": row.get("unidade", "todas"),
-        "funil": {
-            "iniciaram_conversa": int(row.get("iniciaram_conversa", 0) or 0),
-            "escolheram_privacidade": int(row.get("escolheram_privacidade", 0) or 0),
-            "enviaram_pelo_menos_1": int(row.get("enviaram_pelo_menos_1", 0) or 0),
-            "bateram_meta": int(row.get("bateram_meta", 0) or 0),
-            "enviados_validacao": int(row.get("enviados_validacao", 0) or 0),
-            "validados": int(row.get("validados", 0) or 0),
-            "invalidados": int(row.get("invalidados", 0) or 0),
-            "encerrados_sem_resposta": int(row.get("encerrados_sem_resposta", 0) or 0),
-            "em_andamento": int(row.get("em_andamento", 0) or 0),
-        },
-        "taxas": {
-            "privacidade": row.get("taxa_privacidade", "0.0"),
-            "enviou_contato": row.get("taxa_enviou_contato", "0.0"),
-            "bateu_meta": row.get("taxa_bateu_meta", "0.0"),
-            "validacao": row.get("taxa_validacao", "0.0"),
-            "conversao_geral": row.get("taxa_conversao_geral", "0.0"),
-        },
-        "gerado_em": _dt.utcnow().isoformat(),
-        "_fonte": "supabase_rpc",
-    }
+    # Indexa por unidade
+    por_unidade = {}
+    for row in linhas:
+        u = str(row.get("unidade", "todas")).lower()
+        por_unidade[u] = {
+            "periodo": {"data_inicio": data_inicio or None, "data_fim": data_fim or None},
+            "unidade": u,
+            "funil": {
+                "iniciaram_conversa": int(row.get("iniciaram_conversa", 0) or 0),
+                "escolheram_privacidade": int(row.get("escolheram_privacidade", 0) or 0),
+                "enviaram_pelo_menos_1": int(row.get("enviaram_pelo_menos_1", 0) or 0),
+                "bateram_meta": int(row.get("bateram_meta", 0) or 0),
+                "enviados_validacao": int(row.get("enviados_validacao", 0) or 0),
+                "validados": int(row.get("validados", 0) or 0),
+                "invalidados": int(row.get("invalidados", 0) or 0),
+                "encerrados_sem_resposta": int(row.get("encerrados_sem_resposta", 0) or 0),
+                "em_andamento": int(row.get("em_andamento", 0) or 0),
+            },
+            "taxas": {
+                "privacidade": row.get("taxa_privacidade", "0.0"),
+                "enviou_contato": row.get("taxa_enviou_contato", "0.0"),
+                "bateu_meta": row.get("taxa_bateu_meta", "0.0"),
+                "validacao": row.get("taxa_validacao", "0.0"),
+                "conversao_geral": row.get("taxa_conversao_geral", "0.0"),
+            },
+            "gerado_em": _dt.utcnow().isoformat(),
+            "_fonte": "supabase_rpc",
+        }
+
+    # Se não veio nenhuma unidade, retorna estrutura vazia
+    if not por_unidade:
+        for u in ("todas", "mogi", "suzano"):
+            por_unidade[u] = {
+                "periodo": {"data_inicio": data_inicio or None, "data_fim": data_fim or None},
+                "unidade": u,
+                "funil": {
+                    "iniciaram_conversa": 0, "escolheram_privacidade": 0,
+                    "enviaram_pelo_menos_1": 0, "bateram_meta": 0,
+                    "enviados_validacao": 0, "validados": 0, "invalidados": 0,
+                    "encerrados_sem_resposta": 0, "em_andamento": 0,
+                },
+                "taxas": {
+                    "privacidade": "0.0", "enviou_contato": "0.0",
+                    "bateu_meta": "0.0", "validacao": "0.0", "conversao_geral": "0.0",
+                },
+                "gerado_em": _dt.utcnow().isoformat(),
+                "_fonte": "supabase_rpc",
+            }
+
+    return por_unidade
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _zapi_get_metricas(data_inicio: str = "", data_fim: str = "", unidade: str = ""):
-    """Métricas do funil. Cache 5min.
-    v10.4: se flag ativa, calcula direto no Supabase via RPC (~50ms).
+    """Métricas do funil. Cache 5min por período.
+    v10.4: se flag ativa, busca as 3 unidades numa RPC única e filtra localmente
+    (alternar Mogi/Todas/Suzano fica instantâneo — só troca do cache).
     Senão, chama Apps Script (metricas_funil, 2-5s).
     """
     # Tenta Supabase direto se flag ativa
     if _get_flag_indicacoes_supabase():
         try:
-            return _zapi_get_metricas_supabase(data_inicio, data_fim, unidade)
+            todas = _zapi_get_metricas_all_supabase(data_inicio, data_fim)
+            u = (unidade or "todas").lower() or "todas"
+            return todas.get(u, todas.get("todas", {}))
         except Exception as e:
             print(f"[_zapi_get_metricas] Supabase falhou, fallback Apps Script: {e}")
 
