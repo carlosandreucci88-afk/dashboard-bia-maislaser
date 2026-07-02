@@ -1711,13 +1711,95 @@ def tela_zapi_ranking():
 # TELA: 📨 INDICAÇÕES (v9.5)
 # ============================================================================
 
+@st.cache_data(ttl=30, show_spinner=False)
+def _get_flag_indicacoes_supabase():
+    """Lê flag configuracoes.indicacoes_supabase_ativo (cache 30s)."""
+    try:
+        sb = _get_supabase_zapi()
+        resp = sb.table("configuracoes").select("indicacoes_supabase_ativo").eq("id", 1).limit(1).execute()
+        if resp.data and len(resp.data) > 0:
+            return bool(resp.data[0].get("indicacoes_supabase_ativo", False))
+    except Exception:
+        pass
+    return False
+
+
+def _zapi_get_indicacoes_supabase(data_inicio, data_fim, incluir_arquivo,
+                                    busca, status, unidade, funcionaria, limit):
+    """Consulta direto no Supabase (query indexada, ~50-150ms)."""
+    from datetime import datetime as _dt
+    sb = _get_supabase_zapi()
+    cols = ("campanha_id,telefone_cliente,nome_cliente,unidade,funcionaria,"
+            "telefone_indicado,nome_indicado,status,motivo,data,arquivada_em")
+
+    q = sb.table("indicacoes").select(cols, count="exact")
+
+    if not incluir_arquivo:
+        q = q.is_("arquivada_em", "null")
+    if data_inicio:
+        q = q.gte("data", f"{data_inicio}T00:00:00")
+    if data_fim:
+        q = q.lte("data", f"{data_fim}T23:59:59")
+    if status:
+        q = q.eq("status", status.upper())
+    if unidade:
+        q = q.ilike("unidade", f"%{unidade}%")
+    if funcionaria:
+        q = q.ilike("funcionaria", f"%{funcionaria}%")
+    if busca:
+        b = busca.replace("*", "").replace(",", "")
+        q = q.or_(
+            f"nome_cliente.ilike.%{b}%,telefone_cliente.ilike.%{b}%,"
+            f"nome_indicado.ilike.%{b}%,telefone_indicado.ilike.%{b}%"
+        )
+
+    resp = q.order("data", desc=True).limit(limit).execute()
+    total_filtrado = resp.count or 0
+
+    # Contagens agregadas (planilha vs arquivo)
+    total_planilha = sb.table("indicacoes").select("id", count="exact") \
+        .is_("arquivada_em", "null").limit(1).execute().count or 0
+
+    total_arquivo = 0
+    if incluir_arquivo:
+        total_arquivo = sb.table("indicacoes").select("id", count="exact") \
+            .not_.is_("arquivada_em", "null").limit(1).execute().count or 0
+
+    return {
+        "total_planilha": total_planilha,
+        "total_arquivo": total_arquivo,
+        "total_filtrado": total_filtrado,
+        "total": total_filtrado,
+        "limit_aplicado": limit,
+        "gerado_em": _dt.utcnow().isoformat(),
+        "linhas": resp.data or [],
+        "_fonte": "supabase",
+    }
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def _zapi_get_indicacoes(data_inicio: str = "", data_fim: str = "",
                           incluir_arquivo: bool = False,
                           busca: str = "", status: str = "",
                           unidade: str = "", funcionaria: str = "",
                           limit: int = 5000):
-    """Chama o endpoint indicacoes com filtros. Cache 2min por combinação."""
+    """
+    Busca indicações com filtros. Cache 2min por combinação.
+    v10.4: se configuracoes.indicacoes_supabase_ativo=true, consulta Supabase
+    direto (50-150ms). Senão, chama Apps Script (2-5s).
+    """
+    # Tenta Supabase direto se flag ativa
+    if _get_flag_indicacoes_supabase():
+        try:
+            return _zapi_get_indicacoes_supabase(
+                data_inicio, data_fim, incluir_arquivo,
+                busca, status, unidade, funcionaria, limit
+            )
+        except Exception as e:
+            # Fallback silencioso pro Apps Script
+            print(f"[_zapi_get_indicacoes] Supabase falhou, fallback Apps Script: {e}")
+
+    # Comportamento antigo: chama Apps Script
     try:
         url = st.secrets["APPS_SCRIPT_URL_ZAPI"]
         token = st.secrets["APPS_SCRIPT_TOKEN_ZAPI"]
@@ -1740,6 +1822,7 @@ def _zapi_get_indicacoes(data_inicio: str = "", data_fim: str = "",
         data = resp.json()
         if isinstance(data, dict) and data.get("erro"):
             return {"_erro": f"Z-API: {data['erro']}"}
+        data["_fonte"] = "apps_script"
         return data
     except requests.exceptions.Timeout:
         return {"_erro": "Apps Script demorou demais (>45s). Reduza o período ou desmarque o arquivo."}
