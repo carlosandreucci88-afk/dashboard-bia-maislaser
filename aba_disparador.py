@@ -2,6 +2,46 @@
 ==============================================================================
 ABA 🚀 DISPARAR AGENDA — Robô Confirmação Agenda
 ==============================================================================
+v6.14.2 (02/07/2026): PERSISTÊNCIA DE DETALHES DE ERRO
+Grava telefone + nome + HTTP + resposta da Meta no Supabase quando
+`enviar_mensagem_whatsapp` falha. Fim do "1 erro sem saber quem/por quê".
+
+CAUSA RAIZ DO BUG DIAGNOSTICADO:
+  Quando o envio pra Meta falhava (ex: 5511968959627 _aline em 02/07 09:42),
+  o `st.error` mostrava HTTP + mensagem na tela do Streamlit — MAS não gravava
+  no Supabase. Refresh da página apagava o registro visual. `disparos_historico`
+  gravava apenas o CONTADOR (`erros_envio: 1`) sem QUAL cliente ou POR QUÊ.
+  Resultado: alerta cego, precisava investigar do zero via Contexto do
+  Apps Script pra descobrir quem faltou.
+
+FIX v6.14.2:
+  ▸ NOVA COLUNA no Supabase: `erros_envio_detalhes text`
+    Antes de deployar, rodar migration_v6.14.2.sql no SQL Editor.
+    ALTER TABLE ADD COLUMN IF NOT EXISTS — idempotente e não bloqueia.
+  ▸ NOVA LISTA em memória: `erros_envio_detalhes` acumula durante o loop
+    cada falha em formato: "Nome (telefone) | HTTP xxx | {response_json}"
+    Cobre ambos casos: (1) HTTP != 200/201 da Meta e (2) telefone inválido.
+  ▸ `_atualizar_registro_historico` ganha novo parâmetro que grava a coluna.
+    Fallback INSERT também inclui a coluna.
+  ▸ `clientes_falha` continua sendo APENAS falhas de contexto (semântica limpa).
+    Erros de envio ficam separados na coluna nova.
+
+RETROCOMPAT TOTAL:
+  ▸ Fluxo de disparo INTOCADO (envio, retry, backoff, GET final).
+  ▸ Estrutura da UI INTOCADA.
+  ▸ Validação de planilha e agrupamento INTOCADOS.
+  ▸ `_criar_registro_inicial_historico` INTOCADO.
+  ▸ Se a coluna nova ainda não existir no Supabase (esqueceu a migration),
+    o `update` da linha existente falharia — por isso a migration DEVE ser
+    aplicada ANTES do deploy do código.
+
+RESULTADO PRÁTICO:
+  Depois desta versão, sempre que der erro, você abre no Supabase Table Editor
+  a linha do disparo e a coluna `erros_envio_detalhes` mostra:
+  "_aline Chagas (5511968959627) | HTTP 400 | {"error":{"code":131047,"message":"Re-engagement message"}} || ..."
+  Fim da investigação forense.
+
+==============================================================================
 v6.14 (24/06/2026): VERIFICAÇÃO FINAL POR GET ÚNICO — elimina falsos positivos
 de "Contexto NÃO salvo" causados por timeout do POST quando Apps Script demora
 pra responder mas já salvou.
@@ -166,8 +206,10 @@ def _criar_registro_inicial_historico(unidade, arquivo_nome, total_clientes,
         return None
 
 
+# 🆕 v6.14.2 — assinatura ganhou parâmetro `erros_envio_detalhes` (lista de strings).
+# Se lista vazia, grava NULL na coluna (comportamento igual ao clientes_falha).
 def _atualizar_registro_historico(registro_id, sucessos, erros, falhas_contexto,
-                                   clientes_sem_contexto):
+                                   clientes_sem_contexto, erros_envio_detalhes):
     if not registro_id:
         return False
     try:
@@ -178,6 +220,10 @@ def _atualizar_registro_historico(registro_id, sucessos, erros, falhas_contexto,
             "falhas_contexto": falhas_contexto,
             "clientes_falha": ", ".join(clientes_sem_contexto) if clientes_sem_contexto else None,
             "erros_envio": erros,
+            # 🆕 v6.14.2 — usa " || " como separador (mais robusto que vírgula
+            # porque a resposta JSON da Meta contém vírgulas). Facilita split
+            # posterior pra debug.
+            "erros_envio_detalhes": " || ".join(erros_envio_detalhes) if erros_envio_detalhes else None,
             "observacao": None,
         }).eq("id", registro_id).execute()
         return True
@@ -397,6 +443,11 @@ def render_aba_disparador():
                     erros = 0  # contador de falhas de WhatsApp (status != 200)
                     falhas_contexto_post = 0  # 🆕 v6.14: falhas só do POST (pode ter falsos positivos)
                     clientes_falha_post = []  # 🆕 v6.14: lista de quem o POST reportou falha
+                    # 🆕 v6.14.2 — Acumula detalhes de cada erro de envio pra Meta.
+                    # Formato de cada item: "Nome (telefone) | HTTP xxx | {response_json}"
+                    # Cobre 2 casos: (1) HTTP != 200/201 da Meta e (2) telefone inválido/ausente.
+                    # Fim da era "erros_envio: 1" cego sem saber quem/por quê.
+                    erros_envio_detalhes = []
                     # 🆕 v6.14 — tracking de TODOS os telefones disparados (com sucesso na Meta).
                     # Será usado no GET final pra verificar se realmente estão no Contexto.
                     # Cada item: {tel, nome, ctx_post_ok}
@@ -499,12 +550,29 @@ def render_aba_disparador():
                                 })
                             else:
                                 erros += 1
+                                # 🆕 v6.14.2 — grava detalhe do erro PRA SEMPRE (Supabase),
+                                # não só temporariamente na tela. Trunca JSON longo em 300 chars.
+                                try:
+                                    res_str = json.dumps(res, ensure_ascii=False)
+                                except Exception:
+                                    res_str = str(res)
+                                if len(res_str) > 300:
+                                    res_str = res_str[:300] + "…"
+                                erros_envio_detalhes.append(
+                                    f"{nome_cliente} ({telefone_formatado}) | HTTP {code} | {res_str}"
+                                )
                                 st.error(
                                     f"❌ Falha — {nome_cliente} ({telefone_formatado}) | "
                                     f"HTTP {code} | {json.dumps(res, ensure_ascii=False)}"
                                 )
                         else:
                             erros += 1
+                            # 🆕 v6.14.2 — grava também os casos de telefone inválido/ausente,
+                            # que antes só apareciam na tela e depois sumiam com refresh.
+                            erros_envio_detalhes.append(
+                                f"{nome_cliente} (tel='{telefone_formatado}') | INVÁLIDO | "
+                                f"Telefone ausente ou com menos de 12 dígitos"
+                            )
                             st.error(
                                 f"⚠️ Número inválido ou ausente para: "
                                 f"{nome_cliente} (encontrado: '{telefone_formatado}')"
@@ -609,6 +677,7 @@ def render_aba_disparador():
                             erros=erros,
                             falhas_contexto=falhas_contexto,
                             clientes_sem_contexto=clientes_sem_contexto,
+                            erros_envio_detalhes=erros_envio_detalhes,  # 🆕 v6.14.2
                         )
                         if ok:
                             st.caption(f"📝 Registro #{registro_id} atualizado com totais finais")
@@ -625,6 +694,8 @@ def render_aba_disparador():
                                 "falhas_contexto": falhas_contexto,
                                 "clientes_falha": ", ".join(clientes_sem_contexto) if clientes_sem_contexto else None,
                                 "erros_envio": erros,
+                                # 🆕 v6.14.2 — inclui nova coluna também no fallback INSERT
+                                "erros_envio_detalhes": " || ".join(erros_envio_detalhes) if erros_envio_detalhes else None,
                                 "numero_alerta": numero_alerta_formatado,
                                 "observacao": "⚠️ Fallback v1 — registro inicial falhou",
                             }).execute()
@@ -662,6 +733,15 @@ def render_aba_disparador():
                             f"O robô NÃO vai reconhecer as respostas dessas clientes.\n\n"
                             f"**Clientes afetados:** {', '.join(clientes_sem_contexto)}\n\n"
                             f"💡 Solução: re-dispare só para essas clientes."
+                        )
+
+                    # 🆕 v6.14.2 — Bloco de erros de envio persistente (Supabase)
+                    if erros_envio_detalhes:
+                        st.error(
+                            f"🚨 **{len(erros_envio_detalhes)} erro(s) de envio detectado(s)** "
+                            f"— detalhes gravados no Supabase (`disparos_historico.erros_envio_detalhes`).\n\n"
+                            + "\n".join(f"• {d}" for d in erros_envio_detalhes[:10])
+                            + (f"\n\n... +{len(erros_envio_detalhes)-10} outros" if len(erros_envio_detalhes) > 10 else "")
                         )
 
         except Exception as erro_geral:
