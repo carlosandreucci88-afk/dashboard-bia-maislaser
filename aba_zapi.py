@@ -2224,8 +2224,12 @@ def tela_zapi_metricas():
         unsafe_allow_html=True,
     )
 
+    _t0 = _dt.utcnow() if False else __import__("time").time()
     with st.spinner("Calculando métricas do funil..."):
         data = _zapi_get_metricas(data_inicio_str, data_fim_str, unidade_param)
+    _elapsed_ms = int((__import__("time").time() - _t0) * 1000)
+    _fonte = data.get("_fonte", "?") if isinstance(data, dict) else "?"
+    st.caption(f"🔍 DEBUG: fonte={_fonte} · tempo={_elapsed_ms}ms")
 
     if _mostrar_erro_e_parar(data, "(carregando métricas)"):
         return
