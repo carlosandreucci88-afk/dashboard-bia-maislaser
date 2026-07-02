@@ -24,6 +24,28 @@ Conecta o dashboard aos endpoints do Apps Script do Z-API:
     /?endpoint=set_modo_campanha&tel=...&modo=AUTO|MANUAL  → v9.8
     /?endpoint=set_default_modo&modo=AUTO|MANUAL           → v9.8
 
+v9.18 (02/07/2026): FIX CARD PRESO EM "AUTO · RODANDO" QUANDO fila=0
+  • Card ficava travado em "auto_rodando" quando o Filtro Bia inseria
+    menos linhas em bia_disparos do que o total_contatos do Sheets
+    (ex: Amanda cadastrou 20, só 16 viraram FILA porque 4 telefones já
+    estavam em bia_disparos de outra cliente que os indicou primeiro —
+    unique constraint em bia_disparos.telefone rejeita silenciosamente
+    o INSERT no _processarUmLote do Filtro Bia).
+  • Fix: usa fila==0 como sinal de fim, não threshold total_contatos-2.
+    Fonte de verdade vira o próprio bia_disparos — quando não tem mais
+    linha em FILA, o Disparador terminou por definição.
+  • Mudanças em 2 lugares:
+    1. _get_status_campanhas_auto: adiciona contador "fila" no dict.
+    2. _detectar_estado_campanha: `fila == 0 and processados > 0` em
+       vez do threshold antigo.
+
+  ⚠️ Bug estrutural relacionado (NÃO corrigido nesta versão):
+    O Webhook WATI (processarGravacaoGlobal linha 1064) só bloqueia
+    telefones que a PRÓPRIA cliente já indicou antes — `.filter(r =>
+    String(r[0]) === telC)`. Ignora indicações feitas por outras
+    clientes. Correção depende de migrar BLACKLIST_INDICACOES pra
+    Supabase (fase 1 do projeto de migração Sheets→Postgres).
+
 v9.17 (02/07/2026): FIX BUG NaT/None (mostrava "AUTO · RODANDO" e "nanh")
   • Quando algumas campanhas tinham bia_puxou_em preenchido e outras não,
     pandas coagia os None em pd.NaT — e `NaT is not None` é True, então
@@ -368,6 +390,7 @@ def _get_status_campanhas_auto(campanha_ids_tuple):
                 continue
             if cid not in stats:
                 stats[cid] = {"disparados": 0, "skip_base": 0, "erros": 0,
+                              "fila": 0,  # v9.18: pendentes pra disparar
                               "positivas": 0, "negativas": 0, "genericas": 0,
                               "sem_resposta": 0}
             s = stats[cid]
@@ -376,7 +399,11 @@ def _get_status_campanhas_auto(campanha_ids_tuple):
             disparado = row.get("disparado_em") is not None
             respondeu = row.get("respondeu_em") is not None
 
-            if status == "SKIP_BASE":
+            # v9.18: FILA são as linhas ainda não disparadas.
+            # Sinal de fim = fila == 0 (Disparador esgotou o trabalho).
+            if status == "FILA":
+                s["fila"] += 1
+            elif status == "SKIP_BASE":
                 s["skip_base"] += 1
             elif status in ("ERRO", "BLOQUEADO", "ERRO_NUMERO_INVALIDO", "BLOQUEADO_PELO_INDICADO"):
                 s["erros"] += 1
@@ -926,15 +953,25 @@ def _detectar_estado_campanha(modo, bia_puxou_dt, total_contatos=0, stats=None):
     if modo == "AUTO" and pd.isna(bia_puxou_dt):
         return "auto_aguardando"
     if modo == "AUTO" and pd.notna(bia_puxou_dt):
-        # v9.12: Checa se terminou (total processado >= contatos)
+        # v9.18: Sinal definitivo de fim = fila == 0 (Disparador esgotou o
+        # trabalho). Antes usava threshold total_contatos-2, mas isso travava
+        # quando 4+ indicados eram descartados por unique constraint em
+        # bia_disparos.telefone (ex: mesmo tel indicado por 2 clientes
+        # diferentes — a segunda perde no INSERT silencioso).
+        #
+        # Vantagens de fila==0:
+        #  • Escala pra campanhas grandes (169 contatos) sem sub-detectar
+        #  • Não depende do gap entre Sheets (total_contatos) e bia_disparos
+        #  • Fonte de verdade é a própria fila — quando esvazia, terminou
+        #
+        # Requer processados>0 pra evitar marcar como terminado antes do
+        # puxarLotesAuto rodar (fila=0 pode significar "ainda não inseriu").
         if stats:
+            fila_pending = stats.get("fila", 0)
             processados = (stats.get("disparados", 0) +
                            stats.get("skip_base", 0) +
                            stats.get("erros", 0))
-            # v9.16: tolerância de 2 linhas — cobre casos onde 1-2 indicados
-            # foram cadastrados mas nunca viraram linha em bia_disparos
-            # (telefone inválido/duplicado/formato errado no cadastro).
-            if total_contatos > 0 and processados >= max(1, total_contatos - 2):
+            if fila_pending == 0 and processados > 0:
                 return "auto_terminado"
         return "auto_rodando"
     return "sem_decisao"  # fallback
