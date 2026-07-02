@@ -43,6 +43,13 @@ v9.11 (30/06/2026): CONFIG TELEFONES DA RECEPÇÃO
   • Expander no topo da aba pra editar recepcao_{mogi,suzano}_telefone
   • Apps Script Filtro Webhook Bia v3.1+ lê esses valores a cada clique
 
+v9.17 (02/07/2026): PERFORMANCE E TOLERÂNCIA
+  • Timeout HTTP das chamadas Apps Script: 20s → 45s
+    (Apps Script pode demorar mais quando tem muitas campanhas ativas)
+  • Cache do status das campanhas AUTO: 20s → 60s
+    (menos chamadas repetidas ao Apps Script → menos timeout)
+  • Sem mudanças funcionais, só melhora responsividade
+
 v9.16 (02/07/2026): TOLERÂNCIA NO AUTO_TERMINADO
   • Muda regra "processados >= total_contatos" pra "processados >= total_contatos - 2"
   • Cobre caso onde 1-2 indicados cadastrados nunca viram linha em bia_disparos
@@ -108,7 +115,7 @@ def _zapi_get(endpoint: str, **params):
 
     query = {"endpoint": endpoint, "token": token, **{k: v for k, v in params.items() if v is not None}}
     try:
-        resp = requests.get(url, params=query, timeout=20, allow_redirects=True)
+        resp = requests.get(url, params=query, timeout=45, allow_redirects=True)
         if resp.status_code != 200:
             return {"_erro": f"HTTP {resp.status_code} ao chamar {endpoint}"}
         data = resp.json()
@@ -136,7 +143,7 @@ def _zapi_action(endpoint: str, **params):
 
     query = {"endpoint": endpoint, "token": token, **{k: v for k, v in params.items() if v is not None}}
     try:
-        resp = requests.get(url, params=query, timeout=20, allow_redirects=True)
+        resp = requests.get(url, params=query, timeout=45, allow_redirects=True)
         if resp.status_code != 200:
             return {"_erro": f"HTTP {resp.status_code}"}
         return resp.json()
@@ -336,7 +343,7 @@ def _get_progresso_campanhas_bia(campanha_ids_tuple):
 # Cache 20s pra atualização quase em tempo real no dashboard.
 # ============================================================================
 
-@st.cache_data(ttl=20, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def _get_status_campanhas_auto(campanha_ids_tuple):
     """Retorna dict {campanha_id: {disparados, skip_base, erros, positivas,
     negativas, genericas, sem_resposta}} pra campanhas AUTO."""
