@@ -24,31 +24,16 @@ Conecta o dashboard aos endpoints do Apps Script do Z-API:
     /?endpoint=set_modo_campanha&tel=...&modo=AUTO|MANUAL  → v9.8
     /?endpoint=set_default_modo&modo=AUTO|MANUAL           → v9.8
 
-v9.8 (18/06/2026): FEATURE MODO MANUAL/AUTO
-  • Toggle global "Default modo das próximas campanhas" no topo da aba
-  • Card de cada campanha com 4 estados:
-      - SEM DECISÃO → botões MANUAL / AUTO
-      - MANUAL → botões Validar/Invalidar + opção mudar pra AUTO
-      - AUTO (aguardando puxar) → mensagem informativa + mudar pra MANUAL
-      - AUTO (Bia rodando) → progresso X/Y + tempo restante, só visualização
-  • Progresso lido direto do Supabase (bia_disparos.respondeu_em)
-
-v9.9 (23/06/2026): FILTRO GLOBAL DE UNIDADE
-  • Filtro Todas / Mogi / Suzano movido pra ANTES dos cards de KPI
-  • Cards e lista de campanhas leem df já filtrado
-  • Estilo pill (consistente com aba Pendências)
-  • Estado persiste em session_state[_zapi_aguard_unidade_persist]
-
-v9.11 (30/06/2026): CONFIG TELEFONES DA RECEPÇÃO
-  • Expander no topo da aba pra editar recepcao_{mogi,suzano}_telefone
-  • Apps Script Filtro Webhook Bia v3.1+ lê esses valores a cada clique
-
-v9.17 (02/07/2026): PERFORMANCE E TOLERÂNCIA
-  • Timeout HTTP das chamadas Apps Script: 20s → 45s
-    (Apps Script pode demorar mais quando tem muitas campanhas ativas)
-  • Cache do status das campanhas AUTO: 20s → 60s
-    (menos chamadas repetidas ao Apps Script → menos timeout)
-  • Sem mudanças funcionais, só melhora responsividade
+v9.17 (02/07/2026): FIX BUG NaT/None (mostrava "AUTO · RODANDO" e "nanh")
+  • Quando algumas campanhas tinham bia_puxou_em preenchido e outras não,
+    pandas coagia os None em pd.NaT — e `NaT is not None` é True, então
+    campanhas que nunca foram puxadas apareciam como "auto_rodando" com
+    NaN horas + 0/20 processados.
+  • 3 patches:
+    1. df["bia_puxou_em_dt"] agora força dtype=object via list-comp,
+       impedindo coerção pra NaT.
+    2. _detectar_estado_campanha usa pd.isna/pd.notna em vez de is/is not None.
+    3. _ordem_prioridade + _render_acao_manual: mesma troca.
 
 v9.16 (02/07/2026): TOLERÂNCIA NO AUTO_TERMINADO
   • Muda regra "processados >= total_contatos" pra "processados >= total_contatos - 2"
@@ -84,6 +69,25 @@ v9.12 (01/07/2026): ESTADO AUTO_TERMINADO
     (Positivas / Genéricas / Negativas / Sem resposta) em tempo real
   • Substitui _get_progresso_campanhas_bia por _get_status_campanhas_auto
     que retorna dict completo por campanha
+
+v9.11 (30/06/2026): CONFIG TELEFONES DA RECEPÇÃO
+  • Expander no topo da aba pra editar recepcao_{mogi,suzano}_telefone
+  • Apps Script Filtro Webhook Bia v3.1+ lê esses valores a cada clique
+
+v9.9 (23/06/2026): FILTRO GLOBAL DE UNIDADE
+  • Filtro Todas / Mogi / Suzano movido pra ANTES dos cards de KPI
+  • Cards e lista de campanhas leem df já filtrado
+  • Estilo pill (consistente com aba Pendências)
+  • Estado persiste em session_state[_zapi_aguard_unidade_persist]
+
+v9.8 (18/06/2026): FEATURE MODO MANUAL/AUTO
+  • Toggle global "Default modo das próximas campanhas" no topo da aba
+  • Card de cada campanha com 4 estados:
+      - SEM DECISÃO → botões MANUAL / AUTO
+      - MANUAL → botões Validar/Invalidar + opção mudar pra AUTO
+      - AUTO (aguardando puxar) → mensagem informativa + mudar pra MANUAL
+      - AUTO (Bia rodando) → progresso X/Y + tempo restante, só visualização
+  • Progresso lido direto do Supabase (bia_disparos.respondeu_em)
 ==============================================================================
 """
 
@@ -115,7 +119,7 @@ def _zapi_get(endpoint: str, **params):
 
     query = {"endpoint": endpoint, "token": token, **{k: v for k, v in params.items() if v is not None}}
     try:
-        resp = requests.get(url, params=query, timeout=45, allow_redirects=True)
+        resp = requests.get(url, params=query, timeout=20, allow_redirects=True)
         if resp.status_code != 200:
             return {"_erro": f"HTTP {resp.status_code} ao chamar {endpoint}"}
         data = resp.json()
@@ -143,7 +147,7 @@ def _zapi_action(endpoint: str, **params):
 
     query = {"endpoint": endpoint, "token": token, **{k: v for k, v in params.items() if v is not None}}
     try:
-        resp = requests.get(url, params=query, timeout=45, allow_redirects=True)
+        resp = requests.get(url, params=query, timeout=20, allow_redirects=True)
         if resp.status_code != 200:
             return {"_erro": f"HTTP {resp.status_code}"}
         return resp.json()
@@ -343,7 +347,7 @@ def _get_progresso_campanhas_bia(campanha_ids_tuple):
 # Cache 20s pra atualização quase em tempo real no dashboard.
 # ============================================================================
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=20, show_spinner=False)
 def _get_status_campanhas_auto(campanha_ids_tuple):
     """Retorna dict {campanha_id: {disparados, skip_base, erros, positivas,
     negativas, genericas, sem_resposta}} pra campanhas AUTO."""
@@ -433,20 +437,7 @@ def _xlsx_sem_resposta_campanha(campanha_id):
 
 
 # ============================================================================
-# v9.9 (23/06/2026) — FILTRO GLOBAL DE UNIDADE (pill style)
-# ============================================================================
-# Antes: radio de unidade ficava DEPOIS dos cards de KPI, então os cards
-# mostravam dados de TODAS as unidades mesmo quando filtrava por Mogi/Suzano.
-# Agora: filtro vem ANTES dos cards, e cards/lista refletem a seleção.
-# Padrão visual igual ao da aba Pendências (botões pill com persist).
-# ============================================================================
-
-# ============================================================================
 # v9.11 (30/06/2026) — CONFIG TELEFONES DA RECEPÇÃO
-# ============================================================================
-# Edita configuracoes.recepcao_{mogi,suzano}_telefone via dashboard.
-# O Apps Script Filtro Webhook Bia v3.1 (_getTelefoneRecepcao) consulta esse
-# campo a cada clique de botão pra mandar o alerta pra recepção correta.
 # ============================================================================
 
 @st.cache_data(ttl=15, show_spinner=False)
@@ -499,7 +490,6 @@ def _render_config_recepcao():
     Discreto — fica recolhido por padrão."""
     tel_mogi_atual, tel_suzano_atual = _carregar_recepcao_telefones()
 
-    # Status compacto pra mostrar mesmo recolhido
     status_mogi = f"✅ {tel_mogi_atual}" if tel_mogi_atual else "⚠️ não configurado"
     status_suzano = f"✅ {tel_suzano_atual}" if tel_suzano_atual else "⚠️ não configurado"
 
@@ -674,7 +664,23 @@ def tela_zapi_aguardando_validacao():
     df["horas_parado"] = df["data_hora_dt"].apply(
         lambda d: ((datetime.now(TZ_SP) - d).total_seconds() / 3600) if d else 0
     )
-    df["bia_puxou_em_dt"] = df.get("bia_puxou_em", pd.Series([None] * len(df))).apply(_parse_iso)
+
+    # ───────────────────────────────────────────────────────────────────
+    # 🔧 v9.17 FIX #1: força dtype=object no bia_puxou_em_dt.
+    # Antes: df.get(...).apply(_parse_iso) — pandas coagia Nones em pd.NaT
+    #   quando outras linhas tinham datetimes válidos. NaT falha em
+    #   `is not None` (retorna True) mas passa em `.notna()` como False,
+    #   criando incoerência: campanha aparecia como "auto_rodando" com
+    #   NaN horas e 0/20 processados.
+    # Agora: list-comprehension + dtype=object mantém Nones reais.
+    # ───────────────────────────────────────────────────────────────────
+    _bia_col = df.get("bia_puxou_em", pd.Series([None] * len(df)))
+    df["bia_puxou_em_dt"] = pd.Series(
+        [_parse_iso(v) for v in _bia_col],
+        index=df.index,
+        dtype=object,
+    )
+
     df["modo"] = df.get("modo", pd.Series([""] * len(df))).fillna("").astype(str).str.upper().str.strip()
     df["validacao_marcada"] = df["validacao_marcada"].fillna("").astype(str).str.upper().str.strip()
 
@@ -701,7 +707,6 @@ def tela_zapi_aguardando_validacao():
 
     # ───────────────────────────────────────────────────────────────────
     # v9.12: STATUS COMPLETO DAS AUTO (Supabase) — só pra AUTO que já foi puxada
-    # Substitui _get_progresso_campanhas_bia por _get_status_campanhas_auto
     # ───────────────────────────────────────────────────────────────────
     camp_ids_bia = tuple(
         df[(df["modo"] == "AUTO") & df["bia_puxou_em_dt"].notna()]["campanha_id"].dropna().tolist()
@@ -715,7 +720,7 @@ def tela_zapi_aguardando_validacao():
     qtd_processando = int(_marcadas.sum())
     df_ativas = df[~_marcadas]
 
-    # Subdivisão por modo (entre as ativas)
+    # Subdivisão por modo (entre as ativas) — usa .notna()/.isna() (v9.17)
     qtd_sem_modo = int((df_ativas["modo"] == "").sum())
     qtd_manual = int((df_ativas["modo"] == "MANUAL").sum())
     qtd_auto_puxado = int(((df_ativas["modo"] == "AUTO") & df_ativas["bia_puxou_em_dt"].notna()).sum())
@@ -783,10 +788,11 @@ def tela_zapi_aguardando_validacao():
     )
 
     # Ordena: sem decisão primeiro (mais urgente), depois por tempo parado
+    # 🔧 v9.17 FIX #3a: usa pd.notna em vez de `is not None` (compat NaT)
     def _ordem_prioridade(row):
         if row["modo"] == "":
             return (0, -row["horas_parado"])  # sem decisão, mais antigos primeiro
-        if row["modo"] == "AUTO" and row["bia_puxou_em_dt"] is not None:
+        if row["modo"] == "AUTO" and pd.notna(row["bia_puxou_em_dt"]):
             return (1, -row["horas_parado"])  # AUTO rodando/terminado
         if row["modo"] == "AUTO":
             return (2, -row["horas_parado"])  # AUTO aguardando puxar
@@ -906,14 +912,20 @@ def _detectar_estado_campanha(modo, bia_puxou_dt, total_contatos=0, stats=None):
 
     v9.12: adicionado estado 'auto_terminado' quando processados >= total.
     Processados = disparados + skip_base + erros (tudo que já foi tentado).
+
+    🔧 v9.17 FIX #2: usa pd.isna/pd.notna em vez de `is None`/`is not None`.
+    Motivo: pandas coage None em pd.NaT quando outras linhas da coluna têm
+    datetimes válidos. `pd.NaT is not None` → True (falso positivo!). Isso
+    fazia campanhas nunca-puxadas aparecerem como "auto_rodando" com NaN
+    horas + 0/20 processados.
     """
     if modo == "":
         return "sem_decisao"
     if modo == "MANUAL":
         return "manual"
-    if modo == "AUTO" and bia_puxou_dt is None:
+    if modo == "AUTO" and pd.isna(bia_puxou_dt):
         return "auto_aguardando"
-    if modo == "AUTO" and bia_puxou_dt is not None:
+    if modo == "AUTO" and pd.notna(bia_puxou_dt):
         # v9.12: Checa se terminou (total processado >= contatos)
         if stats:
             processados = (stats.get("disparados", 0) +
@@ -987,8 +999,8 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
             help="Marca INVALIDADO. Mensagem de invalidação dispara em até 5min.",
         )
     with col_c:
-        # Mudar pra AUTO só se Bia ainda não puxou
-        if bia_puxou_dt is None:
+        # 🔧 v9.17 FIX #3b: pd.isna (compat NaT) — só mostra botão AUTO se bia ainda não puxou
+        if pd.isna(bia_puxou_dt):
             if st.button(
                 "↩️ Mudar pra AUTO",
                 key=f"to_auto_{camp_id}",
@@ -1372,24 +1384,12 @@ def _render_lista_contatos(camp_id, nome):
 # ============================================================================
 # TELA: 🏆 RANKING FUNCIONÁRIAS
 # ============================================================================
-# Lê do endpoint funcionarias_real (Apps Script v9.3) que calcula em tempo real
-# a partir de CLIENTES + CLIENTES_ARQUIVO + INDICACOES + INDICACOES_ARQUIVO,
-# normalizando lowercase (case-insensitive) e filtrando 'teste'.
-#
-# Critério "trouxe cliente" = coluna DATA BATEU META preenchida.
-# A aba FUNCIONARIAS NÃO é usada aqui (cálculo dela puxa errado por homônimas
-# e ignora arquivados).
-# ============================================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _zapi_get_ranking(data_inicio: str = "", data_fim: str = ""):
     """
     Chama o endpoint funcionarias_real do Apps Script com filtro opcional de período.
     Cache 5min por combinação de datas (cada filtro tem seu próprio cache).
-
-    Args:
-        data_inicio: ISO date YYYY-MM-DD ou string vazia pra sem filtro
-        data_fim: idem
     """
     try:
         url = st.secrets["APPS_SCRIPT_URL_ZAPI"]
@@ -1432,7 +1432,6 @@ def tela_zapi_ranking():
         "Conta como **indicação** cada contato indicado por essas clientes."
     )
 
-    # ─── Seletor de período ──────────────────────────────────────────────
     from datetime import date, timedelta
 
     hoje = date.today()
@@ -1496,7 +1495,6 @@ def tela_zapi_ranking():
             data_inicio_str = di.isoformat()
             data_fim_str = df_data.isoformat()
 
-    # Label legível do período aplicado
     if data_inicio_str and data_fim_str:
         di_fmt = "/".join(reversed(data_inicio_str.split("-")))
         df_fmt = "/".join(reversed(data_fim_str.split("-")))
@@ -1513,7 +1511,6 @@ def tela_zapi_ranking():
     if _mostrar_erro_e_parar(data, "(carregando ranking)"):
         return
 
-    # ─── FIX v9.9: endpoint retorna `linhas`, não `ranking`. ──────────────
     linhas = data.get("linhas", [])
     if not linhas:
         st.warning("Nenhum dado no ranking ainda.")
@@ -1521,9 +1518,6 @@ def tela_zapi_ranking():
 
     df = pd.DataFrame(linhas)
 
-    # ─── FIX v9.9: adaptar nomes de campos ──────────────────────────────
-    # Endpoint retorna: disparos, indicacoes_validas, vouchers_validados, taxa_conversao
-    # Dashboard usa internamente: clientes_com_indicacoes, indic_por_cliente
     if "disparos" in df.columns:
         df = df.rename(columns={"disparos": "clientes_com_indicacoes"})
     df["indic_por_cliente"] = df.apply(
@@ -1532,7 +1526,6 @@ def tela_zapi_ranking():
         axis=1,
     )
 
-    # ─── Filtro por unidade ───
     unid_filtro = st.radio(
         "Filtrar por unidade:",
         ["Todas", "Mogi", "Suzano"],
@@ -1543,7 +1536,6 @@ def tela_zapi_ranking():
     if unid_filtro != "Todas":
         df_filtrado = df_filtrado[df_filtrado["unidade"].str.lower() == unid_filtro.lower()]
 
-    # ─── Cards de resumo — calculados a partir do DF filtrado ───
     n_func = len(df_filtrado)
     n_cli = int(df_filtrado["clientes_com_indicacoes"].sum())
     n_ind = int(df_filtrado["indicacoes_validas"].sum())
@@ -1562,7 +1554,6 @@ def tela_zapi_ranking():
 
     st.markdown("---")
 
-    # Substitui df pelo filtrado pra resto da tela usar
     df = df_filtrado
 
     if df.empty:
@@ -1571,7 +1562,6 @@ def tela_zapi_ranking():
 
     df = df.sort_values("indicacoes_validas", ascending=False).reset_index(drop=True)
 
-    # ─── Top 5 com cards medalha ───
     st.markdown("### 🥇 Top 5")
     top5 = df.head(5)
     medalhas = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
@@ -1603,7 +1593,6 @@ def tela_zapi_ranking():
 
     st.markdown("---")
 
-    # ─── Tabela completa ───
     st.markdown("### 📋 Ranking completo")
     df_tabela = df.copy()
     df_tabela.insert(0, "#", range(1, len(df_tabela) + 1))
@@ -1645,7 +1634,6 @@ def tela_zapi_ranking():
 
     st.markdown("---")
 
-    # ─── Gráfico de barras horizontal ───
     st.markdown("### 📊 Indicações por funcionária")
     try:
         import plotly.express as px
@@ -1676,7 +1664,6 @@ def tela_zapi_ranking():
     except Exception as e:
         st.info(f"Gráfico indisponível: {e}")
 
-    # Footer com info do dado
     st.caption(
         f"📅 Calculado em {data.get('gerado_em', '—')} · "
         f"Cache 5min (clica em 🔄 Atualizar pra forçar refresh)"
@@ -1761,7 +1748,6 @@ def tela_zapi_indicacoes():
         "Inclua o arquivo pra ver histórico completo (3.518 indicações de maio)."
     )
 
-    # ─── Filtros linha 1: período + arquivo + atualizar ────────────────
     hoje = date.today()
     primeiro_mes = hoje.replace(day=1)
     ult_dia_mp = primeiro_mes - timedelta(days=1)
@@ -1811,7 +1797,6 @@ def tela_zapi_indicacoes():
             data_inicio_str = di.isoformat()
             data_fim_str = df_data.isoformat()
 
-    # ─── Filtros linha 2: busca + unidade + funcionária ────────────────
     col_b, col_u, col_f = st.columns([3, 2, 2])
     with col_b:
         busca = st.text_input("🔍 Buscar:", placeholder="Nome ou telefone (cliente ou indicado)",
@@ -1825,7 +1810,6 @@ def tela_zapi_indicacoes():
 
     unidade_str = "" if unid_filtro == "Todas" else unid_filtro.lower()
 
-    # ─── Chamada ao endpoint ─────────────────────────────────────────────
     with st.spinner("Carregando indicações..."):
         data = _zapi_get_indicacoes(
             data_inicio=data_inicio_str,
@@ -1846,7 +1830,6 @@ def tela_zapi_indicacoes():
     total_arquivo = data.get("total_arquivo", 0)
     limit_aplicado = data.get("limit_aplicado", 5000)
 
-    # ─── Cards ───────────────────────────────────────────────────────────
     base_total = total_planilha + (total_arquivo if incluir_arq else 0)
     total_filtrado_fmt = f"{total_filtrado:,}".replace(",", ".")
     base_total_fmt = f"{base_total:,}".replace(",", ".")
@@ -1868,7 +1851,6 @@ def tela_zapi_indicacoes():
         st.info("Nenhuma indicação encontrada com os filtros atuais.")
         return
 
-    # ─── Tabela ──────────────────────────────────────────────────────────
     df = pd.DataFrame(linhas)
 
     if "data" in df.columns:
@@ -1952,7 +1934,6 @@ def tela_zapi_metricas():
         "convertem e onde travam. Cálculo em tempo real a partir de CLIENTES + arquivo."
     )
 
-    # ─── Filtro de período ──────────────────────────────────────────────
     from datetime import date, timedelta
     hoje = date.today()
 
@@ -1995,7 +1976,6 @@ def tela_zapi_metricas():
         df_fmt = "/".join(reversed(data_fim_str.split("-")))
         st.caption(f"📍 Período: **{di_fmt}** até **{df_fmt}**")
 
-    # v9.14: filtro de unidade Todas / Mogi / Suzano
     unid_sel = _filtro_unidade_zapi(key_persist="_zapi_metricas_unidade_persist")
     unidade_param = "" if unid_sel == "Todas" else unid_sel.lower()
 
@@ -2010,7 +1990,6 @@ def tela_zapi_metricas():
     if _mostrar_erro_e_parar(data, "(carregando métricas)"):
         return
 
-    # ─── Lê o funil no formato flat que o Apps Script retorna ──────────
     funil = data.get("funil", {}) or {}
 
     n_convidados = int(funil.get("iniciaram_conversa", 0) or 0)
@@ -2032,7 +2011,6 @@ def tela_zapi_metricas():
     pct_meta     = _pct(n_bateu_meta, n_convidados)
     pct_voucher  = _pct(n_validados, n_convidados)
 
-    # ─── 4 CARDS MACRO ───
     n_convidados_fmt = f"{n_convidados:,}".replace(",", ".")
     n_validados_fmt = f"{n_validados:,}".replace(",", ".")
     n_andamento_fmt = f"{n_andamento:,}".replace(",", ".")
@@ -2060,7 +2038,6 @@ def tela_zapi_metricas():
 
     st.markdown("---")
 
-    # ─── FUNIL VISUAL (4 barras) — fix: n_fmt calculado antes, sem replace no HTML ───
     st.markdown("### 🔻 Funil de conversão")
 
     niveis = [
@@ -2089,7 +2066,6 @@ def tela_zapi_metricas():
 
     st.markdown("---")
 
-    # ─── STATUS DETALHADO ───
     st.markdown("### 📊 Distribuição por status final")
 
     col_v, col_i, col_d_col, col_and = st.columns(4)
@@ -2108,7 +2084,6 @@ def tela_zapi_metricas():
 
     st.markdown("---")
 
-    # ─── TAXAS ───
     st.markdown("### 📈 Taxas de conversão")
     col_t1, col_t2, col_t3, col_t4 = st.columns(4)
     col_t1.metric("🔐 % escolheu privacidade", f"{pct_priv}%",
@@ -2120,7 +2095,6 @@ def tela_zapi_metricas():
     col_t4.metric("🎁 % conversão total", f"{pct_voucher}%",
         help="Convidados → viraram voucher liberado")
 
-    # ─── Footer ───
     gerado = data.get("gerado_em", "")
     if gerado:
         try:
@@ -2138,7 +2112,6 @@ def tela_zapi_metricas():
 # TELA: 👥 CLIENTES NO PROGRAMA (v9.8)
 # ============================================================================
 
-# Classificação visual: status → categoria amigável com emoji
 _CATEGORIAS_CLIENTES = [
     ("🔵 Aguardando validação", lambda s: s == 'AGUARDANDO_VALIDACAO'),
     ("🟠 Invalidado (vai encerrar)", lambda s: s == 'INVALIDADO_COBRADO'),
@@ -2191,10 +2164,8 @@ def tela_zapi_clientes_programa():
         st.info("Nenhum cliente em CLIENTES no momento.")
         return
 
-    # Monta DataFrame
     df = pd.DataFrame(linhas)
 
-    # Filtra 'teste' (consistente com outras telas)
     if 'Funcionaria' in df.columns:
         df = df[df['Funcionaria'].astype(str).str.lower().str.strip() != 'teste']
 
@@ -2202,18 +2173,15 @@ def tela_zapi_clientes_programa():
         st.info("Nenhum cliente real (só 'teste').")
         return
 
-    # Enriquece com categoria + tempo no status
     status_col = 'STATUS DE AONDE PAROU' if 'STATUS DE AONDE PAROU' in df.columns else 'status_rec'
     df['_categoria'] = df[status_col].apply(_categoria_cliente)
     df['_ativo'] = df[status_col].apply(_eh_ativo)
 
-    # Tempo no status
     if 'DATA E HORA' in df.columns:
         df['_data_hora'] = pd.to_datetime(df['DATA E HORA'], errors='coerce', utc=True).dt.tz_convert(TZ_SP)
         agora = datetime.now(TZ_SP)
         df['_horas'] = (agora - df['_data_hora']).dt.total_seconds() / 3600
 
-    # ─── Cards de resumo ───
     n_total = len(df)
     n_ativos = df['_ativo'].sum()
     n_voucher = (df.get('Voucher Liberado', '').astype(str).str.upper() == 'SIM').sum() if 'Voucher Liberado' in df.columns else 0
@@ -2228,7 +2196,6 @@ def tela_zapi_clientes_programa():
 
     st.markdown("---")
 
-    # ─── Filtros ───
     categorias_disponiveis = sorted(df['_categoria'].unique().tolist())
 
     col_cat, col_unid, col_busca = st.columns([3, 2, 3])
@@ -2247,7 +2214,6 @@ def tela_zapi_clientes_programa():
         busca = st.text_input("🔍 Buscar:", placeholder="Nome ou telefone",
             key="cliprog_busca")
 
-    # Aplica filtros
     df_f = df.copy()
     if cats_selecionadas:
         df_f = df_f[df_f['_categoria'].isin(cats_selecionadas)]
@@ -2259,7 +2225,6 @@ def tela_zapi_clientes_programa():
         mask_tel = df_f['Telefone'].astype(str).str.contains(b, na=False) if 'Telefone' in df_f.columns else False
         df_f = df_f[mask_nome | mask_tel]
 
-    # Ordena por horas_no_status DESC (mais antigo primeiro)
     if '_horas' in df_f.columns:
         df_f = df_f.sort_values('_horas', ascending=False)
 
@@ -2269,12 +2234,10 @@ def tela_zapi_clientes_programa():
         st.info("Nenhum cliente com esses filtros.")
         return
 
-    # ─── Tabela display ───
     df_display = df_f.copy()
     if '_horas' in df_display.columns:
         df_display['⏱️ Tempo'] = df_display['_horas'].apply(_fmt_tempo_horas)
 
-    # Renomeia + seleciona colunas
     col_renames = {
         '_categoria': '🚦 Status',
         'Nome': '👤 Nome',
@@ -2292,13 +2255,11 @@ def tela_zapi_clientes_programa():
     cols_existentes = [c for c in cols_display if c in df_display.columns]
     df_display = df_display[cols_existentes]
 
-    # Capitaliza unidade e funcionária
     if '📍 Unidade' in df_display.columns:
         df_display['📍 Unidade'] = df_display['📍 Unidade'].astype(str).str.title()
     if '👩 Funcionária' in df_display.columns:
         df_display['👩 Funcionária'] = df_display['👩 Funcionária'].astype(str).str.title()
 
-    # Botão export ANTES da tabela
     col_exp, _ = st.columns([2, 5])
     with col_exp:
         sufixo = (unid_filtro.lower() if unid_filtro != "Todas" else "todas")
@@ -2308,13 +2269,11 @@ def tela_zapi_clientes_programa():
 
     st.markdown("---")
 
-    # ─── Ação por cliente ───
     st.markdown("### 🎯 Ação em cliente")
     st.caption(
         "Selecione um cliente abaixo pra ver contatos enviados ou marcar validação."
     )
 
-    # Monta lista de opções (nome + telefone + status)
     df_f_reset = df_f.reset_index(drop=True)
     opcoes = ["— Selecione um cliente —"]
     for _, r in df_f_reset.iterrows():
@@ -2336,7 +2295,6 @@ def tela_zapi_clientes_programa():
     status_atual = str(cli.get(status_col, ''))
     total_ind = int(cli.get('Total Indicacoes', 0) or 0)
 
-    # Card com info do cliente
     st.info(
         f"**{nome_cli}** — {tel_cli} — {cli['_categoria']}\n\n"
         f"Unidade: {str(cli.get('Unidade', '?')).title()} · "
@@ -2345,10 +2303,8 @@ def tela_zapi_clientes_programa():
         f"Voucher: {cli.get('Voucher Liberado', '?')}"
     )
 
-    # Botões de ação (varia por status)
     col_a1, col_a2, col_a3 = st.columns(3)
 
-    # Ver contatos (sempre disponível se tiver indicações)
     with col_a1:
         if total_ind > 0:
             if st.button(f"📞 Ver {total_ind} contato{'s' if total_ind != 1 else ''}",
@@ -2357,7 +2313,6 @@ def tela_zapi_clientes_programa():
         else:
             st.button("📞 Sem contatos ainda", disabled=True, use_container_width=True)
 
-    # Validar / Invalidar (só se aguardando)
     status_upper = status_atual.upper()
     aguardando_val = status_upper == 'AGUARDANDO_VALIDACAO'
 
@@ -2379,7 +2334,6 @@ def tela_zapi_clientes_programa():
             st.button("❌ Invalidar", disabled=True, use_container_width=True,
                 help="Disponível só pra clientes em AGUARDANDO_VALIDACAO")
 
-    # ─── Mostrar contatos (se solicitado) ───
     if st.session_state.get('cliprog_mostrar_contatos') == camp_id and camp_id:
         st.markdown(f"#### 📞 Contatos enviados por {nome_cli}")
         with st.spinner("Buscando contatos..."):
@@ -2391,7 +2345,6 @@ def tela_zapi_clientes_programa():
             contatos = contatos_data.get("linhas", []) if isinstance(contatos_data, dict) else []
             if contatos:
                 df_c = pd.DataFrame(contatos)
-                # Mostra colunas úteis
                 cols_c = [c for c in ['nome_indicado', 'telefone_indicado', 'status', 'motivo'] if c in df_c.columns]
                 df_c_display = df_c[cols_c].rename(columns={
                     'nome_indicado': '👤 Nome',
@@ -2407,7 +2360,6 @@ def tela_zapi_clientes_programa():
             st.session_state['cliprog_mostrar_contatos'] = None
             st.rerun()
 
-    # ─── Confirmação dupla de validação ───
     pendente = st.session_state.get('cliprog_confirma_validacao')
     if pendente:
         decisao, tel_p, nome_p = pendente
