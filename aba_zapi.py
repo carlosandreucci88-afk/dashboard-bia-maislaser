@@ -2887,7 +2887,7 @@ def tela_zapi_funcionarias_crud():
     )
 
 
-
+def render_aba_zapi_aguardando():
     """Renderiza a tela principal do robô Z-API: aguardando validação."""
     tela_zapi_aguardando_validacao()
 
