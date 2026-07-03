@@ -48,6 +48,7 @@ from aba_zapi import (
     render_aba_zapi_metricas,
     render_aba_zapi_clientes,
     render_aba_zapi_funcionarias,  # v6.4: CRUD funcionárias (Fase 4.6)
+    render_aba_zapi_diagnostico,   # v6.5: Diagnóstico (Fase 4.9)
 )
 from aba_historico_disparos import render_aba_historico_disparos
 from aba_disparador_auto import render_aba_disparador_auto
@@ -68,7 +69,7 @@ st.set_page_config(
 TZ_SP = timezone(timedelta(hours=-3))
 COR_PRIMARIA = "#5BC0BE"
 COR_PRIMARIA_DARK = "#3D9991"
-VERSAO_DASHBOARD = "v6.4"
+VERSAO_DASHBOARD = "v6.5"
 
 # v6.1: só 2 robôs (Bia conversacional morreu na demolição)
 ROBOS = {
@@ -523,8 +524,9 @@ def main():
         # v3.6: aba "💬 Conversas" ao lado do Disparador AUTO
         # v6.3: aba "📊 Base de clientes" reintroduzida no final
         # v6.4: aba "👥 Funcionárias" (CRUD) logo após Ranking
+        # v6.5: aba "🔧 Diagnóstico" no final (Fase 4.9)
         (tab_aguard, tab_clientes, tab_indic, tab_disp_auto, tab_conv,
-         tab_rank, tab_func, tab_metr, tab_base) = st.tabs([
+         tab_rank, tab_func, tab_metr, tab_base, tab_diag) = st.tabs([
             "⏳ Aguardando validação",
             "👥 Clientes no programa",
             "📨 Indicações",
@@ -534,6 +536,7 @@ def main():
             "👥 Funcionárias",
             "📊 Métricas",
             "📊 Base de clientes",
+            "🔧 Diagnóstico",
         ])
 
         with tab_aguard:
@@ -562,6 +565,9 @@ def main():
 
         with tab_base:
             render_aba_base_clientes(get_supabase())
+
+        with tab_diag:
+            render_aba_zapi_diagnostico()
 
     if auto_refresh:
         time.sleep(30)
