@@ -2991,6 +2991,151 @@ def tela_zapi_funcionarias_crud():
     )
 
 
+# ============================================================================
+# TELA: 🔧 DIAGNÓSTICO (v10.5 — Fase 4.9, RPC diagnostico_saude)
+# ============================================================================
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _zapi_get_diagnostico():
+    """
+    Chama RPC diagnostico_saude() e retorna as N linhas com status.
+    Cache 30s pra evitar hammering em auto-refresh.
+    """
+    try:
+        sb = _get_supabase_zapi()
+        resp = sb.rpc("diagnostico_saude", {}).execute()
+        return resp.data or []
+    except Exception as e:
+        return {"_erro": f"Falha ao rodar diagnóstico: {e}"}
+
+
+def tela_zapi_diagnostico():
+    st.markdown("## 🔧 Diagnóstico do sistema")
+    st.caption(
+        "Health check em tempo real: feature flags, contagens, integridade, "
+        "Bia AUTO, trabalho pendente da coordenadora, atividade 24h. "
+        "Cache 30s — clica Atualizar pra forçar refresh."
+    )
+
+    col_btn, col_auto = st.columns([1, 4])
+    with col_btn:
+        if st.button("🔄 Atualizar", key="diag_refresh", use_container_width=True):
+            _zapi_get_diagnostico.clear()
+            st.rerun()
+    with col_auto:
+        auto = st.checkbox("Auto-refresh a cada 30s", value=False, key="diag_auto")
+
+    dados = _zapi_get_diagnostico()
+    if isinstance(dados, dict) and dados.get("_erro"):
+        st.error(dados["_erro"])
+        return
+
+    if not dados:
+        st.warning("Nenhum resultado retornado pela RPC.")
+        return
+
+    # ─────────────────────────────────────────────────────
+    # BLOCO: cards de resumo (ERROR / WARN / OK / INFO)
+    # ─────────────────────────────────────────────────────
+    total = len(dados)
+    n_error = sum(1 for d in dados if d.get("status") == "ERROR")
+    n_warn  = sum(1 for d in dados if d.get("status") == "WARN")
+    n_ok    = sum(1 for d in dados if d.get("status") == "OK")
+    n_info  = sum(1 for d in dados if d.get("status") == "INFO")
+
+    col_e, col_w, col_o, col_i = st.columns(4)
+    col_e.metric("🔴 ERROR", n_error, help="Anomalias graves")
+    col_w.metric("🟡 WARN", n_warn, help="Requer atenção operacional")
+    col_o.metric("🟢 OK", n_ok, help="Tudo certo")
+    col_i.metric("🔵 INFO", n_info, help="Contexto informativo")
+
+    # Header de saúde geral
+    if n_error > 0:
+        st.error(f"⚠️ **{n_error} erro(s) crítico(s)** — investiga abaixo.")
+    elif n_warn > 0:
+        st.warning(f"🟡 **{n_warn} aviso(s)** — provavelmente operacional (não é bug).")
+    else:
+        st.success(f"✅ **Sistema 100% saudável** — {n_ok + n_info}/{total} checks verdes.")
+
+    st.divider()
+
+    # ─────────────────────────────────────────────────────
+    # BLOCO: mostrar problemas primeiro
+    # ─────────────────────────────────────────────────────
+    ordem = {"ERROR": 1, "WARN": 2, "INFO": 3, "OK": 4}
+    dados_ord = sorted(
+        dados,
+        key=lambda d: (ordem.get(d.get("status", "OK"), 5),
+                       d.get("categoria", ""),
+                       d.get("check_nome", "")),
+    )
+
+    # Renderiza cada linha como card colorido
+    cor_map = {
+        "ERROR": ("#fee2e2", "#991b1b", "🔴"),
+        "WARN":  ("#fef3c7", "#92400e", "🟡"),
+        "OK":    ("#dcfce7", "#166534", "🟢"),
+        "INFO":  ("#dbeafe", "#1e40af", "🔵"),
+    }
+
+    # Agrupa por categoria pra mostrar em blocos
+    categorias = {}
+    for d in dados_ord:
+        cat = d.get("categoria", "?")
+        categorias.setdefault(cat, []).append(d)
+
+    for cat, itens in categorias.items():
+        st.markdown(f"### 📂 {cat}")
+
+        for d in itens:
+            check_nome = d.get("check_nome", "?")
+            resultado  = d.get("resultado", "?")
+            status_i   = d.get("status", "OK")
+            detalhe    = d.get("detalhe", "")
+
+            bg, fg, icone = cor_map.get(status_i, ("#f3f4f6", "#4b5563", "⚪"))
+
+            st.markdown(
+                f"""
+                <div style="
+                    background: {bg};
+                    border-left: 4px solid {fg};
+                    padding: 12px 16px;
+                    border-radius: 8px;
+                    margin-bottom: 8px;
+                ">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div style="font-weight: 600; color: {fg}; font-size: 14px;">
+                            {icone} {check_nome}
+                        </div>
+                        <div style="font-weight: 700; color: {fg}; font-size: 18px;">
+                            {resultado}
+                        </div>
+                    </div>
+                    <div style="color: {fg}; font-size: 12px; opacity: 0.85; margin-top: 4px;">
+                        {detalhe}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+    st.divider()
+    st.caption(
+        "🔍 RPC: `diagnostico_saude()` no Supabase · "
+        "Roda direto no SQL Editor: `SELECT * FROM diagnostico_saude();`"
+    )
+
+    # Auto-refresh
+    if auto:
+        import time
+        time.sleep(30)
+        _zapi_get_diagnostico.clear()
+        st.rerun()
+
+
 def render_aba_zapi_aguardando():
     """Renderiza a tela principal do robô Z-API: aguardando validação."""
     tela_zapi_aguardando_validacao()
@@ -3019,3 +3164,8 @@ def render_aba_zapi_clientes():
 def render_aba_zapi_funcionarias():
     """Renderiza a tela de gestão CRUD de funcionárias (Fase 4.6)."""
     tela_zapi_funcionarias_crud()
+
+
+def render_aba_zapi_diagnostico():
+    """Renderiza a tela de diagnóstico do sistema (Fase 4.9)."""
+    tela_zapi_diagnostico()
