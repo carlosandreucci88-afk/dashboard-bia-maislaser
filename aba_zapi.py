@@ -390,7 +390,8 @@ def _get_status_campanhas_auto(campanha_ids_tuple):
                 continue
             if cid not in stats:
                 stats[cid] = {"disparados": 0, "skip_base": 0, "erros": 0,
-                              "fila": 0,  # v9.18: pendentes pra disparar
+                              "fila": 0,          # v9.18: pendentes pra disparar
+                              "skip_optout": 0,   # v9.19: opt-out (Bia v3.17)
                               "positivas": 0, "negativas": 0, "genericas": 0,
                               "sem_resposta": 0}
             s = stats[cid]
@@ -405,6 +406,10 @@ def _get_status_campanhas_auto(campanha_ids_tuple):
                 s["fila"] += 1
             elif status == "SKIP_BASE":
                 s["skip_base"] += 1
+            elif status == "SKIP_OPTOUT":
+                # v9.19: telefone estava em opt_outs quando Bia foi puxar.
+                # Conta como "processado" (Bia decidiu não disparar).
+                s["skip_optout"] += 1
             elif status in ("ERRO", "BLOQUEADO", "ERRO_NUMERO_INVALIDO", "BLOQUEADO_PELO_INDICADO"):
                 s["erros"] += 1
             elif disparado:
@@ -1013,6 +1018,7 @@ def _detectar_estado_campanha(modo, bia_puxou_dt, total_contatos=0, stats=None):
             fila_pending = stats.get("fila", 0)
             processados = (stats.get("disparados", 0) +
                            stats.get("skip_base", 0) +
+                           stats.get("skip_optout", 0) +   # v9.19: Bia v3.17
                            stats.get("erros", 0))
             if fila_pending == 0 and processados > 0:
                 return "auto_terminado"
@@ -1155,14 +1161,43 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
 
 
 def _render_acao_auto_aguardando(camp_id, tel, nome):
-    """Estado: MODO=AUTO mas Disparador ainda não puxou o lote."""
+    """Estado: MODO=AUTO mas Disparador ainda não puxou o lote.
+
+    v9.19 (03/07/2026): adiciona barra "Aguardando Bia puxar" com animação
+    pulse. Antes ficava um card estático que dava impressão de que nada tava
+    rodando. Agora mostra visualmente que a Bia vai puxar em breve.
+    """
     st.markdown(
         '<div class="card-acao">'
-        '<strong>🤖 Modo AUTO selecionado.</strong> '
-        'Disparador AUTO vai puxar este lote no próximo ciclo (a cada 10min). '
-        'Depois dispara 1 template por minuto até esvaziar a fila.'
-        '<br><br>'
-        '<small>Você ainda pode voltar pra MANUAL enquanto o lote não for puxado.</small>'
+        '<div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">'
+        '<div style="font-size: 20px;">🤖</div>'
+        '<strong>Modo AUTO selecionado — aguardando Bia puxar o lote</strong>'
+        '</div>'
+        '<div style="margin: 10px 0;">'
+        '  <div style="display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 12px; color: #6b7280;">'
+        '    <span>Aguardando Bia puxar…</span>'
+        '    <span>0 / — </span>'
+        '  </div>'
+        '  <div class="progress-bg">'
+        '    <div class="progress-fill" style="width: 100%; '
+        '         background: linear-gradient(90deg, #A0D9D7 0%, #5BC0BE 50%, #A0D9D7 100%); '
+        '         background-size: 200% 100%; '
+        '         animation: shimmer 1.6s linear infinite;"></div>'
+        '  </div>'
+        '</div>'
+        '<style>'
+        '@keyframes shimmer { '
+        '  0% { background-position: 200% 0; } '
+        '  100% { background-position: -200% 0; } '
+        '}'
+        '</style>'
+        '<div style="font-size: 12px; color: #6b7280;">'
+        '  A Bia vai puxar este lote em até ~10min (cron) ou ~15s (se você '
+        'acabou de clicar AUTO). Depois dispara 1 template por minuto.'
+        '</div>'
+        '<div style="font-size: 12px; color: #6b7280; margin-top: 6px;">'
+        '  <small>Você ainda pode voltar pra MANUAL enquanto o lote não for puxado.</small>'
+        '</div>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -1190,8 +1225,9 @@ def _render_acao_auto_rodando(camp_id, contatos, bia_puxou_dt, stats):
 
     disparados = stats.get("disparados", 0)
     skip = stats.get("skip_base", 0)
+    skip_optout = stats.get("skip_optout", 0)  # v9.19
     erros = stats.get("erros", 0)
-    processados = disparados + skip + erros
+    processados = disparados + skip + skip_optout + erros
     pct = int(min(100, (processados / contatos * 100) if contatos > 0 else 0))
 
     pos = stats.get("positivas", 0)
@@ -1218,6 +1254,7 @@ def _render_acao_auto_rodando(camp_id, contatos, bia_puxou_dt, stats):
             <div style="font-size: 12px; color: #6b7280; margin-top: 4px;">
                 Disparados: <strong>{disparados}</strong> ·
                 🚫 SKIP base: <strong>{skip}</strong> ·
+                🛑 Opt-out: <strong>{skip_optout}</strong> ·
                 ⚠️ Erros: <strong>{erros}</strong>
             </div>
         </div>
@@ -1252,6 +1289,7 @@ def _render_acao_auto_terminado(camp_id, tel, nome, contatos, bia_puxou_dt, stat
 
     disparados = stats.get("disparados", 0)
     skip = stats.get("skip_base", 0)
+    skip_optout = stats.get("skip_optout", 0)  # v9.19
     erros = stats.get("erros", 0)
     pos = stats.get("positivas", 0)
     gen = stats.get("genericas", 0)
@@ -1274,6 +1312,7 @@ def _render_acao_auto_terminado(camp_id, tel, nome, contatos, bia_puxou_dt, stat
         <div style="margin-top: 6px; font-size: 12px; color: #6b7280;">
             📤 Disparados: <strong>{disparados}</strong> ·
             🚫 SKIP base: <strong>{skip}</strong> ·
+            🛑 Opt-out: <strong>{skip_optout}</strong> ·
             ⚠️ Erros: <strong>{erros}</strong>
         </div>
         <div style="margin-top: 8px; font-size: 13px;">
