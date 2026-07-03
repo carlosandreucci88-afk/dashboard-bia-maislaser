@@ -2,6 +2,11 @@
 ==============================================================================
 DASHBOARD MAISLASER
 ==============================================================================
+v6.4 (03/07/2026): NOVA ABA "👥 Funcionárias" no Robô Z-API (Fase 4.6)
+  - Adiciona aba CRUD de funcionárias logo após "🏆 Ranking funcionárias"
+  - Usa render_aba_zapi_funcionarias do aba_zapi.py
+  - Lê/escreve direto no Supabase (tabela funcionarias, campo ativa)
+
 v6.3 (01/07/2026): REINTRODUZ ABA BASE DE CLIENTES
   - Adiciona `📊 Base de clientes` como última tab do Robô Z-API
   - Reintroduz import de `render_aba_base_clientes` (arquivo já existia no
@@ -42,6 +47,7 @@ from aba_zapi import (
     render_aba_zapi_indicacoes,
     render_aba_zapi_metricas,
     render_aba_zapi_clientes,
+    render_aba_zapi_funcionarias,  # v6.4: CRUD funcionárias (Fase 4.6)
 )
 from aba_historico_disparos import render_aba_historico_disparos
 from aba_disparador_auto import render_aba_disparador_auto
@@ -62,7 +68,7 @@ st.set_page_config(
 TZ_SP = timezone(timedelta(hours=-3))
 COR_PRIMARIA = "#5BC0BE"
 COR_PRIMARIA_DARK = "#3D9991"
-VERSAO_DASHBOARD = "v6.3"
+VERSAO_DASHBOARD = "v6.4"
 
 # v6.1: só 2 robôs (Bia conversacional morreu na demolição)
 ROBOS = {
@@ -516,13 +522,16 @@ def main():
         # v6.0: aba "📜 Histórico Bia" substituída por "🤖 Disparador AUTO"
         # v3.6: aba "💬 Conversas" ao lado do Disparador AUTO
         # v6.3: aba "📊 Base de clientes" reintroduzida no final
-        tab_aguard, tab_clientes, tab_indic, tab_disp_auto, tab_conv, tab_rank, tab_metr, tab_base = st.tabs([
+        # v6.4: aba "👥 Funcionárias" (CRUD) logo após Ranking
+        (tab_aguard, tab_clientes, tab_indic, tab_disp_auto, tab_conv,
+         tab_rank, tab_func, tab_metr, tab_base) = st.tabs([
             "⏳ Aguardando validação",
             "👥 Clientes no programa",
             "📨 Indicações",
             "🤖 Disparador AUTO",
             "💬 Conversas",
             "🏆 Ranking funcionárias",
+            "👥 Funcionárias",
             "📊 Métricas",
             "📊 Base de clientes",
         ])
@@ -544,6 +553,9 @@ def main():
 
         with tab_rank:
             render_aba_zapi_ranking()
+
+        with tab_func:
+            render_aba_zapi_funcionarias()
 
         with tab_metr:
             render_aba_zapi_metricas()
