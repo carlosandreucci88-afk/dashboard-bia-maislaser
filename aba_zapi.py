@@ -618,6 +618,39 @@ def _aplicar_filtro_unidade_df(df, unidade_sel, coluna="unidade"):
 # TELA: ⏳ AGUARDANDO VALIDAÇÃO (v9.8 — feature MODO MANUAL/AUTO)
 # ============================================================================
 
+@st.cache_data(ttl=30, show_spinner=False)
+def _get_flag_validacao_supabase():
+    """v10.5 (Fase 4.8): flag configuracoes.validacao_supabase_ativo (cache 30s)."""
+    try:
+        sb = _get_supabase_zapi()
+        resp = sb.table("configuracoes") \
+            .select("validacao_supabase_ativo").eq("id", 1).limit(1).execute()
+        if resp.data and len(resp.data) > 0:
+            return bool(resp.data[0].get("validacao_supabase_ativo", False))
+    except Exception:
+        pass
+    return False
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _zapi_get_validacao_supabase():
+    """
+    v10.5 (Fase 4.8): Retorna campanhas aguardando validação direto do Supabase.
+    Chama RPC get_aguardando_validacao. Formato de resposta compatível com
+    _endpointValidacao do Apps Script.
+    """
+    from datetime import datetime as _dt
+    sb = _get_supabase_zapi()
+    resp = sb.rpc("get_aguardando_validacao", {}).execute()
+    linhas = resp.data or []
+    return {
+        "total": len(linhas),
+        "gerado_em": _dt.utcnow().isoformat(),
+        "linhas": linhas,
+        "_fonte": "supabase_rpc",
+    }
+
+
 def tela_zapi_aguardando_validacao():
     st.markdown("## ⏳ Aguardando validação")
     st.caption(
@@ -677,7 +710,17 @@ def tela_zapi_aguardando_validacao():
     # ───────────────────────────────────────────────────────────────────
     # CARREGA DADOS DAS CAMPANHAS
     # ───────────────────────────────────────────────────────────────────
-    data = _zapi_get("validacao")
+    # v10.5 (Fase 4.8): tenta Supabase direto se flag ativa (~50ms)
+    # senão usa Apps Script (~2-5s pra 23 linhas)
+    data = None
+    if _get_flag_validacao_supabase():
+        try:
+            data = _zapi_get_validacao_supabase()
+        except Exception as e:
+            print(f"[tela_zapi_aguardando_validacao] Supabase falhou, fallback: {e}")
+            data = None
+    if data is None:
+        data = _zapi_get("validacao")
     if _mostrar_erro_e_parar(data, "(carregando pendências)"):
         return
 
@@ -2352,6 +2395,57 @@ def tela_zapi_metricas():
         st.caption("Cache 5min. Clica em 🔄 Atualizar pra forçar refresh.")
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _zapi_get_clientes_supabase():
+    """
+    v10.5 (Fase 4.7): Retorna clientes ativos direto do Supabase.
+    Formato de resposta compatível com _endpointClientes do Apps Script
+    (nomes de coluna do Sheets: "Nome", "Telefone", "STATUS DE AONDE PAROU", etc.).
+
+    Só retorna ativos (arquivada_em IS NULL) — que era o comportamento
+    do endpoint antigo (aba CLIENTES do Sheets).
+    """
+    from datetime import datetime as _dt
+    sb = _get_supabase_zapi()
+
+    resp = sb.table("clientes") \
+        .select("telefone,nome,unidade,funcionaria,id_campanha,status,"
+                "total_indicacoes,voucher_liberado,data_cadastro,privacidade,"
+                "status_de_aonde_parou,data_e_hora,data_bateu_meta,bia_puxou_em") \
+        .is_("arquivada_em", "null") \
+        .execute()
+
+    rows = resp.data or []
+
+    # Mapeia snake_case do Supabase → nomes de coluna do Sheets
+    # (mantém compatibilidade com o código existente da tela)
+    linhas = []
+    for r in rows:
+        linhas.append({
+            "Telefone": r.get("telefone", ""),
+            "Nome": r.get("nome", ""),
+            "Unidade": r.get("unidade", ""),
+            "Funcionaria": r.get("funcionaria", ""),
+            "ID Campanha": r.get("id_campanha", ""),
+            "Status": r.get("status", ""),
+            "Total Indicacoes": r.get("total_indicacoes", 0),
+            "Voucher Liberado": r.get("voucher_liberado", ""),
+            "Data Cadastro": r.get("data_cadastro", ""),
+            "PRIVACIDADE": r.get("privacidade", ""),
+            "STATUS DE AONDE PAROU": r.get("status_de_aonde_parou", ""),
+            "DATA E HORA": r.get("data_e_hora", ""),
+            "DATA BATEU META": r.get("data_bateu_meta", ""),
+            "BIA_PUXOU_EM": r.get("bia_puxou_em", ""),
+        })
+
+    return {
+        "total": len(linhas),
+        "gerado_em": _dt.utcnow().isoformat(),
+        "linhas": linhas,
+        "_fonte": "supabase",
+    }
+
+
 # ============================================================================
 # TELA: 👥 CLIENTES NO PROGRAMA (v9.8)
 # ============================================================================
@@ -2395,10 +2489,20 @@ def tela_zapi_clientes_programa():
     with col_btn:
         if st.button("🔄 Atualizar", key="cliprog_refresh", use_container_width=True):
             _zapi_get.clear()
+            _zapi_get_clientes_supabase.clear()
             st.rerun()
 
     with st.spinner("Carregando clientes..."):
-        data = _zapi_get("clientes")
+        # v10.5 (Fase 4.7): tenta Supabase direto se flag ativa (~50-100ms)
+        # senão usa Apps Script (~2-5s)
+        if _get_flag_indicacoes_supabase():
+            try:
+                data = _zapi_get_clientes_supabase()
+            except Exception as e:
+                print(f"[tela_zapi_clientes_programa] Supabase falhou, fallback: {e}")
+                data = _zapi_get("clientes")
+        else:
+            data = _zapi_get("clientes")
 
     if _mostrar_erro_e_parar(data, "(carregando clientes)"):
         return
