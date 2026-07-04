@@ -3,13 +3,14 @@
 ROBÔ PÓS-ATENDIMENTO — Abas "Histórico de disparos" + "Monitoramento clientes"
 ==============================================================================
 v1.0 (04/07/2026)
+v1.1 (04/07/2026): Filtro personalizado de data da sessão no Monitoramento
 
 Parte B — render_aba_pos_historico():
     Lista de disparos passados. Métricas agregadas + drill-down.
 
 Parte C — render_aba_pos_monitor():
     Cards de saúde (NPS, cupons, respostas)
-    Lista filtrável de clientes (status, unidade, período, busca)
+    Lista filtrável de clientes (status, unidade, data da sessão, busca)
     Drill-down: ver histórico de interações do cliente
 ==============================================================================
 """
@@ -365,7 +366,43 @@ def render_aba_pos_monitor():
         st.info("Nenhum cliente registrado ainda.")
         return
 
-    # ── Filtros ──
+    # ── v1.1: Filtro personalizado por DATA DA SESSÃO ──
+    st.markdown("### 🔍 Filtros")
+
+    # Toggle liga/desliga o filtro de data
+    if "pos_mon_usar_data" not in st.session_state:
+        st.session_state.pos_mon_usar_data = False
+
+    usar_data = st.checkbox(
+        "📅 Filtrar por data da sessão",
+        value=st.session_state.pos_mon_usar_data,
+        key="pos_mon_chk_data",
+        help="Ativa pra filtrar clientes por período específico da sessão realizada."
+    )
+    st.session_state.pos_mon_usar_data = usar_data
+
+    data_de = data_ate = None
+    if usar_data:
+        agora_date = datetime.now(TZ_SP).date()
+        if "pos_mon_data_de" not in st.session_state:
+            st.session_state.pos_mon_data_de = agora_date.replace(day=1)
+        if "pos_mon_data_ate" not in st.session_state:
+            st.session_state.pos_mon_data_ate = agora_date
+
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            data_de = st.date_input("De:", value=st.session_state.pos_mon_data_de,
+                                    key="pos_mon_dpicker_de", format="DD/MM/YYYY")
+            st.session_state.pos_mon_data_de = data_de
+        with col_d2:
+            data_ate = st.date_input("Até:", value=st.session_state.pos_mon_data_ate,
+                                     key="pos_mon_dpicker_ate", format="DD/MM/YYYY")
+            st.session_state.pos_mon_data_ate = data_ate
+
+        if data_de and data_ate and data_de > data_ate:
+            st.warning("⚠️ Data inicial é depois da final. Inverta as datas.")
+
+    # ── Filtros originais (status / unidade / busca) ──
     col_f1, col_f2, col_f3 = st.columns([2, 2, 3])
 
     with col_f1:
@@ -390,6 +427,21 @@ def render_aba_pos_monitor():
             df_f["nome"].astype(str).str.lower().str.contains(bl, na=False)
             | df_f["telefone"].astype(str).str.contains(busca, na=False)
         ]
+
+    # v1.1: aplica filtro de data da sessão (se ativo e datas válidas)
+    if usar_data and data_de and data_ate and data_de <= data_ate:
+        # data_sessao vem como string "YYYY-MM-DD" ou date do Postgres — normaliza pra date
+        df_f = df_f.copy()
+        df_f["_data_sessao_dt"] = pd.to_datetime(df_f["data_sessao"], errors="coerce").dt.date
+        df_f = df_f[
+            (df_f["_data_sessao_dt"] >= data_de) &
+            (df_f["_data_sessao_dt"] <= data_ate)
+        ]
+        # Info visual do filtro ativo
+        st.info(
+            f"📅 Filtro de sessão ativo: **{data_de.strftime('%d/%m/%Y')}** a "
+            f"**{data_ate.strftime('%d/%m/%Y')}** — {len(df_f)} cliente(s) no período."
+        )
 
     if df_f.empty:
         st.info("Nenhum cliente nos filtros selecionados.")
@@ -470,8 +522,14 @@ def render_aba_pos_monitor():
         st.caption(f"Mostrando 50 de {len(df_f)}. Use filtros ou busca pra refinar.")
 
     # ── Gráfico agregado ──
+    # v1.1: gráfico reflete os MESMOS filtros aplicados (data, status, unidade, busca)
     st.divider()
     st.markdown("### 📊 Distribuição por status")
+    if usar_data and data_de and data_ate and data_de <= data_ate:
+        st.caption(
+            f"📅 Considerando sessões de {data_de.strftime('%d/%m/%Y')} a "
+            f"{data_ate.strftime('%d/%m/%Y')}"
+        )
     contagem = df_f["status"].value_counts()
     if not contagem.empty:
         df_g = pd.DataFrame({
