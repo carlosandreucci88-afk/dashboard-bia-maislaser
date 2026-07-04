@@ -446,12 +446,6 @@ def registrar_log(telefone: str, nome: str, tipo: str, conteudo: str,
 # ============================================================================
 
 def render_aba_pos_disparar():
-    # DEBUG TEMPORÁRIO — remover depois
-    st.sidebar.write("🐛 pos_precisa_resetar =", st.session_state.get("pos_precisa_resetar"))
-    st.sidebar.write("🐛 pos_unidade =", st.session_state.get("pos_unidade"))
-    st.sidebar.write("🐛 pos_uploader_gen =", st.session_state.get("pos_uploader_gen"))
-    st.sidebar.write("🐛 keys pos_*:", [k for k in st.session_state.keys() if k.startswith("pos_")])
-
     # ── Reset "hard" — clique em "Novo disparo" seta essa flag ──
     if st.session_state.get("pos_precisa_resetar"):
         # Incrementa gen do uploader antes de limpar
@@ -463,6 +457,11 @@ def render_aba_pos_disparar():
             "pos_janela_coord_ok",
             "pos_confirmar_disparo",
             "pos_precisa_resetar",
+            "pos_btn_mogi",
+            "pos_btn_suzano",
+            "pos_confirm_yes",
+            "pos_confirm_no",
+            "pos_novo_disparo",
         ]
         # Mata TODOS uploaders antigos (menos o gen)
         for k in list(st.session_state.keys()):
@@ -474,6 +473,10 @@ def render_aba_pos_disparar():
                 del st.session_state[k]
 
         st.cache_data.clear()
+
+        # Força SEGUNDO rerun — garante que a função reinicia 100% limpa,
+        # sem rehidratar widgets do render anterior
+        st.rerun()
 
     st.markdown("## 🚀 Disparar Pós-atendimento")
     st.caption("Upload da planilha do dia anterior (UNO). Sistema envia template Meta aprovado para cada cliente único.")
