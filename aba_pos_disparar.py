@@ -455,8 +455,7 @@ def render_aba_pos_disparar():
     st.info(
         f"🔔 **Alertas de problemas e pedidos de cupom serão enviados para:**  \n"
         f"📞 {coord_nome} · **+{coord_tel}**  \n"
-        f"_(Configurável na tabela `configuracoes` do Supabase — colunas "
-        f"`pos_coord_mogi_telefone` / `pos_coord_suzano_telefone`)_"
+        f"_(Pra alterar, vá na aba **⚙️ Configurações**)_"
     )
 
     # ── Upload XLSX ──
