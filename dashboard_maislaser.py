@@ -40,6 +40,7 @@ from aba_confirmacao import (
     tela_confirmacao_indicacoes,
     tela_confirmacao_metricas,
 )
+from aba_diagnostico_agenda import render_aba_diagnostico_agenda
 from aba_disparador import render_aba_disparador
 from aba_zapi import (
     render_aba_zapi_aguardando,
@@ -492,14 +493,15 @@ def main():
     # ════════════════════════════════════════════════════════════
 
     if robo == 'confirmacao':
-        tab_disp, tab_hist_disp, tab_dia, tab_hist, tab_indic, tab_metr = st.tabs([
-            "🚀 Disparar agenda",
-            "📋 Histórico de disparos",
-            "📅 Disparos do dia",
-            "💬 Histórico de respostas",
-            "🎁 Programa de indicações",
-            "📊 Métricas confirmação",
-        ])
+        tab_disp, tab_hist_disp, tab_dia, tab_hist, tab_indic, tab_metr, tab_diag = st.tabs([
+    "🚀 Disparar agenda",
+    "📋 Histórico de disparos",
+    "📅 Disparos do dia",
+    "💬 Histórico de respostas",
+    "🎁 Programa de indicações",
+    "📊 Métricas confirmação",
+    "🔧 Diagnóstico",
+])
 
         with tab_disp:
             render_aba_disparador()
@@ -518,6 +520,9 @@ def main():
 
         with tab_metr:
             tela_confirmacao_metricas()
+         
+        with tab_diag:
+            render_aba_diagnostico_agenda()
 
     elif robo == 'zapi':
         # v6.0: aba "📜 Histórico Bia" substituída por "🤖 Disparador AUTO"
