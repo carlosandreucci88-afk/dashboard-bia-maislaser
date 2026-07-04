@@ -445,8 +445,7 @@ def registrar_log(telefone: str, nome: str, tipo: str, conteudo: str,
 # UI
 # ============================================================================
 
-    def render_aba_pos_disparar():
-
+def render_aba_pos_disparar():
     st.markdown("## 🚀 Disparar Pós-atendimento")
     st.caption("Upload da planilha do dia anterior (UNO). Sistema envia template Meta aprovado para cada cliente único.")
 
