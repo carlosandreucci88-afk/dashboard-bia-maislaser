@@ -70,6 +70,7 @@ from aba_conversas import render_aba_conversas
 from aba_pos_disparar import render_aba_pos_disparar
 from aba_pos_historico_monitor import render_aba_pos_historico, render_aba_pos_monitor
 from aba_pos_config import render_aba_pos_config
+from aba_pos_diagnostico import render_aba_pos_diagnostico  # v6.7: aba diagnóstico
 
 
 # ============================================================================
@@ -595,11 +596,14 @@ def main():
     elif robo == 'pos':
         # v6.6: Robô Pós-atendimento (número 97502-5297) — arquitetura sem
         # Sheets, direto Supabase. Apps Script separado só pra webhook doPost.
-        tab_pos_disp, tab_pos_hist, tab_pos_mon, tab_pos_cfg = st.tabs([
+        # v6.7: aba 🔧 Diagnóstico com RPC pos_diagnostico_completo + ações
+        (tab_pos_disp, tab_pos_hist, tab_pos_mon, tab_pos_cfg,
+         tab_pos_diag) = st.tabs([
             "🚀 Disparar pós-atendimento",
             "📋 Histórico de disparos",
             "👥 Monitoramento clientes",
             "⚙️ Configurações",
+            "🔧 Diagnóstico",
         ])
 
         with tab_pos_disp:
@@ -613,6 +617,9 @@ def main():
 
         with tab_pos_cfg:
             render_aba_pos_config()
+
+        with tab_pos_diag:
+            render_aba_pos_diagnostico()
 
     if auto_refresh:
         time.sleep(30)
