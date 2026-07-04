@@ -817,27 +817,10 @@ def _executar_disparo(df_ag: pd.DataFrame, unidade: str, nome_arquivo: str):
 
     st.success("✅ Disparo registrado. Clientes agora estão em `template_enviado`, aguardando resposta.")
 
-    # ── Botão pra iniciar novo disparo (reseta unidade, upload, checkbox, confirmação) ──
+    # ── Botão pra iniciar novo disparo (sinaliza reset no próximo render) ──
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("---")
     if st.button("🔄 Fazer novo disparo", type="primary", use_container_width=True, key="pos_novo_disparo"):
-        # Incrementa gen do uploader — força widget novo e descarta o arquivo antigo
-        st.session_state.pos_uploader_gen = st.session_state.get("pos_uploader_gen", 0) + 1
-
-        # Limpa TODAS as chaves de sessão do fluxo de disparo (inclusive checkbox e confirmação)
-        chaves_pra_limpar = [
-            "pos_unidade",
-            "pos_janela_coord_ok",
-            "pos_confirmar_disparo",
-        ]
-        # Limpa também qualquer key do uploader antigo que tenha ficado
-        for k in list(st.session_state.keys()):
-            if k.startswith("pos_uploader_") and k != "pos_uploader_gen":
-                chaves_pra_limpar.append(k)
-
-        for k in chaves_pra_limpar:
-            if k in st.session_state:
-                del st.session_state[k]
-
-        st.cache_data.clear()
+        # Seta flag — o próximo render vai executar o reset "hard" no topo da função
+        st.session_state.pos_precisa_resetar = True
         st.rerun()
