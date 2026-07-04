@@ -75,7 +75,7 @@ def _get_historico_disparos(limit: int = 100) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def _get_clientes(limit: int = 500) -> pd.DataFrame:
+def _get_clientes(limit: int = 2000) -> pd.DataFrame:
     try:
         sb = _get_sb()
         r = (sb.table("pos_atendimento_clientes")
@@ -361,7 +361,7 @@ def render_aba_pos_monitor():
     st.divider()
 
     # ── Lista de clientes ──
-    df = _get_clientes(500)
+    df = _get_clientes(2000)
     if df.empty:
         st.info("Nenhum cliente registrado ainda.")
         return
@@ -447,10 +447,81 @@ def render_aba_pos_monitor():
         st.info("Nenhum cliente nos filtros selecionados.")
         return
 
-    st.markdown(f"### {len(df_f)} cliente(s)")
+    # ══════════════════════════════════════════════════════════════════
+    # v1.2 — PAGINAÇÃO
+    # ══════════════════════════════════════════════════════════════════
+    total_clientes_filtrado = len(df_f)
 
-    # ── Tabela com drill-down ──
-    for _, row in df_f.head(50).iterrows():
+    st.markdown(f"### {total_clientes_filtrado} cliente(s)")
+
+    # Hash dos filtros ativos — se mudar, reseta pra página 1
+    filtros_hash = f"{filtro_status}|{filtro_unidade}|{busca}|{usar_data}|{data_de}|{data_ate}"
+    if st.session_state.get("pos_mon_filtros_hash") != filtros_hash:
+        st.session_state.pos_mon_pag_atual = 1
+        st.session_state.pos_mon_filtros_hash = filtros_hash
+
+    # Controles de paginação
+    col_tam, col_prev, col_pag, col_next, col_info = st.columns([1.5, 1, 1.5, 1, 3])
+
+    with col_tam:
+        tam_pag = st.selectbox(
+            "Por página",
+            [25, 50, 100, 200],
+            index=1,
+            key="pos_mon_tam_pag"
+        )
+
+    total_paginas = max(1, (total_clientes_filtrado + tam_pag - 1) // tam_pag)
+
+    if "pos_mon_pag_atual" not in st.session_state:
+        st.session_state.pos_mon_pag_atual = 1
+    # Garante que a página atual não excede o total (caso tam_pag mude)
+    if st.session_state.pos_mon_pag_atual > total_paginas:
+        st.session_state.pos_mon_pag_atual = total_paginas
+
+    with col_prev:
+        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+        if st.button("◀ Anterior", use_container_width=True, key="pos_mon_btn_prev",
+                     disabled=(st.session_state.pos_mon_pag_atual <= 1)):
+            st.session_state.pos_mon_pag_atual -= 1
+            st.rerun()
+
+    with col_pag:
+        pag_input = st.number_input(
+            f"Página (1-{total_paginas})",
+            min_value=1,
+            max_value=total_paginas,
+            value=st.session_state.pos_mon_pag_atual,
+            step=1,
+            key="pos_mon_pag_input"
+        )
+        if pag_input != st.session_state.pos_mon_pag_atual:
+            st.session_state.pos_mon_pag_atual = pag_input
+            st.rerun()
+
+    with col_next:
+        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+        if st.button("Próxima ▶", use_container_width=True, key="pos_mon_btn_next",
+                     disabled=(st.session_state.pos_mon_pag_atual >= total_paginas)):
+            st.session_state.pos_mon_pag_atual += 1
+            st.rerun()
+
+    # Fatia o df pela página atual
+    inicio = (st.session_state.pos_mon_pag_atual - 1) * tam_pag
+    fim = inicio + tam_pag
+    df_pag = df_f.iloc[inicio:fim]
+
+    with col_info:
+        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+        st.caption(
+            f"Exibindo **{inicio + 1}–{min(fim, total_clientes_filtrado)}** "
+            f"de **{total_clientes_filtrado}** · Página **{st.session_state.pos_mon_pag_atual}/{total_paginas}**"
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Tabela com drill-down (só página atual) ──
+    for _, row in df_pag.iterrows():
         status_label = STATUS_LABEL.get(row["status"], row["status"])
         unidade_short = str(row.get("unidade", "?")).replace("Mogi das Cruzes", "Mogi")
         data_ses = _fmt_data(row.get("data_sessao"))
@@ -517,9 +588,6 @@ def render_aba_pos_monitor():
                             '</div>',
                             unsafe_allow_html=True
                         )
-
-    if len(df_f) > 50:
-        st.caption(f"Mostrando 50 de {len(df_f)}. Use filtros ou busca pra refinar.")
 
     # ── Gráfico agregado ──
     # v1.1: gráfico reflete os MESMOS filtros aplicados (data, status, unidade, busca)
