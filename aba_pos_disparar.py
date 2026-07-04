@@ -445,38 +445,7 @@ def registrar_log(telefone: str, nome: str, tipo: str, conteudo: str,
 # UI
 # ============================================================================
 
-def render_aba_pos_disparar():
-    # ── Reset "hard" — clique em "Novo disparo" seta essa flag ──
-    if st.session_state.get("pos_precisa_resetar"):
-        # Incrementa gen do uploader antes de limpar
-        st.session_state.pos_uploader_gen = st.session_state.get("pos_uploader_gen", 0) + 1
-
-        # Lista de chaves do fluxo que precisam morrer
-        chaves_pra_limpar = [
-            "pos_unidade",
-            "pos_janela_coord_ok",
-            "pos_confirmar_disparo",
-            "pos_precisa_resetar",
-            "pos_btn_mogi",
-            "pos_btn_suzano",
-            "pos_confirm_yes",
-            "pos_confirm_no",
-            "pos_novo_disparo",
-        ]
-        # Mata TODOS uploaders antigos (menos o gen)
-        for k in list(st.session_state.keys()):
-            if k.startswith("pos_uploader_") and k != "pos_uploader_gen":
-                chaves_pra_limpar.append(k)
-
-        for k in chaves_pra_limpar:
-            if k in st.session_state:
-                del st.session_state[k]
-
-        st.cache_data.clear()
-
-        # Força SEGUNDO rerun — garante que a função reinicia 100% limpa,
-        # sem rehidratar widgets do render anterior
-        st.rerun()
+    def render_aba_pos_disparar():
 
     st.markdown("## 🚀 Disparar Pós-atendimento")
     st.caption("Upload da planilha do dia anterior (UNO). Sistema envia template Meta aprovado para cada cliente único.")
@@ -826,10 +795,22 @@ def _executar_disparo(df_ag: pd.DataFrame, unidade: str, nome_arquivo: str):
 
     st.success("✅ Disparo registrado. Clientes agora estão em `template_enviado`, aguardando resposta.")
 
-    # ── Botão pra iniciar novo disparo (sinaliza reset no próximo render) ──
+    # ── Botão pra iniciar novo disparo — reset TOTAL via limpeza + reload de URL ──
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("---")
     if st.button("🔄 Fazer novo disparo", type="primary", use_container_width=True, key="pos_novo_disparo"):
-        # Seta flag — o próximo render vai executar o reset "hard" no topo da função
-        st.session_state.pos_precisa_resetar = True
-        st.rerun()
+        # Plano C: apaga TODAS as chaves do session_state relacionadas ao pós
+        # e força reload real via componente HTML
+        chaves_pra_matar = [k for k in list(st.session_state.keys()) if k.startswith("pos_")]
+        for k in chaves_pra_matar:
+            del st.session_state[k]
+
+        st.cache_data.clear()
+
+        # Reload forçado da página via JS injetado (equivalente ao F5)
+        import streamlit.components.v1 as components
+        components.html(
+            "<script>window.parent.location.reload();</script>",
+            height=0
+        )
+        st.stop()
