@@ -2,6 +2,18 @@
 ==============================================================================
 DASHBOARD MAISLASER
 ==============================================================================
+v6.6 (04/07/2026): NOVO 🚀 Robô Pós-atendimento (número 97502-5297)
+  - Adiciona 3 abas: Disparar / Histórico / Monitoramento clientes
+  - Arquitetura moderna: SEM Sheets, direto Supabase
+  - Envio de template via Meta API pela dashboard
+  - Apps Script separado apenas pra webhook doPost
+  - Tabelas: pos_atendimento_clientes, _log, _disparos_historico
+  - RPC: pos_get_stats(dias)
+
+v6.5 (04/07/2026): NOVA ABA "🔧 Diagnóstico" no Robô Z-API (Fase 4.9)
+  - Adiciona aba de diagnóstico completo do robô Bia como última tab
+  - Usa render_aba_zapi_diagnostico do aba_zapi.py
+
 v6.4 (03/07/2026): NOVA ABA "👥 Funcionárias" no Robô Z-API (Fase 4.6)
   - Adiciona aba CRUD de funcionárias logo após "🏆 Ranking funcionárias"
   - Usa render_aba_zapi_funcionarias do aba_zapi.py
@@ -54,6 +66,9 @@ from aba_zapi import (
 from aba_historico_disparos import render_aba_historico_disparos
 from aba_disparador_auto import render_aba_disparador_auto
 from aba_conversas import render_aba_conversas
+# v6.6: Robô Pós-atendimento (número 97502-5297)
+from aba_pos_disparar import render_aba_pos_disparar
+from aba_pos_historico_monitor import render_aba_pos_historico, render_aba_pos_monitor
 
 
 # ============================================================================
@@ -70,12 +85,14 @@ st.set_page_config(
 TZ_SP = timezone(timedelta(hours=-3))
 COR_PRIMARIA = "#5BC0BE"
 COR_PRIMARIA_DARK = "#3D9991"
-VERSAO_DASHBOARD = "v6.5"
+VERSAO_DASHBOARD = "v6.6"
 
 # v6.1: só 2 robôs (Bia conversacional morreu na demolição)
+# v6.6: adiciona robô Pós-atendimento (número 97502-5297)
 ROBOS = {
     'confirmacao': '📅 Robô Confirmação Agenda',
     'zapi':        '🎁 Robô Z-API Indicações',
+    'pos':         '🚀 Robô Pós-atendimento',
 }
 
 
@@ -573,6 +590,24 @@ def main():
 
         with tab_diag:
             render_aba_zapi_diagnostico()
+
+    elif robo == 'pos':
+        # v6.6: Robô Pós-atendimento (número 97502-5297) — arquitetura sem
+        # Sheets, direto Supabase. Apps Script separado só pra webhook doPost.
+        tab_pos_disp, tab_pos_hist, tab_pos_mon = st.tabs([
+            "🚀 Disparar pós-atendimento",
+            "📋 Histórico de disparos",
+            "👥 Monitoramento clientes",
+        ])
+
+        with tab_pos_disp:
+            render_aba_pos_disparar()
+
+        with tab_pos_hist:
+            render_aba_pos_historico()
+
+        with tab_pos_mon:
+            render_aba_pos_monitor()
 
     if auto_refresh:
         time.sleep(30)
