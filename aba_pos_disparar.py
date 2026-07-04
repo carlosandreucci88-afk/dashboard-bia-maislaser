@@ -532,12 +532,15 @@ def render_aba_pos_disparar():
         "provavelmente já está no formato certo. Se faltar coluna, o sistema aborta."
     )
 
+    # Contador incrementado a cada "Novo disparo" — força o file_uploader a resetar
+    if "pos_uploader_gen" not in st.session_state:
+        st.session_state.pos_uploader_gen = 0
+
     arquivo = st.file_uploader(
         "Selecione o XLSX exportado do UNO (agendamentos do dia anterior)",
         type=["xlsx", "xls"],
-        key="pos_uploader"
+        key=f"pos_uploader_{st.session_state.pos_uploader_gen}"
     )
-
     if not arquivo:
         st.info("Aguardando upload da planilha…")
         return
@@ -795,13 +798,23 @@ def _executar_disparo(df_ag: pd.DataFrame, unidade: str, nome_arquivo: str):
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("---")
     if st.button("🔄 Fazer novo disparo", type="primary", use_container_width=True, key="pos_novo_disparo"):
-        # Reseta todas as chaves de sessão relacionadas ao disparo
-        for k in [
+        # Incrementa gen do uploader — força widget novo e descarta o arquivo antigo
+        st.session_state.pos_uploader_gen = st.session_state.get("pos_uploader_gen", 0) + 1
+
+        # Limpa TODAS as chaves de sessão do fluxo de disparo (inclusive checkbox e confirmação)
+        chaves_pra_limpar = [
             "pos_unidade",
             "pos_janela_coord_ok",
             "pos_confirmar_disparo",
-            "pos_uploader",
-        ]:
+        ]
+        # Limpa também qualquer key do uploader antigo que tenha ficado
+        for k in list(st.session_state.keys()):
+            if k.startswith("pos_uploader_") and k != "pos_uploader_gen":
+                chaves_pra_limpar.append(k)
+
+        for k in chaves_pra_limpar:
             if k in st.session_state:
                 del st.session_state[k]
+
+        st.cache_data.clear()
         st.rerun()
