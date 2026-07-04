@@ -446,8 +446,39 @@ def registrar_log(telefone: str, nome: str, tipo: str, conteudo: str,
 # ============================================================================
 
 def render_aba_pos_disparar():
+    # ══════════════════════════════════════════════════════════════════
+    # RESET — clique em "🔄 Fazer novo disparo" seta pos_reset_pending=True
+    # É processado AQUI, antes de qualquer widget renderizar,
+    # pra garantir estado limpo do zero.
+    # ══════════════════════════════════════════════════════════════════
+    if st.session_state.get("pos_reset_pending"):
+        # Incrementa gen do uploader antes de matar chaves
+        st.session_state["pos_uploader_gen"] = st.session_state.get("pos_uploader_gen", 0) + 1
+        gen_novo = st.session_state["pos_uploader_gen"]
+
+        # Mata TUDO que começa com pos_ EXCETO o gen novo
+        for k in list(st.session_state.keys()):
+            if k.startswith("pos_") and k != "pos_uploader_gen":
+                del st.session_state[k]
+
+        st.cache_data.clear()
+        st.rerun()
+
     st.markdown("## 🚀 Disparar Pós-atendimento")
     st.caption("Upload da planilha do dia anterior (UNO). Sistema envia template Meta aprovado para cada cliente único.")
+
+    # ══════════════════════════════════════════════════════════════════
+    # BOTÃO "NOVO DISPARO" — só aparece quando último disparo finalizou
+    # ══════════════════════════════════════════════════════════════════
+    if st.session_state.get("pos_disparo_finalizado"):
+        st.info("✅ Último disparo finalizado. Clique abaixo pra iniciar um novo.")
+        if st.button("🔄 Fazer novo disparo",
+                     type="primary",
+                     use_container_width=True,
+                     key="pos_btn_novo_disparo"):
+            st.session_state.pos_reset_pending = True
+            st.rerun()
+        return
 
     # ── Estado do sistema ──
     cfg = _get_config_pos()
@@ -794,22 +825,7 @@ def _executar_disparo(df_ag: pd.DataFrame, unidade: str, nome_arquivo: str):
 
     st.success("✅ Disparo registrado. Clientes agora estão em `template_enviado`, aguardando resposta.")
 
-    # ── Botão pra iniciar novo disparo — reset TOTAL via limpeza + reload de URL ──
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("---")
-    if st.button("🔄 Fazer novo disparo", type="primary", use_container_width=True, key="pos_novo_disparo"):
-        # Plano C: apaga TODAS as chaves do session_state relacionadas ao pós
-        # e força reload real via componente HTML
-        chaves_pra_matar = [k for k in list(st.session_state.keys()) if k.startswith("pos_")]
-        for k in chaves_pra_matar:
-            del st.session_state[k]
-
-        st.cache_data.clear()
-
-        # Reload forçado da página via JS injetado (equivalente ao F5)
-        import streamlit.components.v1 as components
-        components.html(
-            "<script>window.parent.location.reload();</script>",
-            height=0
-        )
-        st.stop()
+    # Sinaliza que o disparo terminou — o botão "Novo disparo" será renderizado
+    # no render_aba_pos_disparar (fora de _executar_disparo) pra evitar
+    # conflitos de estado com pos_confirmar_disparo/pos_confirm_yes
+    st.session_state.pos_disparo_finalizado = True
