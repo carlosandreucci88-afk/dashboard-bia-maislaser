@@ -564,6 +564,23 @@ Pra que os alertas de _problema com atendimento_, _resultado ruim_ e _pedidos de
         """
     )
 
+    # ── Botão de atalho pra abrir WhatsApp Web ──
+    col_wa1, col_wa2 = st.columns([1, 1])
+    with col_wa1:
+        wa_link_coord = f"https://wa.me/{coord_tel}?text=Olá!%20Aqui%20está%20o%20link%20do%20robô%20Pós-atendimento%3A%20https%3A%2F%2Fwa.me%2F5511975025297%20%2D%20mande%20%22oi%22%20pra%20abrir%20a%20janela%20de%20alertas."
+        st.link_button(
+            f"💬 Chamar {coord_nome} no WhatsApp",
+            wa_link_coord,
+            use_container_width=True
+        )
+    with col_wa2:
+        wa_link_robo = "https://wa.me/5511975025297?text=oi"
+        st.link_button(
+            "🤖 Abrir chat com o robô (mandar 'oi')",
+            wa_link_robo,
+            use_container_width=True
+        )
+
     janela_coord_ok = st.checkbox(
         f"✅ Confirmo que {coord_nome} (+{coord_tel}) já mandou mensagem pro robô nas últimas 24h",
         key="pos_janela_coord_ok"
