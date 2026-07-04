@@ -50,7 +50,7 @@ TZ_SP = timezone(timedelta(hours=-3))
 # CONSTANTES
 # ============================================================================
 PHONE_ID_POS = "1196987226830895"
-TEMPLATE_NOME = "maislaser_posatendimento_v1"
+TEMPLATE_NOME = "maislaser_posatendimento_v2"
 TEMPLATE_LANG = "pt_BR"
 META_API_VERSION = "v22.0"
 
@@ -522,7 +522,7 @@ def render_aba_pos_disparar():
         f"Passando para saber o que você achou do atendimento?\n"
         f"Se ficou tudo bem com as áreas realizadas?\n"
         f"E como está seu resultado? 💚\n\n"
-        f"*[🌟 Tudo ótimo] [⚠️ Problema com atendimento] [❌ Resultado ruim] [🎁 Cupom 70%off]*"
+        f"*[🌟 Tudo ótimo] [⚠️ Problema com atendimento] [❌ Resultado ruim]*"
     )
     st.info(preview_msg)
 
