@@ -140,14 +140,146 @@ def render_aba_pos_historico():
     st.markdown("## 📋 Histórico de disparos")
     st.caption("Cada linha é um upload de planilha processado. Registra sucessos, erros e detalhes de cada envio.")
 
-    col_r, col_ln = st.columns([3, 1])
+    # ═════════════════════════════════════════════════════════════════
+    # FILTROS
+    # ═════════════════════════════════════════════════════════════════
+
+    # ── Linha 1: Filtro por UNIDADE ──
+    if "pos_hist_unidade" not in st.session_state:
+        st.session_state.pos_hist_unidade = "Todas"
+
+    col_u1, col_u2, col_u3, col_ln = st.columns([1.2, 1.2, 1.2, 1.4])
+
+    with col_u1:
+        ativo = st.session_state.pos_hist_unidade == "Todas"
+        if st.button("🏢 Todas",
+                     type="primary" if ativo else "secondary",
+                     use_container_width=True, key="pos_hist_btn_todas"):
+            st.session_state.pos_hist_unidade = "Todas"
+            st.rerun()
+
+    with col_u2:
+        ativo = st.session_state.pos_hist_unidade == "Mogi"
+        if st.button("📍 Mogi",
+                     type="primary" if ativo else "secondary",
+                     use_container_width=True, key="pos_hist_btn_mogi"):
+            st.session_state.pos_hist_unidade = "Mogi"
+            st.rerun()
+
+    with col_u3:
+        ativo = st.session_state.pos_hist_unidade == "Suzano"
+        if st.button("📍 Suzano",
+                     type="primary" if ativo else "secondary",
+                     use_container_width=True, key="pos_hist_btn_suzano"):
+            st.session_state.pos_hist_unidade = "Suzano"
+            st.rerun()
+
     with col_ln:
         limit = st.selectbox("Últimos", [30, 100, 300, 1000], index=1, key="pos_hist_limit")
 
+    # ── Linha 2: Filtro por PERÍODO ──
+    if "pos_hist_periodo" not in st.session_state:
+        st.session_state.pos_hist_periodo = "Tudo"
+
+    col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns([1, 1.2, 1.2, 1, 1.6])
+
+    with col_p1:
+        ativo = st.session_state.pos_hist_periodo == "Hoje"
+        if st.button("📆 Hoje",
+                     type="primary" if ativo else "secondary",
+                     use_container_width=True, key="pos_hist_btn_hoje"):
+            st.session_state.pos_hist_periodo = "Hoje"
+            st.rerun()
+
+    with col_p2:
+        ativo = st.session_state.pos_hist_periodo == "7dias"
+        if st.button("🕐 Últimos 7 dias",
+                     type="primary" if ativo else "secondary",
+                     use_container_width=True, key="pos_hist_btn_7d"):
+            st.session_state.pos_hist_periodo = "7dias"
+            st.rerun()
+
+    with col_p3:
+        ativo = st.session_state.pos_hist_periodo == "30dias"
+        if st.button("📅 Últimos 30 dias",
+                     type="primary" if ativo else "secondary",
+                     use_container_width=True, key="pos_hist_btn_30d"):
+            st.session_state.pos_hist_periodo = "30dias"
+            st.rerun()
+
+    with col_p4:
+        ativo = st.session_state.pos_hist_periodo == "Tudo"
+        if st.button("♾️ Tudo",
+                     type="primary" if ativo else "secondary",
+                     use_container_width=True, key="pos_hist_btn_tudo"):
+            st.session_state.pos_hist_periodo = "Tudo"
+            st.rerun()
+
+    with col_p5:
+        ativo = st.session_state.pos_hist_periodo == "Personalizado"
+        if st.button("📅 Personalizado",
+                     type="primary" if ativo else "secondary",
+                     use_container_width=True, key="pos_hist_btn_pers"):
+            st.session_state.pos_hist_periodo = "Personalizado"
+            st.rerun()
+
+    # ── Date range quando "Personalizado" ──
+    data_de = data_ate = None
+    if st.session_state.pos_hist_periodo == "Personalizado":
+        agora_date = datetime.now(TZ_SP).date()
+        if "pos_hist_data_de" not in st.session_state:
+            st.session_state.pos_hist_data_de = agora_date.replace(day=1)
+        if "pos_hist_data_ate" not in st.session_state:
+            st.session_state.pos_hist_data_ate = agora_date
+
+        col_d1, col_d2, _ = st.columns([1.5, 1.5, 3])
+        with col_d1:
+            data_de = st.date_input("De:", value=st.session_state.pos_hist_data_de,
+                                    key="pos_hist_dpicker_de", format="DD/MM/YYYY")
+            st.session_state.pos_hist_data_de = data_de
+        with col_d2:
+            data_ate = st.date_input("Até:", value=st.session_state.pos_hist_data_ate,
+                                     key="pos_hist_dpicker_ate", format="DD/MM/YYYY")
+            st.session_state.pos_hist_data_ate = data_ate
+
+        if data_de and data_ate and data_de > data_ate:
+            st.warning("⚠️ Data inicial é depois da final. Inverta as datas.")
+
+    # ═════════════════════════════════════════════════════════════════
+    # BUSCA DE DADOS
+    # ═════════════════════════════════════════════════════════════════
     df = _get_historico_disparos(limit=limit)
 
     if df.empty:
         st.info("Nenhum disparo registrado ainda. Faça um upload na aba 🚀 Disparar Pós-atendimento.")
+        return
+
+    # ── Aplica filtros ──
+    df["criado_em_ts"] = pd.to_datetime(df["criado_em"], utc=True).dt.tz_convert(TZ_SP)
+
+    # Filtro unidade
+    if st.session_state.pos_hist_unidade == "Mogi":
+        df = df[df["unidade"].astype(str).str.contains("Mogi", case=False, na=False)]
+    elif st.session_state.pos_hist_unidade == "Suzano":
+        df = df[df["unidade"].astype(str).str.contains("Suzano", case=False, na=False)]
+
+    # Filtro período
+    agora = datetime.now(TZ_SP)
+    periodo = st.session_state.pos_hist_periodo
+    if periodo == "Hoje":
+        inicio_hoje = agora.replace(hour=0, minute=0, second=0, microsecond=0)
+        df = df[df["criado_em_ts"] >= inicio_hoje]
+    elif periodo == "7dias":
+        df = df[df["criado_em_ts"] >= agora - timedelta(days=7)]
+    elif periodo == "30dias":
+        df = df[df["criado_em_ts"] >= agora - timedelta(days=30)]
+    elif periodo == "Personalizado" and data_de and data_ate and data_de <= data_ate:
+        dt_de = datetime.combine(data_de, datetime.min.time()).replace(tzinfo=TZ_SP)
+        dt_ate = datetime.combine(data_ate, datetime.max.time()).replace(tzinfo=TZ_SP)
+        df = df[(df["criado_em_ts"] >= dt_de) & (df["criado_em_ts"] <= dt_ate)]
+
+    if df.empty:
+        st.info("Nenhum disparo nos filtros selecionados. Ajuste unidade ou período.")
         return
 
     # ── Métricas agregadas ──
