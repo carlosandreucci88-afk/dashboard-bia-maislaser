@@ -446,6 +446,12 @@ def registrar_log(telefone: str, nome: str, tipo: str, conteudo: str,
 # ============================================================================
 
 def render_aba_pos_disparar():
+    # DEBUG TEMPORÁRIO — remover depois
+    st.sidebar.write("🐛 pos_precisa_resetar =", st.session_state.get("pos_precisa_resetar"))
+    st.sidebar.write("🐛 pos_unidade =", st.session_state.get("pos_unidade"))
+    st.sidebar.write("🐛 pos_uploader_gen =", st.session_state.get("pos_uploader_gen"))
+    st.sidebar.write("🐛 keys pos_*:", [k for k in st.session_state.keys() if k.startswith("pos_")])
+
     # ── Reset "hard" — clique em "Novo disparo" seta essa flag ──
     if st.session_state.get("pos_precisa_resetar"):
         # Incrementa gen do uploader antes de limpar
