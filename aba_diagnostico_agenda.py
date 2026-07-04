@@ -86,6 +86,38 @@ def _fetch_diagnostico_apps_script() -> dict:
         return {"_erro": f"Erro de rede: {e}"}
 
 
+def _chamar_endpoint_marcar_resolvido(telefone: str) -> dict:
+    """
+    Chama ?endpoint=marcar_resolvido_recepcao&telefone=X — NÃO cacheado (ação).
+    Retorna dict com 'ok' + info do resultado.
+    """
+    try:
+        url = st.secrets["APPS_SCRIPT_URL"]
+        token = st.secrets["APPS_SCRIPT_TOKEN"]
+    except Exception:
+        return {"ok": False, "erro": "Config Apps Script ausente"}
+
+    try:
+        resp = requests.get(
+            url,
+            params={
+                "endpoint": "marcar_resolvido_recepcao",
+                "telefone": telefone,
+                "token": token,
+            },
+            timeout=30,
+            allow_redirects=True
+        )
+        if resp.status_code != 200:
+            return {"ok": False, "erro": f"HTTP {resp.status_code}"}
+        return resp.json()
+    except requests.exceptions.Timeout:
+        return {"ok": False, "erro": "Apps Script demorou demais (>30s)"}
+    except Exception as e:
+        return {"ok": False, "erro": f"Erro de rede: {e}"}
+
+
+
 # ============================================================================
 # HELPERS DE UI
 # ============================================================================
@@ -230,11 +262,59 @@ def render_aba_diagnostico_agenda():
 
     def _render_recepcao_parado():
         det = criticos.get("recepcao_parado", {}).get("detalhes", [])
-        df = pd.DataFrame(det)
-        if df.empty: return
-        df = df.rename(columns={"telefone":"Telefone","nome":"Cliente","unidade":"Unidade","status":"Status","horas_parado":"Horas parado"})
-        st.warning("Clientes redirecionados/aguardando recepção há +72h. Precisa de ação manual da recepção (esses estados **não fecham sozinhos por design**).")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        if not det: return
+
+        st.warning("Clientes redirecionados/aguardando recepção há +72h. **Após a recepcionista contatar o cliente**, clica em **🛎️ Resolvido** pra tirar do alerta.")
+
+        # Cabeçalho
+        h1, h2, h3, h4, h5, h6 = st.columns([2, 1.4, 1, 1.6, 0.8, 1.6])
+        h1.markdown("**Cliente**")
+        h2.markdown("**Telefone**")
+        h3.markdown("**Unidade**")
+        h4.markdown("**Status**")
+        h5.markdown("**Horas**")
+        h6.markdown("**Ação**")
+        st.markdown('<hr style="margin: 4px 0 8px 0;">', unsafe_allow_html=True)
+
+        for i, row in enumerate(det):
+            tel = row.get("telefone", "")
+            nome = row.get("nome", "—") or "—"
+            unid = str(row.get("unidade", "—") or "—").replace("Mogi das Cruzes", "Mogi")
+            status = row.get("status", "—")
+            horas = row.get("horas_parado", 0)
+
+            c1, c2, c3, c4, c5, c6 = st.columns([2, 1.4, 1, 1.6, 0.8, 1.6])
+            c1.markdown(f"<div style='font-weight:600;font-size:13px;'>{nome}</div>", unsafe_allow_html=True)
+            c2.markdown(f"<div style='font-size:12px;color:#6B7280;'>+{tel}</div>", unsafe_allow_html=True)
+            c3.markdown(f"<div style='font-size:12px;'>{unid}</div>", unsafe_allow_html=True)
+            c4.markdown(f"<div style='font-size:12px;'>{status}</div>", unsafe_allow_html=True)
+            c5.markdown(f"<div style='font-size:12px;color:#B91C1C;font-weight:600;'>{horas}h</div>", unsafe_allow_html=True)
+
+            confirm_key = f"confirm_resolver_{tel}"
+            btn_key = f"btn_resolver_{tel}"
+
+            with c6:
+                if st.session_state.get(confirm_key):
+                    col_yes, col_no = st.columns(2)
+                    with col_yes:
+                        if st.button("✅ Sim", key=f"yes_{tel}", use_container_width=True, type="primary"):
+                            resultado = _chamar_endpoint_marcar_resolvido(tel)
+                            if resultado.get("ok"):
+                                st.session_state[confirm_key] = False
+                                st.toast(f"✅ {nome} marcado como resolvido!", icon="🛎️")
+                                st.cache_data.clear()
+                                st.rerun()
+                            else:
+                                st.error(f"❌ Falhou: {resultado.get('erro', 'erro desconhecido')}")
+                                st.session_state[confirm_key] = False
+                    with col_no:
+                        if st.button("❌ Não", key=f"no_{tel}", use_container_width=True):
+                            st.session_state[confirm_key] = False
+                            st.rerun()
+                else:
+                    if st.button("🛎️ Resolvido", key=btn_key, use_container_width=True):
+                        st.session_state[confirm_key] = True
+                        st.rerun()
 
     def _render_duplicatas():
         det = criticos.get("duplicatas_telefone", {}).get("detalhes", [])
