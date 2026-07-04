@@ -36,6 +36,7 @@ STATUS_LABEL = {
     "duplicata_ignorada":        "⏭️ Duplicata ignorada",
     "falha_envio":               "❌ Falha no envio",
     "substituido_por_novo_disparo": "🔄 Substituído por novo disparo",
+    "expirado_24h":                  "⏰ Expirado (>24h sem interação)",
 }
 
 
