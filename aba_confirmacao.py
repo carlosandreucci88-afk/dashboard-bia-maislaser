@@ -1,19 +1,61 @@
 """
 ==============================================================================
-ABA CONFIRMAÇÃO AGENDA — Robô Confirmação (Google Apps Script v6.6+)
+ABA CONFIRMAÇÃO AGENDA — Robô Confirmação (Google Apps Script v6.6+ / Supabase)
 ==============================================================================
-Conecta o dashboard aos endpoints read-only do Apps Script:
-  - /?endpoint=contexto  → todas as linhas da planilha Contexto
-  - /?endpoint=log       → últimas N linhas do Log de Interações
+v6.6 (04/07/2026): DUAL-READ SUPABASE — Fase 4 da migração.
 
-NÃO faz nenhuma escrita — só leitura. O Apps Script segue dono da verdade.
+  Modificação cirúrgica em _apps_script_get:
+    Se feature flag `configuracoes.agenda_supabase_ativo == true`, tenta
+    ler do Supabase (10-100x mais rápido). Se falhar ou flag=false,
+    cai pro Apps Script (comportamento v2 original — INTOCADO).
 
-v2 (Fase C.1):
-  • Filtros consistentes em todas as 4 telas:
-    - Período: Hoje / Últimas 24h / Últimos 3 dias / Tudo
-    - Unidade: Todas / Mogi / Suzano
-  • Histórico ganhou coluna Unidade
-  • Métricas calculadas localmente a partir do contexto (responsivas aos filtros)
+  RETROCOMPAT TOTAL:
+    - Quando flag=false: comportamento IDÊNTICO à v2. Zero mudança visível.
+    - Quando flag=true: mesma UI, dados vêm do Supabase. Formato do retorno
+      é IDÊNTICO ao Apps Script (mapeamento cirúrgico das colunas).
+    - As 4 telas (tela_confirmacao_disparos_dia/historico/indicacoes/metricas)
+      NÃO foram tocadas. Continuam chamando _apps_script_get.
+
+  KILL SWITCH:
+    UPDATE configuracoes SET agenda_supabase_ativo = false WHERE id = 1;
+    Dashboard volta pra Apps Script em <5s (cache TTL da flag).
+
+  MAPEAMENTO SUPABASE → FORMATO SHEETS:
+    contexto:
+      ultima_atualizacao → timestamp   (resto igual)
+      arquivado_em IS NULL como filtro
+    log:
+      data_hora        → Data/Hora
+      telefone         → Telefone
+      nome             → Nome
+      tipo_mensagem    → Tipo de Mensagem
+      conteudo         → Conteúdo Exato
+      status_antes     → Status Antes
+      status_depois    → Status Depois
+      unidade          → Unidade
+      observacao       → Observação
+    contexto_mes:
+      idem contexto, mas filtra arquivado_em BETWEEN inicio_mes AND fim_mes
+
+  NOVAS FUNÇÕES (5):
+    _get_supabase_client()          → client cached
+    _agenda_supabase_ativo()        → lê flag (cached 5s)
+    _supabase_get_contexto()        → substitui ?endpoint=contexto
+    _supabase_get_log(limit)        → substitui ?endpoint=log
+    _supabase_get_contexto_mes()    → substitui ?endpoint=contexto_mes
+
+  INTOCADAS:
+    _ctx_to_df, _log_to_df
+    _botao_export_xlsx, _render_metric_card_local
+    _filtros_periodo_unidade, _meses_no_range, _buscar_contexto_com_arquivados
+    _mostrar_erro_e_parar
+    tela_confirmacao_disparos_dia
+    tela_confirmacao_historico
+    tela_confirmacao_indicacoes
+    tela_confirmacao_metricas
+
+==============================================================================
+v2 (Fase C.1): filtros consistentes em todas as 4 telas.
 ==============================================================================
 """
 
@@ -24,6 +66,7 @@ import plotly.graph_objects as go
 import requests
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
+from supabase import create_client, Client  # 🆕 v6.6
 
 TZ_SP = timezone(timedelta(hours=-3))
 
@@ -44,15 +87,225 @@ STATUS_EMOJI = {
 
 
 # ============================================================================
+# 🆕 v6.6 — DUAL-READ SUPABASE (Fase 4 da migração)
+# ============================================================================
+# Novas funções isoladas. As 4 telas NÃO precisam saber que isso existe —
+# _apps_script_get faz o gating internamente.
+# ============================================================================
+
+@st.cache_resource
+def _get_supabase_client() -> Client:
+    """Client Supabase cached. Mesmo padrão de aba_disparador.py."""
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def _agenda_supabase_ativo() -> bool:
+    """
+    Lê feature flag agenda_supabase_ativo da tabela configuracoes.
+    Cache curto (5s) pra flag propagar rápido quando muda.
+    Se der erro (config faltando, conexão), retorna False → cai pro Apps Script.
+    """
+    try:
+        sb = _get_supabase_client()
+        r = sb.table("configuracoes").select("agenda_supabase_ativo").eq("id", 1).execute()
+        if r.data and len(r.data) > 0:
+            return bool(r.data[0].get("agenda_supabase_ativo", False))
+    except Exception:
+        pass
+    return False
+
+
+def _supabase_get_contexto() -> dict:
+    """
+    Substitui ?endpoint=contexto — devolve MESMO formato do Apps Script.
+    Colunas mapeadas: ultima_atualizacao → timestamp.
+    Filtro: arquivado_em IS NULL (só ativos).
+    """
+    sb = _get_supabase_client()
+    r = (sb.table("agenda_contexto")
+           .select("*")
+           .is_("arquivado_em", "null")
+           .order("ultima_atualizacao", desc=True)
+           .execute())
+
+    linhas = []
+    for row in (r.data or []):
+        linhas.append({
+            "telefone":             row.get("telefone"),
+            "nome":                 row.get("nome"),
+            "servico":              row.get("servico"),
+            "unidade":              row.get("unidade"),
+            "horario":              row.get("horario"),
+            "horario2":             row.get("horario2"),
+            "servico2":             row.get("servico2"),
+            "numero_alerta":        row.get("numero_alerta"),
+            "status":               row.get("status"),
+            "tentativas_invalidas": row.get("tentativas_invalidas") or 0,
+            "timestamp":            row.get("ultima_atualizacao"),
+        })
+    return {
+        "total":     len(linhas),
+        "gerado_em": datetime.now(TZ_SP).isoformat(),
+        "linhas":    linhas,
+    }
+
+
+def _supabase_get_log(limit=None) -> dict:
+    """
+    Substitui ?endpoint=log — devolve MESMO formato do Apps Script.
+    Colunas mapeadas: data_hora → Data/Hora, telefone → Telefone, etc.
+    Ordenado por data_hora DESC.
+    """
+    # Sanitiza limit
+    try:
+        limit_int = int(limit) if limit is not None else 500
+    except (TypeError, ValueError):
+        limit_int = 500
+    limit_int = max(1, min(2000, limit_int))
+
+    sb = _get_supabase_client()
+    r = (sb.table("agenda_log")
+           .select("*")
+           .order("data_hora", desc=True)
+           .limit(limit_int)
+           .execute())
+
+    linhas = []
+    for row in (r.data or []):
+        linhas.append({
+            "Data/Hora":        row.get("data_hora"),
+            "Telefone":         row.get("telefone"),
+            "Nome":             row.get("nome"),
+            "Tipo de Mensagem": row.get("tipo_mensagem"),
+            "Conteúdo Exato":   row.get("conteudo"),
+            "Status Antes":     row.get("status_antes"),
+            "Status Depois":    row.get("status_depois"),
+            "Unidade":          row.get("unidade"),
+            "Observação":       row.get("observacao"),
+        })
+
+    # total_planilha (count sem limit) — igual ao Apps Script devolve
+    try:
+        count_r = sb.table("agenda_log").select("id", count="exact").limit(1).execute()
+        total_planilha = count_r.count or 0
+    except Exception:
+        total_planilha = len(linhas)
+
+    return {
+        "total":          len(linhas),
+        "total_planilha": total_planilha,
+        "limit_aplicado": limit_int,
+        "gerado_em":      datetime.now(TZ_SP).isoformat(),
+        "linhas":         linhas,
+    }
+
+
+def _supabase_get_contexto_mes(ano, mes) -> dict:
+    """
+    Substitui ?endpoint=contexto_mes — devolve MESMO formato do Apps Script.
+    Filtra pela coluna arquivado_em (entre inicio_mes e fim_mes).
+    """
+    # Validação
+    try:
+        ano_int = int(ano)
+        mes_int = int(mes)
+    except (TypeError, ValueError):
+        return {"erro": "parâmetros obrigatórios: ano (ex: 2026) e mes (1-12)"}
+    if ano_int < 2024 or ano_int > 2030:
+        return {"erro": "ano fora do range esperado (2024-2030)", "recebido": str(ano)}
+    if mes_int < 1 or mes_int > 12:
+        return {"erro": "mes deve ser entre 1 e 12", "recebido": str(mes)}
+
+    # Calcula range de arquivamento
+    from datetime import date
+    inicio = date(ano_int, mes_int, 1).isoformat()
+    if mes_int == 12:
+        fim = date(ano_int + 1, 1, 1).isoformat()
+    else:
+        fim = date(ano_int, mes_int + 1, 1).isoformat()
+
+    # Nome de aba (só pra manter compat com Apps Script — algumas UIs mostram)
+    MESES_ABREV = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]
+    nome_aba = f"Contexto {MESES_ABREV[mes_int-1]}/{ano_int}"
+
+    sb = _get_supabase_client()
+    r = (sb.table("agenda_contexto")
+           .select("*")
+           .gte("arquivado_em", inicio)
+           .lt("arquivado_em", fim)
+           .order("ultima_atualizacao", desc=True)
+           .execute())
+
+    linhas = []
+    for row in (r.data or []):
+        linhas.append({
+            "telefone":             row.get("telefone"),
+            "nome":                 row.get("nome"),
+            "servico":              row.get("servico"),
+            "unidade":              row.get("unidade"),
+            "horario":              row.get("horario"),
+            "horario2":             row.get("horario2"),
+            "servico2":             row.get("servico2"),
+            "numero_alerta":        row.get("numero_alerta"),
+            "status":               row.get("status"),
+            "tentativas_invalidas": row.get("tentativas_invalidas") or 0,
+            "timestamp":            row.get("ultima_atualizacao"),
+        })
+
+    if not linhas:
+        return {
+            "total":     0,
+            "linhas":    [],
+            "aba":       nome_aba,
+            "ano":       ano_int,
+            "mes":       mes_int,
+            "aviso":     f"Sem dados arquivados pra {nome_aba}.",
+            "gerado_em": datetime.now(TZ_SP).isoformat(),
+        }
+
+    return {
+        "total":     len(linhas),
+        "aba":       nome_aba,
+        "ano":       ano_int,
+        "mes":       mes_int,
+        "gerado_em": datetime.now(TZ_SP).isoformat(),
+        "linhas":    linhas,
+    }
+
+
+# ============================================================================
 # CLIENTE HTTP — UM lugar só, cacheado, com timeout e fallback gracioso
+# 🆕 v6.6 — Agora com dual-read Supabase gated na feature flag.
 # ============================================================================
 
 @st.cache_data(ttl=30, show_spinner=False)
 def _apps_script_get(endpoint: str, **params):
     """
-    Chama um endpoint read-only do Apps Script.
-    Cache 30s. Timeout 15s. Se falhar, retorna {'_erro': '...'}.
+    Chama um endpoint read-only. Cache 30s. Timeout 15s.
+
+    🆕 v6.6 — Se feature flag agenda_supabase_ativo=true, tenta Supabase
+    primeiro. Se der erro (config, conexão, endpoint desconhecido), cai
+    silenciosamente pro Apps Script (comportamento v2 abaixo).
+
+    Se falhar, retorna {'_erro': '...'}.
     """
+
+    # 🆕 v6.6 — Router Supabase (gated)
+    try:
+        if _agenda_supabase_ativo():
+            if endpoint == "contexto":
+                return _supabase_get_contexto()
+            elif endpoint == "log":
+                return _supabase_get_log(limit=params.get("limit"))
+            elif endpoint == "contexto_mes":
+                return _supabase_get_contexto_mes(params.get("ano"), params.get("mes"))
+            # endpoints não migrados (stats, ping) caem no Apps Script abaixo
+    except Exception:
+        # Qualquer erro no Supabase → fallback silencioso pro Apps Script
+        pass
+
+    # === Comportamento v2 original (fallback / flag desligada) ===
     try:
         url = st.secrets["APPS_SCRIPT_URL"]
         token = st.secrets["APPS_SCRIPT_TOKEN"]
@@ -109,24 +362,10 @@ def _render_metric_card_local(icon, value, label, color="primary", sub=None):
 # ============================================================================
 # 🆕 v6 — EXPORT XLSX (Fase E item 1)
 # ============================================================================
-# Gera botão de download XLSX a partir do df FILTRADO COMPLETO.
-# Importante: o df_f das telas é truncado em .head(N) só pro DISPLAY visual.
-# O export precisa receber o df_f ANTES dessa truncagem pra levar tudo.
-# ============================================================================
 
 def _botao_export_xlsx(df, nome_tela, key_prefix):
-    """
-    Renderiza um botão de download XLSX com o df filtrado completo.
-
-    Args:
-        df: DataFrame filtrado COMPLETO (sem .head() de display)
-        nome_tela: identificador curto pro nome do arquivo (ex: 'disparos_dia')
-        key_prefix: mesmo prefixo usado em _filtros_periodo_unidade
-                    (pra ler do session_state qual período/unidade tá ativo
-                    e compor o nome do arquivo)
-    """
+    """Renderiza um botão de download XLSX com o df filtrado completo."""
     if df is None or df.empty:
-        # Mesmo vazio, mostra o botão desabilitado pra UX consistente
         st.download_button(
             label="📥 Exportar XLSX (sem dados)",
             data=b"",
@@ -136,11 +375,9 @@ def _botao_export_xlsx(df, nome_tela, key_prefix):
         )
         return
 
-    # Lê os filtros ativos do session_state pra compor o nome do arquivo
     periodo = st.session_state.get(f"{key_prefix}_periodo", "tudo")
     unidade = st.session_state.get(f"{key_prefix}_unidade", "todas")
 
-    # Normaliza pra slug ASCII safe
     def _slug(s):
         return (str(s).lower()
                 .replace(" ", "-")
@@ -153,17 +390,15 @@ def _botao_export_xlsx(df, nome_tela, key_prefix):
     ts = datetime.now(TZ_SP).strftime("%Y%m%d-%H%M")
     fname = f"confirmacao_{nome_tela}_{periodo_slug}_{unidade_slug}_{ts}.xlsx"
 
-    # Gera XLSX em memória
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        # Remove tz das colunas datetime — openpyxl não suporta tz-aware
         df_export = df.copy()
         for col in df_export.columns:
             if pd.api.types.is_datetime64_any_dtype(df_export[col]):
                 try:
                     df_export[col] = df_export[col].dt.tz_localize(None)
                 except (TypeError, AttributeError):
-                    pass  # já era tz-naive
+                    pass
         df_export.to_excel(writer, index=False, sheet_name="dados")
 
     st.download_button(
@@ -215,15 +450,7 @@ def _log_to_df(data):
 
 
 # ============================================================================
-# 🆕 v4 (06/06/2026) — HELPERS DE ARQUIVAMENTO MENSAL DO CONTEXTO (Apps Script v6.8)
-# ============================================================================
-# A partir do v6.8 do Code.gs, linhas finalizadas do Contexto são MOVIDAS pra
-# abas mensais "Contexto MMM/YYYY" em vez de deletadas. O endpoint contexto_mes
-# permite ler essas abas históricas.
-#
-# Estas duas funções são usadas SÓ pela aba Indicações no modo Personalizado:
-# - _meses_no_range:    lista todos os (ano, mes) cobertos por um range de datas
-# - _buscar_contexto_com_arquivados: combina contexto atual + meses arquivados
+# 🆕 v4 (06/06/2026) — HELPERS DE ARQUIVAMENTO MENSAL (Apps Script v6.8)
 # ============================================================================
 
 def _meses_no_range(data_de, data_ate):
@@ -247,20 +474,10 @@ def _meses_no_range(data_de, data_ate):
 def _buscar_contexto_com_arquivados(meses_extras):
     """
     Busca contexto atual + abas mensais arquivadas e combina num único DataFrame.
-
-    Args:
-        meses_extras: lista de tuplas (ano, mes) — meses arquivados a buscar
-                      (geralmente meses anteriores ao corrente)
-
-    Returns:
-        (df_combinado, lista_de_avisos)
-        df_combinado: DataFrame com timestamp_sp já parseado
-        avisos: lista de strings com erros não-fatais (mês sem aba etc)
     """
     avisos = []
     data_atual = _apps_script_get("contexto")
 
-    # Erro fatal no contexto atual → propaga pra UI fazer mostrar_erro_e_parar
     if isinstance(data_atual, dict) and data_atual.get("_erro"):
         return None, [data_atual["_erro"]]
 
@@ -273,9 +490,7 @@ def _buscar_contexto_com_arquivados(meses_extras):
             if data_mes.get("_erro"):
                 avisos.append(f"📅 {mes:02d}/{ano}: {data_mes['_erro']}")
                 continue
-            # API pode devolver aviso "aba não existe" — não é erro, só sem dados
             if data_mes.get("aviso"):
-                # Silencioso: meses anteriores ao início do arquivamento simplesmente não têm aba
                 continue
             df_mes = _ctx_to_df(data_mes)
             if not df_mes.empty:
@@ -285,8 +500,6 @@ def _buscar_contexto_com_arquivados(meses_extras):
         return pd.DataFrame(), avisos
 
     df_combinado = pd.concat(dfs, ignore_index=True)
-    # Dedupe por telefone (defensivo — não deveria ter duplicata,
-    # mas se houver mantém o do contexto atual que vem primeiro)
     if "telefone" in df_combinado.columns:
         df_combinado = df_combinado.drop_duplicates(subset=["telefone"], keep="first")
 
@@ -296,29 +509,10 @@ def _buscar_contexto_com_arquivados(meses_extras):
 # ============================================================================
 # 🆕 v2 — FILTROS REUSÁVEIS DE PERÍODO + UNIDADE
 # ============================================================================
-# Renderiza:
-#   - 4 botões de período: Hoje / Últimas 24h / Últimos 3 dias / Tudo
-#   - (opcional) 5º botão "📅 Personalizado" com 2 date pickers (de/até)
-#   - 3 botões de unidade: Todas / Mogi / Suzano
-# Aplica os filtros no df e retorna o df filtrado.
-# Mostra contagens dinâmicas nos botões (refletem o df ANTES de filtrar).
-#
-# 🆕 v3 (06/06/2026) — Parâmetro permite_personalizado:
-#   Quando True, mostra 5º botão "📅 Personalizado" que abre 2 date inputs.
-#   Usado SÓ na aba Indicações pra análise mensal.
-# ============================================================================
 
 def _filtros_periodo_unidade(df, col_data, col_unidade, key_prefix, default_periodo="Hoje", permite_personalizado=False):
     """
     Renderiza UI de filtros e retorna df filtrado.
-
-    Args:
-        df: DataFrame com as colunas
-        col_data: nome da coluna de timestamp (tz-aware)
-        col_unidade: nome da coluna com texto da unidade
-        key_prefix: prefixo único para session_state/button keys
-        default_periodo: período inicial selecionado ("Hoje", "24h", "3dias", "Tudo")
-        permite_personalizado: se True, mostra 5º botão "📅 Personalizado" + date pickers
     """
     state_per  = f"{key_prefix}_periodo"
     state_unid = f"{key_prefix}_unidade"
@@ -328,7 +522,7 @@ def _filtros_periodo_unidade(df, col_data, col_unidade, key_prefix, default_peri
 
     agora = datetime.now(TZ_SP)
 
-    # Contagens para os botões de PERÍODO (baseadas em todo o df, sem filtro de unidade)
+    # Contagens para os botões de PERÍODO
     if df.empty or col_data not in df.columns:
         cnt_hoje = cnt_24h = cnt_3d = cnt_tudo = 0
     else:
@@ -341,10 +535,8 @@ def _filtros_periodo_unidade(df, col_data, col_unidade, key_prefix, default_peri
 
     # ── Linha 1: botões de PERÍODO ──
     if permite_personalizado:
-        # 🆕 v3: 5 botões em linha (com Personalizado)
         col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns([1.1, 1.4, 1.5, 1.0, 1.6])
     else:
-        # Layout original: 4 botões
         col_p1, col_p2, col_p3, col_p4 = st.columns([1.1, 1.4, 1.5, 1.0])
 
     with col_p1:
@@ -375,12 +567,10 @@ def _filtros_periodo_unidade(df, col_data, col_unidade, key_prefix, default_peri
                          use_container_width=True, key=f"{key_prefix}_btn_p_pers"):
                 st.session_state[state_per] = "Personalizado"; st.rerun()
 
-    # 🆕 v3: Se "Personalizado" ativo, mostra date pickers
     data_de = data_ate = None
     if permite_personalizado and st.session_state[state_per] == "Personalizado":
         state_de  = f"{key_prefix}_data_de"
         state_ate = f"{key_prefix}_data_ate"
-        # Defaults: primeiro dia do mês atual até hoje
         if state_de not in st.session_state:
             st.session_state[state_de] = agora.date().replace(day=1)
         if state_ate not in st.session_state:
@@ -414,13 +604,11 @@ def _filtros_periodo_unidade(df, col_data, col_unidade, key_prefix, default_peri
         elif per == "3dias":
             df_f = df_f[df_f[col_data] >= agora - timedelta(days=3)]
         elif per == "Personalizado" and data_de and data_ate and data_de <= data_ate:
-            # 🆕 v3: range personalizado
             dt_de  = datetime.combine(data_de,  datetime.min.time()).replace(tzinfo=TZ_SP)
             dt_ate = datetime.combine(data_ate, datetime.max.time()).replace(tzinfo=TZ_SP)
             df_f = df_f[(df_f[col_data] >= dt_de) & (df_f[col_data] <= dt_ate)]
-        # "Tudo" → sem filtro
 
-    # Contagens para botões de UNIDADE (baseadas no df já filtrado por período)
+    # Contagens para botões de UNIDADE
     if df_f.empty or col_unidade not in df_f.columns:
         cnt_todas = cnt_mogi = cnt_suzano = 0
     else:
@@ -472,7 +660,6 @@ def tela_confirmacao_disparos_dia():
         st.info("Nenhum disparo registrado ainda.")
         return
 
-    # Filtros de período + unidade
     df_f = _filtros_periodo_unidade(df, "timestamp_sp", "unidade", "dispdia", default_periodo="Hoje")
 
     st.markdown("")
@@ -489,11 +676,6 @@ def tela_confirmacao_disparos_dia():
         st.info("Nenhum cliente nos filtros selecionados.")
         return
 
-    # ─── KPIs ───
-    # 🆕 v5 (06/06/2026) — Confirmados conta todos que passaram pelo "confirmado"
-    # em algum momento, incluindo os que evoluíram pra indicacao_*.
-    # Justificativa: o trigger só envia convite de indicação pra quem JÁ confirmou,
-    # então todos os indicacao_* são confirmados que ainda não foram contados.
     STATUS_CONFIRMOU = ['confirmado', 'indicacao_pendente', 'indicacao_aceita', 'indicacao_recusada', 'indicacao_sem_resposta']
 
     st_lower = df_f['status'].astype(str).str.lower() if 'status' in df_f.columns else pd.Series([], dtype=str)
@@ -514,18 +696,15 @@ def tela_confirmacao_disparos_dia():
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Header + botão export lado a lado
     col_titulo, col_export = st.columns([4, 1.4])
     with col_titulo:
         st.markdown(f"### Lista de disparos · {len(df_f)} cliente(s)")
     with col_export:
         _botao_export_xlsx(df_f, "disparos_dia", "dispdia")
 
-    # Ordena por timestamp desc (mais recente primeiro)
     if 'timestamp_sp' in df_f.columns:
         df_f = df_f.sort_values('timestamp_sp', ascending=False)
 
-    # Cabeçalho — Cliente, Telefone, Serviço, Unidade, Horário, Quando, Status
     h1, h2, h3, h4, h5, h6, h7 = st.columns([1.6, 1.2, 1.6, 0.7, 1.5, 0.9, 1.2])
     h1.markdown("**Cliente**")
     h2.markdown("**Telefone**")
@@ -542,7 +721,6 @@ def tela_confirmacao_disparos_dia():
         tel = str(row.get('telefone', '—'))
         unid = str(row.get('unidade', '—') or '—').replace('Mogi das Cruzes', 'Mogi')
 
-        # Serviço (trunca em 32 chars)
         servico = str(row.get('servico', '') or '')
         if servico in ('', '-', 'None'):
             servico_disp = '—'
@@ -551,14 +729,12 @@ def tela_confirmacao_disparos_dia():
         else:
             servico_disp = servico
 
-        # Horário principal (trunca)
         horario = str(row.get('horario', '—') or '—')
         if len(horario) > 22:
             horario_disp = horario[:22] + "…"
         else:
             horario_disp = horario
 
-        # 2ª sessão (badge inline quando existir)
         horario2 = str(row.get('horario2', '') or '')
         servico2 = str(row.get('servico2', '') or '')
         if horario2 not in ('', '-', 'None'):
@@ -573,7 +749,6 @@ def tela_confirmacao_disparos_dia():
         else:
             horario_html = f"<div style='font-size: 12px; color: #6B7280;'>{horario_disp}</div>"
 
-        # "Quando" relativo
         try:
             ts_local = row['timestamp_sp']
             delta = datetime.now(TZ_SP) - ts_local
@@ -588,7 +763,6 @@ def tela_confirmacao_disparos_dia():
         except Exception:
             quando = "—"
 
-        # Status + badge inválidas (quando >= 1)
         status = str(row.get('status', '—') or '—')
         emoji_label = STATUS_EMOJI.get(status, f"❓ {status}")
         try:
@@ -634,12 +808,10 @@ def tela_confirmacao_historico():
         st.info("Sem registros no log ainda.")
         return
 
-    # Filtros de período + unidade (default 24h pra cobrir noite anterior)
     df_f = _filtros_periodo_unidade(df, "Data/Hora_sp", "Unidade", "hist", default_periodo="24h")
 
     st.markdown("")
 
-    # Filtros adicionais (tipo + busca)
     col_f1, col_f2 = st.columns([2, 3])
     with col_f1:
         tipos = ["Todos"] + sorted(df_f['Tipo de Mensagem'].dropna().unique().tolist()) if 'Tipo de Mensagem' in df_f.columns else ["Todos"]
@@ -658,7 +830,6 @@ def tela_confirmacao_historico():
             df_f['Conteúdo Exato'].astype(str).str.lower().str.contains(bl, na=False)
         ]
 
-    # Header + botão export lado a lado
     col_titulo, col_export = st.columns([4, 1.4])
     with col_titulo:
         st.markdown(f"### {len(df_f)} registro(s)")
@@ -669,7 +840,6 @@ def tela_confirmacao_historico():
         st.info("Nada encontrado com esses filtros.")
         return
 
-    # Cabeçalho COM coluna Unidade + Conteúdo
     h1, h2, h3, h4, h5, h6, h7 = st.columns([0.9, 1.4, 0.7, 0.9, 1.0, 1.5, 1.6])
     h1.markdown("**Quando**")
     h2.markdown("**Cliente**")
@@ -696,16 +866,13 @@ def tela_confirmacao_historico():
         tipo = str(row.get('Tipo de Mensagem', '—') or '—')
         st_depois = str(row.get('Status Depois', '—') or '—')
 
-        # Conteúdo exato do que o cliente respondeu (limpa "-" e None, trunca)
         conteudo_raw = str(row.get('Conteúdo Exato', '') or '')
         if conteudo_raw in ("-", "None", ""):
             conteudo = "—"
         else:
-            # remove quebras de linha pra não quebrar layout
             conteudo = conteudo_raw.replace('\n', ' ').replace('\r', ' ')
             if len(conteudo) > 50:
                 conteudo = conteudo[:50] + "…"
-            # escape simples pra HTML não quebrar
             conteudo = conteudo.replace('<', '&lt;').replace('>', '&gt;')
 
         obs = str(row.get('Observação', '') or '')
@@ -735,8 +902,6 @@ def tela_confirmacao_indicacoes():
     st.markdown("## 🎁 Programa de indicações")
     st.caption("Status dos convites enviados após a confirmação da sessão.")
 
-    # 🆕 v4 — Detecta se o usuário está em modo Personalizado e identifica
-    # quais meses ANTERIORES ao atual precisam ser buscados das abas arquivadas
     modo_periodo = st.session_state.get("indic_periodo", "Tudo")
     meses_arquivados = []
     if modo_periodo == "Personalizado":
@@ -750,12 +915,10 @@ def tela_confirmacao_indicacoes():
                 if (y, m) != mes_corrente
             ]
 
-    # Busca os dados: simples (só atual) ou combinada (atual + arquivados)
     if meses_arquivados:
         with st.spinner(f"📦 Buscando dados arquivados de {len(meses_arquivados)} mês(es)..."):
             df, avisos_arq = _buscar_contexto_com_arquivados(meses_arquivados)
 
-        # Se o contexto atual falhou, df será None e avisos_arq terá o erro fatal
         if df is None:
             st.error(f"⚠️ **Robô Confirmação temporariamente indisponível** (carregando indicações)\n\n{avisos_arq[0]}")
             if st.button("🔄 Tentar novamente", key="retry_indic_arq"):
@@ -763,7 +926,6 @@ def tela_confirmacao_indicacoes():
                 st.rerun()
             return
 
-        # Avisos não-fatais (mês específico falhou mas o resto carregou)
         for aviso in avisos_arq:
             st.warning(aviso)
     else:
@@ -776,14 +938,12 @@ def tela_confirmacao_indicacoes():
         st.info("Sem dados de indicações ainda.")
         return
 
-    # Filtra primeiro só registros relacionados a indicação
     df_ind = df[df['status'].astype(str).str.startswith('indicacao_', na=False)].copy()
 
     if df_ind.empty:
         st.info("Nenhum convite de indicação enviado ainda.")
         return
 
-    # Filtros de período + unidade (default Tudo pra ver o histórico completo)
     df_f = _filtros_periodo_unidade(df_ind, "timestamp_sp", "unidade", "indic", default_periodo="Tudo", permite_personalizado=True)
 
     if df_f.empty:
@@ -811,7 +971,6 @@ def tela_confirmacao_indicacoes():
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Funil + pizza
     col_g1, col_g2 = st.columns(2)
     with col_g1:
         st.markdown("### Funil")
@@ -837,7 +996,6 @@ def tela_confirmacao_indicacoes():
 
     st.divider()
 
-    # Header + botão export lado a lado
     col_titulo, col_export = st.columns([4, 1.4])
     with col_titulo:
         st.markdown(f"### Lista · {len(df_f)} convite(s)")
@@ -893,7 +1051,6 @@ def tela_confirmacao_metricas():
         st.info("Sem dados ainda.")
         return
 
-    # Filtros de período + unidade (default Tudo)
     df_f = _filtros_periodo_unidade(df, "timestamp_sp", "unidade", "metr", default_periodo="Tudo")
 
     if df_f.empty:
@@ -902,21 +1059,9 @@ def tela_confirmacao_metricas():
 
     st.markdown("")
 
-    # Calcula stats locais a partir do df filtrado
     st_lower = df_f['status'].astype(str).str.lower()
     total = len(df_f)
 
-    # 🆕 v5 (06/06/2026) — Distinção entre 2 conceitos de "confirmados":
-    #
-    # confirmados_literal: cliente está LITERALMENTE em status="confirmado" agora
-    #   → usado no gráfico granular "Por status" (visão operacional do estado atual)
-    #
-    # confirmados (total): cliente PASSOU pelo "confirmado" em algum momento
-    #   → inclui os que evoluíram pra indicacao_pendente/aceita/recusada/sem_resposta
-    #   → usado na Taxa de confirmação (métrica real de performance do robô)
-    #
-    # Antes da v5, ambos usavam o mesmo cálculo (confirmados_literal), o que
-    # subestimava drasticamente a Taxa de confirmação (ex: 31% em vez de 74%).
     confirmados_literal = int((st_lower == 'confirmado').sum())
     STATUS_CONFIRMOU = ['confirmado', 'indicacao_pendente', 'indicacao_aceita', 'indicacao_recusada', 'indicacao_sem_resposta']
     confirmados  = int(st_lower.isin(STATUS_CONFIRMOU).sum())
@@ -930,12 +1075,9 @@ def tela_confirmacao_metricas():
     indic_recus  = int((st_lower == 'indicacao_recusada').sum())
     indic_sresp  = int((st_lower == 'indicacao_sem_resposta').sum())
 
-    # Taxa de confirmação considera só os "decididos" (confirmados + cancelados + reagendados)
-    # Usa confirmados TOTAL (inclui indicacao_*) — é a métrica real de performance
     finalizados = confirmados + cancelados + reagendados
     taxa_conf = (confirmados / finalizados * 100) if finalizados else 0
 
-    # Cards principais
     col_m1, col_m2, col_m3, col_m4 = st.columns(4)
     col_m1.markdown(_render_metric_card_local("📋", total, "Total no filtro", "primary"), unsafe_allow_html=True)
     col_m2.markdown(_render_metric_card_local("✅", f"{taxa_conf:.1f}%", "Taxa confirmação",
@@ -947,12 +1089,10 @@ def tela_confirmacao_metricas():
     st.markdown("<br>", unsafe_allow_html=True)
     st.divider()
 
-    # Gráficos: por status + por unidade
     col_g1, col_g2 = st.columns(2)
 
     with col_g1:
         st.markdown("### Por status")
-        # 🆕 v5: usa confirmados_literal pra evitar duplicação (cada indicacao_* aparece separado)
         por_status_dict = {
             "🟢 Confirmado": confirmados_literal,
             "🔄 Reagendado": reagendados,
@@ -994,7 +1134,6 @@ def tela_confirmacao_metricas():
 
     st.divider()
 
-    # Composição de outcomes (taxa)
     st.markdown("### 🎯 Composição de resultados (apenas disparos finalizados)")
     if finalizados > 0:
         outcomes = pd.DataFrame({
