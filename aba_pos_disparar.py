@@ -313,8 +313,62 @@ def enviar_template_pos(telefone: str, nome: str, data: str, hora: str, areas: s
 # ============================================================================
 
 def inserir_clientes_supabase(df_ag: pd.DataFrame) -> tuple:
-    """Insere clientes com status='aguardando_disparo'. Retorna (ids_inseridos, erro)."""
+    """Insere clientes com status='aguardando_disparo'. Retorna (ids_inseridos, erro).
+
+    v1.1: Antes de inserir, marca sessões ativas antigas do mesmo telefone
+    como 'substituido_por_novo_disparo' pra evitar múltiplas sessões concorrentes.
+    """
     sb = _get_sb()
+    telefones = df_ag["telefone"].astype(str).unique().tolist()
+
+    # ── v1.1: Finaliza sessões órfãs (mesmo telefone, ainda ativas) ──
+    sessoes_finalizadas = 0
+    try:
+        r_ativos = (
+            sb.table("pos_atendimento_clientes")
+              .select("id,telefone,status")
+              .in_("telefone", telefones)
+              .in_("status", ["aguardando_disparo", "template_enviado", "tudo_otimo_pendente"])
+              .execute()
+        )
+        ativos = r_ativos.data or []
+        if ativos:
+            ids_a_finalizar = [c["id"] for c in ativos]
+            (sb.table("pos_atendimento_clientes")
+               .update({
+                   "status": "substituido_por_novo_disparo",
+                   "ultima_atualizacao": datetime.now(TZ_SP).isoformat(),
+               })
+               .in_("id", ids_a_finalizar)
+               .execute())
+            sessoes_finalizadas = len(ids_a_finalizar)
+
+            # Loga cada finalização (append-only, pra rastreio)
+            logs = []
+            agora_iso = datetime.now(TZ_SP).isoformat()
+            for c in ativos:
+                logs.append({
+                    "data_hora": agora_iso,
+                    "telefone": c["telefone"],
+                    "nome": None,
+                    "tipo_mensagem": "sistema",
+                    "conteudo": "[novo disparo substituiu sessão ativa]",
+                    "status_antes": c["status"],
+                    "status_depois": "substituido_por_novo_disparo",
+                    "unidade": None,
+                    "observacao": f"🔄 Sessão finalizada por novo upload da planilha (id antigo: {c['id']})",
+                    "cliente_id": c["id"],
+                })
+            if logs:
+                sb.table("pos_atendimento_log").insert(logs).execute()
+    except Exception as e:
+        # Não bloqueia o disparo se dedup falhar — só avisa
+        st.warning(f"⚠️ Não consegui finalizar sessões antigas: {e}")
+
+    if sessoes_finalizadas > 0:
+        st.info(f"🔄 {sessoes_finalizadas} sessão(ões) ativa(s) do(s) mesmo(s) telefone(s) foram finalizadas antes do novo disparo.")
+
+    # ── INSERT do novo lote ──
     linhas = []
     for _, row in df_ag.iterrows():
         linhas.append({
