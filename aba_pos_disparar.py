@@ -790,3 +790,18 @@ def _executar_disparo(df_ag: pd.DataFrame, unidade: str, nome_arquivo: str):
     st.cache_data.clear()
 
     st.success("✅ Disparo registrado. Clientes agora estão em `template_enviado`, aguardando resposta.")
+
+    # ── Botão pra iniciar novo disparo (reseta unidade, upload, checkbox, confirmação) ──
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("---")
+    if st.button("🔄 Fazer novo disparo", type="primary", use_container_width=True, key="pos_novo_disparo"):
+        # Reseta todas as chaves de sessão relacionadas ao disparo
+        for k in [
+            "pos_unidade",
+            "pos_janela_coord_ok",
+            "pos_confirmar_disparo",
+            "pos_uploader",
+        ]:
+            if k in st.session_state:
+                del st.session_state[k]
+        st.rerun()
