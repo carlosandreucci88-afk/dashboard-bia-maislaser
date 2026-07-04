@@ -722,7 +722,7 @@ def tela_confirmacao_disparos_dia():
         unid = str(row.get('unidade', '—') or '—').replace('Mogi das Cruzes', 'Mogi')
 
         servico = str(row.get('servico', '') or '')
-        if servico in ('', '-', 'None'):
+        if servico in ('', '-', 'None', 'nan'):
             servico_disp = '—'
         elif len(servico) > 32:
             servico_disp = servico[:32] + "…"
@@ -737,10 +737,10 @@ def tela_confirmacao_disparos_dia():
 
         horario2 = str(row.get('horario2', '') or '')
         servico2 = str(row.get('servico2', '') or '')
-        if horario2 not in ('', '-', 'None'):
+        if horario2 not in ('', '-', 'None', 'nan'):
             h2_disp = horario2[:22] + "…" if len(horario2) > 22 else horario2
             s2_short = ''
-            if servico2 not in ('', '-', 'None'):
+            if servico2 not in ('', '-', 'None', 'nan'):
                 s2_short = f" ({servico2[:15]}{'…' if len(servico2) > 15 else ''})"
             horario_html = (
                 f"<div style='font-size: 12px; color: #6B7280;'>{horario_disp}</div>"
@@ -840,6 +840,36 @@ def tela_confirmacao_historico():
         st.info("Nada encontrado com esses filtros.")
         return
 
+    # ═══ PAGINAÇÃO v6.6 — só nesta tela ═══
+    if "hist_tam_pag" not in st.session_state:
+        st.session_state.hist_tam_pag = 50
+    if "hist_pag_atual" not in st.session_state:
+        st.session_state.hist_pag_atual = 1
+
+    # Reseta página quando filtros mudam (senão pode ficar em página vazia)
+    filtros_hash = hash((
+        st.session_state.get("hist_periodo"),
+        st.session_state.get("hist_unidade"),
+        st.session_state.get("hist_tipo", "Todos"),
+        st.session_state.get("hist_busca", ""),
+    ))
+    if st.session_state.get("hist_filtros_hash") != filtros_hash:
+        st.session_state.hist_filtros_hash = filtros_hash
+        st.session_state.hist_pag_atual = 1
+
+    total_registros = len(df_f)
+    tam_pag = st.session_state.hist_tam_pag
+    total_pags = max(1, (total_registros + tam_pag - 1) // tam_pag)
+
+    # Guarda contra página fora do range
+    if st.session_state.hist_pag_atual > total_pags:
+        st.session_state.hist_pag_atual = 1
+    pag_atual = st.session_state.hist_pag_atual
+
+    start_idx = (pag_atual - 1) * tam_pag
+    end_idx = min(start_idx + tam_pag, total_registros)
+    df_page = df_f.iloc[start_idx:end_idx]
+
     h1, h2, h3, h4, h5, h6, h7 = st.columns([0.9, 1.4, 0.7, 0.9, 1.0, 1.5, 1.6])
     h1.markdown("**Quando**")
     h2.markdown("**Cliente**")
@@ -850,7 +880,7 @@ def tela_confirmacao_historico():
     h7.markdown("**Observação**")
     st.markdown('<hr style="margin: 4px 0 8px 0;">', unsafe_allow_html=True)
 
-    for _, row in df_f.head(200).iterrows():
+    for _, row in df_page.iterrows():
         c1, c2, c3, c4, c5, c6, c7 = st.columns([0.9, 1.4, 0.7, 0.9, 1.0, 1.5, 1.6])
         try:
             quando = row['Data/Hora_sp'].strftime('%d/%m %H:%M')
@@ -859,7 +889,7 @@ def tela_confirmacao_historico():
         nome = str(row.get('Nome', '—') or '—')
         tel = str(row.get('Telefone', '—'))
         unid_raw = str(row.get('Unidade', '—') or '—')
-        if unid_raw in ("-", "None", ""):
+        if unid_raw in ("-", "None", "", "nan"):
             unid = "—"
         else:
             unid = unid_raw.replace('Mogi das Cruzes', 'Mogi')
@@ -867,7 +897,7 @@ def tela_confirmacao_historico():
         st_depois = str(row.get('Status Depois', '—') or '—')
 
         conteudo_raw = str(row.get('Conteúdo Exato', '') or '')
-        if conteudo_raw in ("-", "None", ""):
+        if conteudo_raw in ("-", "None", "", "nan"):
             conteudo = "—"
         else:
             conteudo = conteudo_raw.replace('\n', ' ').replace('\r', ' ')
@@ -888,8 +918,47 @@ def tela_confirmacao_historico():
         c6.markdown(f"<div style='font-size: 12px; color: #1F2937; font-style: italic;'>{conteudo}</div>", unsafe_allow_html=True)
         c7.markdown(f"<div style='font-size: 12px; color: #4B5563;'>{obs}</div>", unsafe_allow_html=True)
 
-    if len(df_f) > 200:
-        st.caption(f"Mostrando 200 de {len(df_f)} registros. Use a busca pra refinar.")
+    # ═══ CONTROLES DE PAGINAÇÃO — só mostra se tem mais de 1 página ═══
+    if total_pags > 1:
+        st.markdown('<hr style="margin: 12px 0 8px 0; border-color: #E5E7EB;">', unsafe_allow_html=True)
+
+        col_sel, col_info = st.columns([1.5, 3.5])
+        with col_sel:
+            opcoes_tam = [25, 50, 100, 200]
+            idx_tam = opcoes_tam.index(tam_pag) if tam_pag in opcoes_tam else 1
+            novo_tam = st.selectbox("Registros por página", opcoes_tam, index=idx_tam, key="hist_sel_tam")
+            if novo_tam != tam_pag:
+                st.session_state.hist_tam_pag = novo_tam
+                st.session_state.hist_pag_atual = 1
+                st.rerun()
+        with col_info:
+            st.markdown(
+                f"<div style='padding-top: 32px; color: #6B7280; font-size: 13px;'>"
+                f"Mostrando <b>{start_idx+1}-{end_idx}</b> de <b>{total_registros}</b> registros"
+                f" · Página <b>{pag_atual}</b> de <b>{total_pags}</b>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+
+        col_prev, col_num, col_next = st.columns([1, 2, 1])
+        with col_prev:
+            if st.button("⏮ Anterior", disabled=pag_atual <= 1, key="hist_btn_prev", use_container_width=True):
+                st.session_state.hist_pag_atual -= 1
+                st.rerun()
+        with col_num:
+            nova_pag = st.number_input(
+                "Ir para página",
+                min_value=1, max_value=total_pags,
+                value=pag_atual, key="hist_num_pag", step=1,
+                label_visibility="collapsed"
+            )
+            if nova_pag != pag_atual:
+                st.session_state.hist_pag_atual = int(nova_pag)
+                st.rerun()
+        with col_next:
+            if st.button("Próxima ⏭", disabled=pag_atual >= total_pags, key="hist_btn_next", use_container_width=True):
+                st.session_state.hist_pag_atual += 1
+                st.rerun()
 
     st.caption(f"⏱️ Cache 30s · {data.get('total', 0)} registros carregados de {data.get('total_planilha', 0)} na planilha")
 
