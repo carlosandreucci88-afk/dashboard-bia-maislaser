@@ -442,6 +442,49 @@ def registrar_log(telefone: str, nome: str, tipo: str, conteudo: str,
 
 
 # ============================================================================
+# TELA DE RESUMO PÓS-DISPARO (renderizada quando pos_disparo_finalizado=True)
+# ============================================================================
+
+def _render_tela_pos_disparo():
+    """Mostra resumo do último disparo + botão 'Novo disparo'.
+
+    Renderizada em vez do fluxo normal quando session_state.pos_disparo_finalizado=True.
+    Ao clicar em 'Novo disparo', seta pos_reset_pending=True e o topo de
+    render_aba_pos_disparar limpa TUDO no próximo ciclo.
+    """
+    resumo = st.session_state.get("pos_ultimo_resumo", {})
+
+    st.markdown("## 🚀 Disparar Pós-atendimento")
+    st.markdown("---")
+    st.markdown("### 🎉 Disparo finalizado")
+
+    col_r1, col_r2, col_r3 = st.columns(3)
+    col_r1.metric("✅ Enviados", resumo.get("sucessos", 0))
+    col_r2.metric("❌ Erros", resumo.get("erros", 0))
+    total = resumo.get("total", 0)
+    sucessos = resumo.get("sucessos", 0)
+    tx = f"{sucessos/total*100:.1f}%" if total > 0 else "0%"
+    col_r3.metric("📊 Taxa sucesso", tx)
+
+    erros_lista = resumo.get("erros_lista", [])
+    if erros_lista:
+        with st.expander(f"❌ Ver {len(erros_lista)} erro(s)"):
+            for e in erros_lista:
+                st.error(e)
+
+    st.success("✅ Disparo registrado. Clientes agora estão em `template_enviado`, aguardando resposta.")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("---")
+    if st.button("🔄 Fazer novo disparo",
+                 type="primary",
+                 use_container_width=True,
+                 key="pos_btn_novo_disparo"):
+        st.session_state.pos_reset_pending = True
+        st.rerun()
+
+
+# ============================================================================
 # UI
 # ============================================================================
 
@@ -454,7 +497,6 @@ def render_aba_pos_disparar():
     if st.session_state.get("pos_reset_pending"):
         # Incrementa gen do uploader antes de matar chaves
         st.session_state["pos_uploader_gen"] = st.session_state.get("pos_uploader_gen", 0) + 1
-        gen_novo = st.session_state["pos_uploader_gen"]
 
         # Mata TUDO que começa com pos_ EXCETO o gen novo
         for k in list(st.session_state.keys()):
@@ -464,21 +506,15 @@ def render_aba_pos_disparar():
         st.cache_data.clear()
         st.rerun()
 
-    st.markdown("## 🚀 Disparar Pós-atendimento")
-    st.caption("Upload da planilha do dia anterior (UNO). Sistema envia template Meta aprovado para cada cliente único.")
-
     # ══════════════════════════════════════════════════════════════════
-    # BOTÃO "NOVO DISPARO" — só aparece quando último disparo finalizou
+    # SE ÚLTIMO DISPARO FINALIZOU → mostra tela de resumo + botão "Novo"
     # ══════════════════════════════════════════════════════════════════
     if st.session_state.get("pos_disparo_finalizado"):
-        st.info("✅ Último disparo finalizado. Clique abaixo pra iniciar um novo.")
-        if st.button("🔄 Fazer novo disparo",
-                     type="primary",
-                     use_container_width=True,
-                     key="pos_btn_novo_disparo"):
-            st.session_state.pos_reset_pending = True
-            st.rerun()
+        _render_tela_pos_disparo()
         return
+
+    st.markdown("## 🚀 Disparar Pós-atendimento")
+    st.caption("Upload da planilha do dia anterior (UNO). Sistema envia template Meta aprovado para cada cliente único.")
 
     # ── Estado do sistema ──
     cfg = _get_config_pos()
@@ -698,7 +734,7 @@ Pra que os alertas de _problema com atendimento_, _resultado ruim_ e _pedidos de
         with col_ok:
             if st.button("✅ Sim, disparar agora", type="primary", use_container_width=True, key="pos_confirm_yes"):
                 _executar_disparo(df_ag, st.session_state.pos_unidade, arquivo.name)
-                st.session_state.pos_confirmar_disparo = False
+                st.rerun()
         with col_cancel:
             if st.button("❌ Cancelar", use_container_width=True, key="pos_confirm_no"):
                 st.session_state.pos_confirmar_disparo = False
@@ -706,7 +742,11 @@ Pra que os alertas de _problema com atendimento_, _resultado ruim_ e _pedidos de
 
 
 def _executar_disparo(df_ag: pd.DataFrame, unidade: str, nome_arquivo: str):
-    """Executa o disparo real. Cria registros no Supabase + envia templates Meta."""
+    """Executa o disparo real. Cria registros no Supabase + envia templates Meta.
+
+    Ao final, salva resumo em pos_ultimo_resumo e seta pos_disparo_finalizado=True.
+    O rerun do chamador vai renderizar _render_tela_pos_disparo() em vez do fluxo normal.
+    """
 
     # ── 1. Cria linhas no pos_atendimento_clientes ──
     with st.spinner("Cadastrando clientes no Supabase..."):
@@ -803,29 +843,16 @@ def _executar_disparo(df_ag: pd.DataFrame, unidade: str, nome_arquivo: str):
         "erros_envio_detalhes": "\n".join(erros_lista[:20]) if erros_lista else None,
     })
 
-    # ── 5. Resumo ──
-    progress.empty()
-    status_text.empty()
-
-    st.markdown("---")
-    st.markdown("### 🎉 Disparo finalizado")
-
-    col_r1, col_r2, col_r3 = st.columns(3)
-    col_r1.metric("✅ Enviados", sucessos)
-    col_r2.metric("❌ Erros", len(erros_lista))
-    col_r3.metric("📊 Taxa sucesso", f"{sucessos/total*100:.1f}%" if total > 0 else "0%")
-
-    if erros_lista:
-        with st.expander(f"❌ Ver {len(erros_lista)} erro(s)"):
-            for e in erros_lista:
-                st.error(e)
-
     # Limpa cache pra próximo uso
     st.cache_data.clear()
 
-    st.success("✅ Disparo registrado. Clientes agora estão em `template_enviado`, aguardando resposta.")
-
-    # Sinaliza que o disparo terminou — o botão "Novo disparo" será renderizado
-    # no render_aba_pos_disparar (fora de _executar_disparo) pra evitar
-    # conflitos de estado com pos_confirmar_disparo/pos_confirm_yes
+    # ── 5. Salva resumo em session_state pra tela de resumo mostrar depois ──
+    st.session_state.pos_ultimo_resumo = {
+        "total":       total,
+        "sucessos":    sucessos,
+        "erros":       len(erros_lista),
+        "erros_lista": erros_lista,
+    }
     st.session_state.pos_disparo_finalizado = True
+    # NÃO faz rerun aqui — quem chama (_executar_disparo dentro de "Sim, disparar")
+    # já faz o rerun logo depois. Isso deixa o Streamlit terminar o ciclo atual limpo.
