@@ -548,6 +548,36 @@ def render_aba_pos_disparar():
         st.button("🚀 Disparar", disabled=True, use_container_width=True)
         return
 
+    # ── AVISO CRÍTICO: janela 24h da coordenadora ──
+    st.warning(
+        f"""
+⚠️ **IMPORTANTE — abra a janela 24h da coordenadora antes de disparar**
+
+Pra que os alertas de _problema com atendimento_, _resultado ruim_ e _pedidos de cupom_ cheguem em **{coord_nome}** (`+{coord_tel}`), ela precisa ter mandado qualquer mensagem (ex: "oi") pro robô **97502-5297** nas últimas 24h.
+
+**Sem essa janela aberta, os alertas VÃO FALHAR** (Meta bloqueia mensagens fora do template pra números que não iniciaram conversa).
+
+📋 **Passo a passo antes de disparar:**
+1. Peça pra **{coord_nome}** mandar "oi" pelo WhatsApp pro robô **+5511975025297**
+2. Espere até ver a mensagem entregar (✓✓)
+3. Marque a caixa abaixo confirmando
+        """
+    )
+
+    janela_coord_ok = st.checkbox(
+        f"✅ Confirmo que {coord_nome} (+{coord_tel}) já mandou mensagem pro robô nas últimas 24h",
+        key="pos_janela_coord_ok"
+    )
+
+    if not janela_coord_ok:
+        st.button(
+            f"🚀 Disparar template para {total_clientes} cliente(s)",
+            disabled=True,
+            use_container_width=True,
+            help="Marque a caixa acima confirmando que a janela 24h da coordenadora está aberta"
+        )
+        return
+
     # Confirmação dupla
     if "pos_confirmar_disparo" not in st.session_state:
         st.session_state.pos_confirmar_disparo = False
