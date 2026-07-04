@@ -91,24 +91,17 @@ def _fetch_diagnostico_apps_script() -> dict:
 # ============================================================================
 
 def _render_card(icon, value, label, cor="#5BC0BE", sub=None):
-    sub_html = f'<div style="font-size: 11px; color: #9CA3AF; margin-top: 2px;">{sub}</div>' if sub else ''
-    return f"""
-    <div style="background: white; border-radius: 12px; padding: 16px;
-                border: 1px solid #E5E7EB; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
-        <div style="display: flex; align-items: center; gap: 12px;">
-            <div style="width: 40px; height: 40px; border-radius: 10px;
-                        background: {cor}1A; color: {cor};
-                        display: flex; align-items: center; justify-content: center;
-                        font-size: 22px;">{icon}</div>
-            <div>
-                <div style="font-size: 24px; font-weight: 700; color: #111827;">{value}</div>
-                <div style="font-size: 12px; color: #6B7280; text-transform: uppercase;
-                            letter-spacing: 0.5px;">{label}</div>
-                {sub_html}
-            </div>
-        </div>
-    </div>
-    """
+    sub_html = f'<div style="font-size:11px;color:#9CA3AF;margin-top:2px;">{sub}</div>' if sub else ''
+    return (
+        f'<div style="background:white;border-radius:12px;padding:16px;border:1px solid #E5E7EB;box-shadow:0 1px 2px rgba(0,0,0,0.03);">'
+        f'<div style="display:flex;align-items:center;gap:12px;">'
+        f'<div style="width:40px;height:40px;border-radius:10px;background:{cor}1A;color:{cor};display:flex;align-items:center;justify-content:center;font-size:22px;">{icon}</div>'
+        f'<div>'
+        f'<div style="font-size:24px;font-weight:700;color:#111827;">{value}</div>'
+        f'<div style="font-size:12px;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;">{label}</div>'
+        f'{sub_html}'
+        f'</div></div></div>'
+    )
 
 
 def _render_status_banner(criticos, atencao):
@@ -306,6 +299,9 @@ def render_aba_diagnostico_agenda():
         df = pd.DataFrame(det)
         if df.empty: return
         df["criado_em"] = df["criado_em"].apply(_fmt_dt)
+        # Detalhes pode vir null (disparos anteriores à v6.14.2 que introduziu a coluna)
+        if "erros_envio_detalhes" in df.columns:
+            df["erros_envio_detalhes"] = df["erros_envio_detalhes"].fillna("—").replace("", "—")
         df = df.rename(columns={
             "criado_em":"Quando","unidade":"Unidade","total_clientes":"Total",
             "whatsapp_ok":"Enviados","erros_envio":"Erros","erros_envio_detalhes":"Detalhes"
