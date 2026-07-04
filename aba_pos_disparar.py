@@ -444,8 +444,41 @@ def render_aba_pos_disparar():
 
     st.success(f"✅ Unidade selecionada: **{st.session_state.pos_unidade}**")
 
+    # ── Mostrar coordenadora que receberá alertas dessa unidade ──
+    if st.session_state.pos_unidade == "Mogi das Cruzes":
+        coord_tel = cfg.get("pos_coord_mogi_telefone", "5511974485859")
+        coord_nome = "Coordenadora Mogi"
+    else:
+        coord_tel = cfg.get("pos_coord_suzano_telefone", "5511913194989")
+        coord_nome = "Coordenadora Suzano"
+
+    st.info(
+        f"🔔 **Alertas de problemas e pedidos de cupom serão enviados para:**  \n"
+        f"📞 {coord_nome} · **+{coord_tel}**  \n"
+        f"_(Configurável na tabela `configuracoes` do Supabase — colunas "
+        f"`pos_coord_mogi_telefone` / `pos_coord_suzano_telefone`)_"
+    )
+
     # ── Upload XLSX ──
     st.markdown("### 2. Upload da planilha")
+
+    # ── Aviso das colunas esperadas ──
+    st.warning(
+        "⚠️ **A planilha DEVE conter exatamente estas 7 colunas** (nomes exatos, "
+        "com acentos):\n\n"
+        "| Coluna | Exemplo |\n"
+        "|---|---|\n"
+        "| **Data** | `02/07/2026 09:00` (data + hora) |\n"
+        "| **Cliente** | `Ingrid Dos Santos Neves` |\n"
+        "| **Telefone** | `5511982718573` (só números) |\n"
+        "| **Serviço** | `F - Depilação de Axilas cortesia` |\n"
+        "| **Sala** | `Procedimento 1` |\n"
+        "| **Situação** | `Realizado` (só \"Realizado\" será processado) |\n"
+        "| **Realizado por** | `Clícia Maria Medeiros Costa` |\n\n"
+        "💡 Este é o formato **padrão de exportação do UNO** — se exportou de lá, "
+        "provavelmente já está no formato certo. Se faltar coluna, o sistema aborta."
+    )
+
     arquivo = st.file_uploader(
         "Selecione o XLSX exportado do UNO (agendamentos do dia anterior)",
         type=["xlsx", "xls"],
