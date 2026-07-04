@@ -35,6 +35,7 @@ STATUS_LABEL = {
     "sem_resposta_24h":          "⚪ Sem resposta (24h)",
     "duplicata_ignorada":        "⏭️ Duplicata ignorada",
     "falha_envio":               "❌ Falha no envio",
+    "substituido_por_novo_disparo": "🔄 Substituído por novo disparo",
 }
 
 
