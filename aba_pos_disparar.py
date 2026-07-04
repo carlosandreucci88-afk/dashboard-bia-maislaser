@@ -446,6 +446,29 @@ def registrar_log(telefone: str, nome: str, tipo: str, conteudo: str,
 # ============================================================================
 
 def render_aba_pos_disparar():
+    # ── Reset "hard" — clique em "Novo disparo" seta essa flag ──
+    if st.session_state.get("pos_precisa_resetar"):
+        # Incrementa gen do uploader antes de limpar
+        st.session_state.pos_uploader_gen = st.session_state.get("pos_uploader_gen", 0) + 1
+
+        # Lista de chaves do fluxo que precisam morrer
+        chaves_pra_limpar = [
+            "pos_unidade",
+            "pos_janela_coord_ok",
+            "pos_confirmar_disparo",
+            "pos_precisa_resetar",
+        ]
+        # Mata TODOS uploaders antigos (menos o gen)
+        for k in list(st.session_state.keys()):
+            if k.startswith("pos_uploader_") and k != "pos_uploader_gen":
+                chaves_pra_limpar.append(k)
+
+        for k in chaves_pra_limpar:
+            if k in st.session_state:
+                del st.session_state[k]
+
+        st.cache_data.clear()
+
     st.markdown("## 🚀 Disparar Pós-atendimento")
     st.caption("Upload da planilha do dia anterior (UNO). Sistema envia template Meta aprovado para cada cliente único.")
 
