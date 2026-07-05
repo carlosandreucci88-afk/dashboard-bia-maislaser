@@ -88,7 +88,11 @@ import re
 from supabase import create_client
 
 NOME_MODELO_MENSAGEM        = "confirmacao_agenda_maislaser_v4"
-NOME_MODELO_MENSAGEM_2SESS  = "confirmacao_agenda_maislaser_2sessoes_v2"
+# v6.20 (05/07/2026): Template `_2sessoes_v2` não existe mais na Meta —
+# causava HTTP 404 pra todo cliente com 2 horários diferentes no mesmo dia.
+# Fix: sempre usar `_v4` (unificado) concatenando horários e serviços em {{2}} e {{3}}.
+# Constante mantida só pra referência histórica.
+NOME_MODELO_MENSAGEM_2SESS  = "confirmacao_agenda_maislaser_2sessoes_v2"  # DEPRECATED — não usar
 
 def limpar_numero(numero):
     if pd.isna(numero):
@@ -471,19 +475,29 @@ def render_aba_disparador():
 
                             tem_2_sessoes = bool(horario2_cliente and horario2_cliente != horario_cliente)
 
+                            # v6.20 (05/07/2026): SEMPRE usa template v4 (unificado).
+                            # O template `_2sessoes_v2` não existe mais na Meta e causava
+                            # HTTP 404 pra clientes com 2 horários diferentes.
+                            # Fix: se tiver 2 sessões, concatena horário e serviços em
+                            # uma única mensagem. Só extrai o "HH:MM" de cada horário
+                            # (evita repetir a data 2x na msg).
                             if tem_2_sessoes:
-                                code, res = enviar_mensagem_2sessoes(
-                                    nome_cliente,
-                                    horario_cliente, procedimento,
-                                    horario2_cliente, servico2_cliente,
-                                    unidade_selecionada, telefone_formatado
-                                )
+                                # `horario_cliente` = "06/07/2026 às 09h30" (data + hora)
+                                # `horario2_cliente` = "06/07/2026 às 09h50"
+                                # Pega só a parte "HH:MM" do 2º horário pra concatenar
+                                match_h2 = re.search(r'(\d{1,2}h\d{2})\s*$', str(horario2_cliente))
+                                hora2_curta = match_h2.group(1) if match_h2 else str(horario2_cliente)
+                                horario_final  = f"{horario_cliente} e {hora2_curta}"
+                                servico_final  = f"{horario_cliente[-5:]}: {procedimento} · {hora2_curta}: {servico2_cliente}"
                             else:
-                                code, res = enviar_mensagem_whatsapp(
-                                    nome_cliente, horario_cliente,
-                                    procedimento, unidade_selecionada,
-                                    telefone_formatado
-                                )
+                                horario_final = horario_cliente
+                                servico_final = procedimento
+
+                            code, res = enviar_mensagem_whatsapp(
+                                nome_cliente, horario_final,
+                                servico_final, unidade_selecionada,
+                                telefone_formatado
+                            )
 
                             if code in (200, 201):
                                 sucessos += 1
