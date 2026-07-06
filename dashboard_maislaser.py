@@ -71,6 +71,7 @@ from aba_pos_disparar import render_aba_pos_disparar
 from aba_pos_historico_monitor import render_aba_pos_historico, render_aba_pos_monitor
 from aba_pos_config import render_aba_pos_config
 from aba_pos_diagnostico import render_aba_pos_diagnostico  # v6.7: aba diagnóstico
+from aba_erros_sistema import render_aba_erros  # v6.8: aba de log de erros centralizado
 
 
 # ============================================================================
@@ -597,13 +598,15 @@ def main():
         # v6.6: Robô Pós-atendimento (número 97502-5297) — arquitetura sem
         # Sheets, direto Supabase. Apps Script separado só pra webhook doPost.
         # v6.7: aba 🔧 Diagnóstico com RPC pos_diagnostico_completo + ações
+        # v6.8: aba 🐛 Erros do Sistema (log centralizado de erros de todos os robôs)
         (tab_pos_disp, tab_pos_hist, tab_pos_mon, tab_pos_cfg,
-         tab_pos_diag) = st.tabs([
+         tab_pos_diag, tab_pos_erros) = st.tabs([
             "🚀 Disparar pós-atendimento",
             "📋 Histórico de disparos",
             "👥 Monitoramento clientes",
             "⚙️ Configurações",
             "🔧 Diagnóstico",
+            "🐛 Erros do Sistema",
         ])
 
         with tab_pos_disp:
@@ -620,6 +623,9 @@ def main():
 
         with tab_pos_diag:
             render_aba_pos_diagnostico()
+
+        with tab_pos_erros:
+            render_aba_erros()
 
     if auto_refresh:
         time.sleep(30)
