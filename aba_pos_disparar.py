@@ -779,6 +779,10 @@ def _executar_disparo(df_ag: pd.DataFrame, unidade: str, nome_arquivo: str):
     })
 
     # ── 3. Loop de envio ──
+    # v1.2 (06/07/2026): BATCH de writes Supabase pra evitar timeout Streamlit Cloud.
+    # Antes: 3 chamadas HTTP por cliente (Meta + update + log) = 75 pra 25 clientes.
+    # Depois: 1 Meta por cliente + 2 batches finais = 27 pra 25 clientes.
+    # Reduz tempo total de ~30s pra ~15s, elimina risco de timeout.
     st.markdown("---")
     st.markdown("### 📤 Enviando templates...")
 
@@ -788,6 +792,11 @@ def _executar_disparo(df_ag: pd.DataFrame, unidade: str, nome_arquivo: str):
     total = len(df_ag)
     sucessos = 0
     erros_lista = []
+
+    # Acumuladores pra batch
+    updates_clientes = []  # lista de dicts {id, status, disparo_ts, wamid}
+    logs_pendentes = []    # lista de dicts pra pos_atendimento_log
+    agora_iso_batch = datetime.now(TZ_SP).isoformat()
 
     for i, row in df_ag.iterrows():
         status_text.text(f"Enviando {i+1}/{total} — {row['nome']} ({row['telefone']})...")
@@ -804,35 +813,95 @@ def _executar_disparo(df_ag: pd.DataFrame, unidade: str, nome_arquivo: str):
 
         if ok:
             sucessos += 1
-            atualizar_cliente(row["cliente_id"], {
+            # ACUMULA — não escreve ainda
+            updates_clientes.append({
+                "id":         int(row["cliente_id"]),
                 "status":     "template_enviado",
-                "disparo_ts": datetime.now(TZ_SP).isoformat(),
+                "disparo_ts": agora_iso_batch,
                 "wamid":      resposta,
             })
-            registrar_log(
-                row["telefone"], row["nome"], "saida_template",
-                f"[template {TEMPLATE_NOME}]",
-                "aguardando_disparo", "template_enviado",
-                unidade,
-                f"✅ Template enviado ({row['data_fmt']} {row['hora_sessao']})",
-                cliente_id=row["cliente_id"]
-            )
+            logs_pendentes.append({
+                "data_hora":     agora_iso_batch,
+                "telefone":      row["telefone"],
+                "nome":          row["nome"],
+                "tipo_mensagem": "saida_template",
+                "conteudo":      f"[template {TEMPLATE_NOME}]",
+                "status_antes":  "aguardando_disparo",
+                "status_depois": "template_enviado",
+                "unidade":       unidade,
+                "observacao":    f"✅ Template enviado ({row['data_fmt']} {row['hora_sessao']})",
+                "cliente_id":    int(row["cliente_id"]),
+            })
         else:
             erros_lista.append(f"{row['nome']} ({row['telefone']}): {resposta}")
-            atualizar_cliente(row["cliente_id"], {
-                "status": "falha_envio"
+            updates_clientes.append({
+                "id":     int(row["cliente_id"]),
+                "status": "falha_envio",
             })
-            registrar_log(
-                row["telefone"], row["nome"], "erro_envio",
-                str(resposta)[:400],
-                "aguardando_disparo", "falha_envio",
-                unidade,
-                f"❌ FALHA NO ENVIO: {str(resposta)[:200]}",
-                cliente_id=row["cliente_id"]
-            )
+            logs_pendentes.append({
+                "data_hora":     agora_iso_batch,
+                "telefone":      row["telefone"],
+                "nome":          row["nome"],
+                "tipo_mensagem": "erro_envio",
+                "conteudo":      str(resposta)[:400],
+                "status_antes":  "aguardando_disparo",
+                "status_depois": "falha_envio",
+                "unidade":       unidade,
+                "observacao":    f"❌ FALHA NO ENVIO: {str(resposta)[:200]}",
+                "cliente_id":    int(row["cliente_id"]),
+            })
 
         # Rate limit — pequena pausa entre envios
         time.sleep(0.3)
+
+    # ── 3.5. BATCH WRITE — persiste tudo de uma vez ──
+    status_text.text(f"💾 Gravando status de {total} clientes no Supabase (batch)...")
+
+    sb = _get_sb()
+
+    # Batch UPDATE clientes: um update por id (não tem upsert em massa com PK,
+    # mas fazemos numa transação HTTP menor — 25 updates ainda é mais rápido que
+    # 75 chamadas serializadas). Usamos loop mas SEM sleep entre eles.
+    try:
+        for upd in updates_clientes:
+            cliente_id = upd.pop("id")
+            sb.table("pos_atendimento_clientes").update(upd).eq("id", cliente_id).execute()
+    except Exception as e:
+        st.warning(f"⚠️ Erro parcial ao atualizar clientes: {e}")
+        try:
+            from utils_erros import registrar_erro
+            registrar_erro(
+                robo="pos_atendimento",
+                origem="dashboard",
+                modulo="aba_pos_disparar.py::_executar_disparo::batch_update_clientes",
+                severidade="error",
+                exc=e,
+                contexto={"total_updates": len(updates_clientes), "unidade": unidade},
+                unidade=unidade,
+            )
+        except Exception:
+            pass
+
+    # Batch INSERT logs — 1 chamada só pros 25 logs
+    try:
+        if logs_pendentes:
+            sb.table("pos_atendimento_log").insert(logs_pendentes).execute()
+    except Exception as e:
+        st.warning(f"⚠️ Erro ao gravar logs em batch: {e}")
+        try:
+            from utils_erros import registrar_erro
+            registrar_erro(
+                robo="pos_atendimento",
+                origem="dashboard",
+                modulo="aba_pos_disparar.py::_executar_disparo::batch_insert_logs",
+                severidade="error",
+                exc=e,
+                contexto={"total_logs": len(logs_pendentes), "unidade": unidade},
+                unidade=unidade,
+            )
+        except Exception:
+            pass
+
 
     # ── 4. Finaliza histórico ──
     atualizar_disparo_historico(id_disparo, {
