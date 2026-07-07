@@ -33,21 +33,31 @@ está em FILA E os DISPARADO já têm pelo menos 24h (provavelmente não vão ma
 clicar). É uma heurística — não há status terminal por campanha.
 
 ==============================================================================
+FIX 07/07/2026 — Streamlit 1.35.0 compat:
+  _get_sb() reescrito pra criar client Supabase LOCAL via st.secrets, sem
+  importar de dashboard_maislaser (que dispara st.set_page_config no top-level
+  e o Streamlit 1.35 aborta com StreamlitAPIException quando isso acontece
+  dentro de um contexto @st.cache_data).
+  Padrão idêntico ao usado em aba_confirmacao.py._get_supabase_client().
+==============================================================================
 """
 
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta, timezone
+from supabase import create_client, Client
 
 TZ_SP = timezone(timedelta(hours=-3))
 
 # ============================================================================
-# SUPABASE — lazy import (evita circular)
+# SUPABASE — client local, sem import circular (fix Streamlit 1.35 compat)
 # ============================================================================
 
-def _get_sb():
-    from dashboard_maislaser import get_supabase
-    return get_supabase()
+@st.cache_resource
+def _get_sb() -> Client:
+    """Client Supabase cacheado. Não importa de dashboard_maislaser pra evitar
+    reexecução do st.set_page_config dentro de contexto @st.cache_data."""
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 
 # ============================================================================
