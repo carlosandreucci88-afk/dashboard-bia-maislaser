@@ -29,17 +29,20 @@ Colunas usadas:
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta, timezone
+from supabase import create_client, Client
 
 TZ_SP = timezone(timedelta(hours=-3))
 
 
 # ============================================================================
-# SUPABASE lazy import
+# SUPABASE — client local, sem import circular (fix Streamlit 1.35 compat)
 # ============================================================================
 
-def _get_sb():
-    from dashboard_maislaser import get_supabase
-    return get_supabase()
+@st.cache_resource
+def _get_sb() -> Client:
+    """Client Supabase cacheado. Não importa de dashboard_maislaser pra evitar
+    reexecução do st.set_page_config dentro de contexto @st.cache_data."""
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 
 # ============================================================================
