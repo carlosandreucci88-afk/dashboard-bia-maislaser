@@ -526,7 +526,7 @@ def _render_resumo_base(supabase):
         n = por_tipo.get(t, 0)
         pct = 100 * n / total if total else 0
         linhas_tipo.append({'Tipo': label, 'Quantidade': n, '%': f'{pct:.1f}%'})
-    st.dataframe(pd.DataFrame(linhas_tipo), hide_index=True, width='stretch')
+    st.dataframe(pd.DataFrame(linhas_tipo), hide_index=True, use_container_width=True)
 
     st.markdown('**Categoria de nome:**')
     por_cat = df['categoria_nome'].value_counts().to_dict()
@@ -534,7 +534,7 @@ def _render_resumo_base(supabase):
         {'Categoria': CATEGORIA_LABELS.get(c, c), 'Quantidade': n}
         for c, n in sorted(por_cat.items(), key=lambda x: -x[1])
     ]
-    st.dataframe(pd.DataFrame(linhas_cat), hide_index=True, width='stretch')
+    st.dataframe(pd.DataFrame(linhas_cat), hide_index=True, use_container_width=True)
 
 
 def _render_visualizar_clientes(supabase):
@@ -592,7 +592,7 @@ def _render_visualizar_clientes(supabase):
     else:
         st.caption(f'📊 {len(df):,} cliente(s) encontrado(s)'.replace(',', '.'))
 
-    st.dataframe(df, hide_index=True, width='stretch')
+    st.dataframe(df, hide_index=True, use_container_width=True)
 
 
 def _render_importar(supabase):
@@ -660,7 +660,7 @@ def _render_importar(supabase):
         n = stats['por_tipo'].get(t, 0)
         pct = 100 * n / stats['validos'] if stats['validos'] else 0
         linhas_tipo.append({'Tipo': label, 'Quantidade': n, '%': f'{pct:.1f}%'})
-    st.dataframe(pd.DataFrame(linhas_tipo), hide_index=True, width='stretch')
+    st.dataframe(pd.DataFrame(linhas_tipo), hide_index=True, use_container_width=True)
 
     # ---- Categorias ----
     st.markdown('**Categoria de nome:**')
@@ -669,7 +669,7 @@ def _render_importar(supabase):
         n = stats['por_categoria'].get(cat, 0)
         if n > 0:
             linhas_cat.append({'Categoria': label, 'Quantidade': n})
-    st.dataframe(pd.DataFrame(linhas_cat), hide_index=True, width='stretch')
+    st.dataframe(pd.DataFrame(linhas_cat), hide_index=True, use_container_width=True)
 
     # ---- Rejeitados ----
     n_rej = stats['invalidos'] + stats['por_categoria'].get('BLOQUEIO', 0)
@@ -678,7 +678,7 @@ def _render_importar(supabase):
         if not r['df_invalidos'].empty:
             st.dataframe(
                 r['df_invalidos'][['telefone', 'nome_original', 'motivo_invalido']],
-                hide_index=True, width='stretch'
+                hide_index=True, use_container_width=True
             )
         else:
             st.caption('Nenhum.')
@@ -689,7 +689,7 @@ def _render_importar(supabase):
             st.dataframe(
                 bloqueados[['telefone', 'nome_limpo', 'nome_original',
                             'palavras_detectadas']],
-                hide_index=True, width='stretch'
+                hide_index=True, use_container_width=True
             )
         else:
             st.caption('Nenhum.')
@@ -708,7 +708,7 @@ def _render_importar(supabase):
         )
     with col_b:
         confirmar = st.button(
-            f'🚀 Importar agora', type='primary', width='stretch',
+            f'🚀 Importar agora', type='primary', use_container_width=True,
             key='btn_importar_base'
         )
 
