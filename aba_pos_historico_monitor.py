@@ -26,6 +26,7 @@ TZ_SP = timezone(timedelta(hours=-3))
 STATUS_LABEL = {
     "aguardando_disparo":        "🟡 Aguardando disparo",
     "template_enviado":          "📤 Template enviado",
+    "template_sem_resposta":     "⏰ Template ignorado (>24h)",
     "tudo_otimo_pendente":       "🟢 Tudo ótimo (esperando cupom)",
     "tudo_otimo_cupom_agora":    "🎁 Satisfeito + cupom agora",
     "tudo_otimo_cupom_depois":   "✅ Satisfeito + cupom depois",
