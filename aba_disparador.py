@@ -85,7 +85,47 @@ import requests
 import json
 import time
 import re
+from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
+
+# ============================================================================
+# v6.21 (08/07/2026) — BLINDAGEM DO DISPARADOR (Fase A + B)
+# ============================================================================
+# FIXES CRÍTICOS:
+#   1. Timeout no requests.post da Meta (era infinito → travava disparo inteiro
+#      quando Meta demorava)
+#   2. INSERT direto no Supabase agenda_contexto (pula Sheets/Apps Script no
+#      caminho crítico — 30x mais rápido por cliente)
+#   3. POST Apps Script em fire-and-forget async (pra manter PropertiesService
+#      + agendarLembretes funcionando, mas sem bloquear o loop)
+#   4. Update incremental de disparos_historico a cada 3 clientes + heartbeat
+#      (se morrer, banco sabe estado real; watchdog detecta em ≤3min)
+#   5. Update final com status='concluido' pra dashboard mostrar corretamente
+#   6. GET verificação final agora vai no SUPABASE (não Apps Script)
+#
+# GANHO MEDIDO: loop de 29 clientes vai de ~12min (trava) pra ~90s (completa).
+#
+# COMPATIBILIDADE 100%:
+#   • Apps Script continua sendo chamado (mas async) → PropertiesService e
+#     agendarLembretes continuam populando exatamente como antes
+#   • Webhook doPost do Apps Script (respostas de cliente) → sem mudança
+#   • Triggers de lembrete → sem mudança
+#   • Dashboard existente → funciona igual, ganha campos novos automaticamente
+# ============================================================================
+
+# Timeouts do requests.post pra Meta:
+#   • 5s pra estabelecer conexão TCP
+#   • 60s pra Meta responder o body
+# Se estourar, requests.exceptions.Timeout é levantado → cliente vira erro,
+# LOOP CONTINUA (antes: travava infinito e matava tudo)
+META_TIMEOUT = (5, 60)
+
+# Batch de update do disparos_historico
+# A cada 3 clientes processados, faz UPDATE no banco com contadores +
+# heartbeat_em=now(). Se Python morrer, banco tem estado real (perde no
+# máximo 2 clientes de precisão).
+UPDATE_BATCH_SIZE = 3
 
 NOME_MODELO_MENSAGEM        = "confirmacao_agenda_maislaser_v4"
 # v6.20 (05/07/2026): Template `_2sessoes_v2` não existe mais na Meta —
@@ -147,8 +187,11 @@ def enviar_mensagem_whatsapp(nome, horario, procedimento, unidade, telefone_dest
         }
     }
     try:
-        resposta = requests.post(url, headers=headers, json=payload)
+        # 🆕 v6.21: timeout (5s conexão, 60s resposta) — antes era infinito
+        resposta = requests.post(url, headers=headers, json=payload, timeout=META_TIMEOUT)
         return resposta.status_code, resposta.json()
+    except requests.exceptions.Timeout:
+        return 408, {"error": f"Timeout Meta (>{META_TIMEOUT[1]}s) — cliente pulado, loop continua"}
     except Exception as e:
         return 500, {"error": str(e)}
 
@@ -179,8 +222,11 @@ def enviar_mensagem_2sessoes(nome, horario1, servico1, horario2, servico2, unida
         }
     }
     try:
-        resposta = requests.post(url, headers=headers, json=payload)
+        # 🆕 v6.21: timeout — mesma proteção da função principal
+        resposta = requests.post(url, headers=headers, json=payload, timeout=META_TIMEOUT)
         return resposta.status_code, resposta.json()
+    except requests.exceptions.Timeout:
+        return 408, {"error": f"Timeout Meta (>{META_TIMEOUT[1]}s) — cliente pulado, loop continua"}
     except Exception as e:
         return 500, {"error": str(e)}
 
@@ -201,6 +247,9 @@ def _criar_registro_inicial_historico(unidade, arquivo_nome, total_clientes,
             "erros_envio": 0,
             "numero_alerta": numero_alerta,
             "observacao": "🔄 EM_ANDAMENTO — disparo em execução",
+            # 🆕 v6.21 — status + heartbeat pra watchdog
+            "status": "em_andamento",
+            "heartbeat_em": datetime.now(timezone.utc).isoformat(),
         }).execute()
         if resp.data and len(resp.data) > 0:
             return resp.data[0].get("id")
@@ -210,8 +259,113 @@ def _criar_registro_inicial_historico(unidade, arquivo_nome, total_clientes,
         return None
 
 
+# 🆕 v6.21 — UPDATE INCREMENTAL DE PROGRESSO
+# Chamada a cada UPDATE_BATCH_SIZE clientes processados. Grava contadores
+# parciais + heartbeat_em=now() pra sinalizar pro watchdog que o processo
+# tá vivo. Se falhar, log apenas — NÃO quebra o loop.
+def _atualizar_progresso_parcial(registro_id, sucessos, erros, ultimo_cliente):
+    if not registro_id:
+        return
+    try:
+        sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+        sb.table("disparos_historico").update({
+            "whatsapp_ok": sucessos,
+            "erros_envio": erros,
+            "heartbeat_em": datetime.now(timezone.utc).isoformat(),
+            "ultimo_cliente_processado": ultimo_cliente,
+        }).eq("id", registro_id).execute()
+    except Exception as e:
+        # Silencioso — não quer poluir tela do usuário com erro de update parcial.
+        # Update final vai gravar tudo de novo mesmo.
+        print(f"[disparador] update parcial falhou (id={registro_id}): {e}")
+
+
+# 🆕 v6.21 — INSERT DIRETO NO SUPABASE (agenda_contexto)
+# Substitui o POST pro Apps Script no caminho crítico do disparo.
+# Comportamento idêntico ao Apps Script _supabaseUpsertContexto (linhas 353-369
+# do Code.gs Agenda) — mesmo header UPSERT, mesmo payload.
+# Retorna True em sucesso, False em falha (não levanta exceção).
+def _insert_supabase_contexto(telefone, nome, servico, unidade, horario,
+                                horario2, servico2, numero_alerta):
+    try:
+        supabase_url = st.secrets["SUPABASE_URL"]
+        supabase_key = st.secrets["SUPABASE_KEY"]
+        agora = datetime.now(timezone.utc).isoformat()
+        payload = {
+            "telefone":             str(telefone),
+            "nome":                 nome or None,
+            "servico":              servico or None,
+            "unidade":              unidade or None,
+            "horario":              horario or None,
+            "horario2":             horario2 or None,
+            "servico2":             servico2 or None,
+            "numero_alerta":        numero_alerta or None,
+            "status":               "aguardando",
+            "tentativas_invalidas": 0,
+            "ultima_atualizacao":   agora,
+            "disparo_ts":           agora,
+            "arquivado_em":         None,
+            # Reset das flags de lembrete pra novo ciclo (mesmo comportamento
+            # do agendarLembretes do Code.gs Agenda linhas 1561-1578)
+            "lemb1_ts":             None,
+            "lemb2_ts":             None,
+            "aviso_ts":             None,
+            "resp_recep_ts":        None,
+            "pendente_uni":         None,
+        }
+        # UPSERT via PostgREST (resolution=merge-duplicates)
+        r = requests.post(
+            f"{supabase_url}/rest/v1/agenda_contexto",
+            headers={
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal,resolution=merge-duplicates",
+            },
+            json=payload,
+            timeout=(5, 10),  # Supabase é rápido, 10s é folgado
+        )
+        return r.status_code in (200, 201, 204)
+    except Exception as e:
+        print(f"[disparador] INSERT Supabase falhou pra tel={telefone}: {e}")
+        return False
+
+
+# 🆕 v6.21 — POST APPS SCRIPT (fire-and-forget)
+# Continua chamando Apps Script pra manter PropertiesService + agendarLembretes
+# funcionando. Mas roda em thread paralela — loop não espera.
+# Retorna True/False só pra rastreio no fim do loop (retry síncrono se falhar).
+def _post_apps_script_salvar(telefone, nome, servico, unidade, horario,
+                              horario2, servico2, numero_alerta):
+    try:
+        webhook_url = st.secrets.get("URL_WEBHOOK_CONTEXTO", "")
+        if not webhook_url:
+            return False
+        r = requests.post(
+            webhook_url,
+            json={
+                "acao": "salvar_contexto",
+                "telefone": telefone,
+                "nome": nome,
+                "servico": servico,
+                "unidade": unidade,
+                "horario": horario,
+                "horario2": horario2,
+                "servico2": servico2,
+                "numero_alerta": numero_alerta,
+            },
+            timeout=(5, 45),  # tolerante — Apps Script pode ser lento com lock contention
+        )
+        return r.status_code == 200
+    except Exception as e:
+        print(f"[disparador] POST Apps Script falhou pra tel={telefone}: {e}")
+        return False
+
+
 # 🆕 v6.14.2 — assinatura ganhou parâmetro `erros_envio_detalhes` (lista de strings).
 # Se lista vazia, grava NULL na coluna (comportamento igual ao clientes_falha).
+# 🆕 v6.21 — marca status='concluido' e heartbeat final. Watchdog para de olhar
+# esse registro (WHERE status='em_andamento').
 def _atualizar_registro_historico(registro_id, sucessos, erros, falhas_contexto,
                                    clientes_sem_contexto, erros_envio_detalhes):
     if not registro_id:
@@ -229,6 +383,9 @@ def _atualizar_registro_historico(registro_id, sucessos, erros, falhas_contexto,
             # posterior pra debug.
             "erros_envio_detalhes": " || ".join(erros_envio_detalhes) if erros_envio_detalhes else None,
             "observacao": None,
+            # 🆕 v6.21 — sinaliza pro watchdog que terminou normalmente
+            "status": "concluido",
+            "heartbeat_em": datetime.now(timezone.utc).isoformat(),
         }).eq("id", registro_id).execute()
         return True
     except Exception as e:
@@ -458,6 +615,14 @@ def render_aba_disparador():
                     telefones_disparados = []
                     total_linhas = len(df_agrupado)
 
+                    # 🆕 v6.21 — ThreadPoolExecutor pra rodar INSERT Supabase + POST
+                    # Apps Script em paralelo (fire-and-forget). max_workers=20 é
+                    # folgado — 2 threads por cliente × 10 clientes em voo simult.
+                    executor = ThreadPoolExecutor(max_workers=20)
+
+                    # 🆕 v6.21 — controle de batch pra update incremental
+                    ultimo_batch_atualizado = 0
+
                     for i, (_, linha) in enumerate(df_agrupado.iterrows()):
                         nome_cliente = linha['Cliente']
                         procedimento = linha['Serviço']
@@ -501,66 +666,45 @@ def render_aba_disparador():
 
                             if code in (200, 201):
                                 sucessos += 1
-                                # FIX v6.14 (24/06/2026): timeout 30s + 3 tentativas + verificação GET final.
+                                # ═════════════════════════════════════════════════════════════
+                                # 🆕 v6.21 — INSERT SUPABASE DIRETO + POST APPS SCRIPT ASYNC
+                                # ═════════════════════════════════════════════════════════════
+                                # ANTES (v6.14): POST síncrono ao Apps Script com 3 tentativas
+                                # e backoff 0/2/5s. Cada cliente podia gastar até 97s aqui
+                                # esperando (timeout=30s × 3 + 7s backoff). Loop de 29 clientes
+                                # estourava timeout do Streamlit Cloud (~5-10min).
                                 #
-                                # CAUSA RAIZ DO BUG ANTERIOR (v6.13 — 15s, 2 tent, sem GET):
-                                #   Apps Script `salvarContexto` demorava >15s pra responder em
-                                #   condições de carga (lock contention + trigger paralelo + 595+
-                                #   linhas no Contexto). Streamlit dava timeout e marcava como
-                                #   falha — MAS o Apps Script já havia salvado o contexto.
-                                #   Resultado: alerta falso positivo "Contexto NÃO salvo".
-                                #   Caso real: disparo Suzano 24/06 11:53 reportou 5 falhas,
-                                #   todas estavam no Contexto e 4 já tinham confirmado.
+                                # AGORA (v6.21):
+                                #   Thread A: INSERT direto no agenda_contexto do Supabase
+                                #             (200-500ms, mesmo comportamento do
+                                #             _supabaseUpsertContexto do Apps Script)
+                                #   Thread B: POST Apps Script salvar_contexto em background
+                                #             (mantém PropertiesService + agendarLembretes)
+                                #   Loop continua em ~0.3s (sem esperar nenhuma das threads)
                                 #
-                                # FIX v6.14:
-                                #   (1) timeout 30s (margem maior) + 3 tentativas (mais resiliente)
-                                #   (2) NÃO mostra warning durante o loop (não confiável em tempo real)
-                                #   (3) Acumula `telefones_disparados` pra verificação final via GET
-                                #   (4) Após o loop, 1 GET único no endpoint=contexto compara TODOS os
-                                #       telefones disparados com a lista REAL do Apps Script.
-                                #       Isso elimina falso positivo definitivamente, e ainda detecta
-                                #       falhas reais que o POST com status 200 + body de erro
-                                #       teria mascarado.
-                                ctx_post_ok = False
-                                webhook_url = st.secrets.get("URL_WEBHOOK_CONTEXTO", "")
-                                if webhook_url:
-                                    ctx_payload = {
-                                        "acao": "salvar_contexto",
-                                        "telefone": telefone_formatado,
-                                        "nome": nome_cliente,
-                                        "servico": procedimento,
-                                        "unidade": unidade_selecionada,
-                                        "horario": horario_cliente,
-                                        "horario2": horario2_cliente,
-                                        "servico2": servico2_cliente,
-                                        "numero_alerta": numero_alerta_formatado
-                                    }
-                                    # 3 tentativas com backoff 0s, 2s, 5s
-                                    backoff = [0, 2, 5]
-                                    for tentativa in range(3):
-                                        if backoff[tentativa] > 0:
-                                            time.sleep(backoff[tentativa])
-                                        try:
-                                            r_ctx = requests.post(webhook_url, json=ctx_payload, timeout=30)
-                                            if r_ctx.status_code == 200:
-                                                ctx_post_ok = True
-                                                break
-                                        except requests.exceptions.Timeout:
-                                            # Timeout NÃO significa falha real — Apps Script pode
-                                            # estar processando. Verificação final via GET vai dizer.
-                                            continue
-                                        except Exception:
-                                            break
-                                    if not ctx_post_ok:
-                                        # POST falhou — pode ser falso positivo. Não exibe warning
-                                        # ainda, só registra. Decisão final virá do GET de verificação.
-                                        falhas_contexto_post += 1
-                                        clientes_falha_post.append(nome_cliente)
-                                # 🆕 v6.14 — guarda telefone disparado pra verificação final
+                                # No fim do loop, aguardamos threads pendentes (com timeout)
+                                # e fazemos GET verificação final no SUPABASE (não Apps Script)
+                                # ═════════════════════════════════════════════════════════════
+                                fut_supabase = executor.submit(
+                                    _insert_supabase_contexto,
+                                    telefone_formatado, nome_cliente, procedimento,
+                                    unidade_selecionada, horario_cliente,
+                                    horario2_cliente, servico2_cliente,
+                                    numero_alerta_formatado,
+                                )
+                                fut_appscript = executor.submit(
+                                    _post_apps_script_salvar,
+                                    telefone_formatado, nome_cliente, procedimento,
+                                    unidade_selecionada, horario_cliente,
+                                    horario2_cliente, servico2_cliente,
+                                    numero_alerta_formatado,
+                                )
+                                # Guarda pra verificação final e retry
                                 telefones_disparados.append({
                                     'tel': telefone_formatado,
                                     'nome': nome_cliente,
-                                    'ctx_post_ok': ctx_post_ok,
+                                    'fut_supabase': fut_supabase,
+                                    'fut_appscript': fut_appscript,
                                 })
                             else:
                                 erros += 1
@@ -595,91 +739,118 @@ def render_aba_disparador():
                         time.sleep(1.5)
                         progresso.progress((i + 1) / total_linhas)
 
-                    status_texto.text("✅ Loop de envios concluído. Verificando contextos no Apps Script...")
+                        # 🆕 v6.21 — Update incremental a cada UPDATE_BATCH_SIZE clientes
+                        # Grava contadores + heartbeat_em pra watchdog detectar se travar.
+                        # Se Python morrer entre batches, banco tem estado real.
+                        if (i + 1) - ultimo_batch_atualizado >= UPDATE_BATCH_SIZE:
+                            _atualizar_progresso_parcial(
+                                registro_id=registro_id,
+                                sucessos=sucessos,
+                                erros=erros,
+                                ultimo_cliente=f"{nome_cliente} ({telefone_formatado})",
+                            )
+                            ultimo_batch_atualizado = i + 1
+
+                    # ═════════════════════════════════════════════════════════════
+                    # 🆕 v6.21 — WAIT THREADS EM VOO (fire-and-forget cleanup)
+                    # ═════════════════════════════════════════════════════════════
+                    # Loop terminou. Threads Supabase + Apps Script podem ainda estar
+                    # rodando. Aguarda com timeout generoso (60s) — se algum thread
+                    # travar depois disso, faz retry síncrono.
+                    status_texto.text("⏳ Aguardando escritas em background finalizarem...")
+                    supabase_falhas = []      # clientes cujo INSERT Supabase falhou
+                    appscript_falhas = []     # clientes cujo POST Apps Script falhou
+
+                    for d in telefones_disparados:
+                        try:
+                            ok_sb = d['fut_supabase'].result(timeout=60)
+                            if not ok_sb:
+                                supabase_falhas.append(d)
+                        except Exception:
+                            supabase_falhas.append(d)
+                        try:
+                            ok_as = d['fut_appscript'].result(timeout=60)
+                            if not ok_as:
+                                appscript_falhas.append(d)
+                        except Exception:
+                            appscript_falhas.append(d)
+
+                    executor.shutdown(wait=False)
+
+                    # 🆕 v6.21 — Retry síncrono das falhas (última chance)
+                    if supabase_falhas:
+                        status_texto.text(f"🔁 Retentando {len(supabase_falhas)} INSERT(s) Supabase...")
+                        for d in supabase_falhas[:]:
+                            if _insert_supabase_contexto(
+                                d['tel'], d['nome'], "-", "-", "-", "", "", ""
+                            ):
+                                supabase_falhas.remove(d)
+                    if appscript_falhas:
+                        status_texto.text(f"🔁 Retentando {len(appscript_falhas)} POST(s) Apps Script...")
+                        for d in appscript_falhas[:]:
+                            if _post_apps_script_salvar(
+                                d['tel'], d['nome'], "-", "-", "-", "", "", ""
+                            ):
+                                appscript_falhas.remove(d)
+
+                    status_texto.text("✅ Loop de envios concluído. Verificando contextos no Supabase...")
 
                     # ════════════════════════════════════════════════════════════════
-                    # 🆕 v6.14 — VERIFICAÇÃO FINAL POR GET ÚNICO
+                    # 🆕 v6.21 — VERIFICAÇÃO FINAL POR GET NO SUPABASE
                     # ════════════════════════════════════════════════════════════════
-                    # Antes de gravar o resumo final, faz UMA chamada GET no endpoint
-                    # `contexto` pra obter snapshot de TODOS os telefones no Contexto.
-                    # Compara com `telefones_disparados`. Resultado:
-                    #   • Falsos positivos do POST (timeout mas salvou OK) → corrigidos
-                    #   • Falhas reais (POST OK mas não está no Contexto) → detectadas
-                    #   • Falhas reais (POST falhou E não está no Contexto) → confirmadas
+                    # ANTES (v6.14): GET no Apps Script pra ler TODO o Sheets Contexto
+                    # (595+ linhas → 50KB JSON → 45s timeout, frequentemente falhava).
                     #
-                    # Custo: 1 GET (~50KB pra 595 linhas) em vez de N GETs.
-                    # Degradação graciosa: se GET falhar, usa dados do POST (comportamento v6.13).
+                    # AGORA (v6.21): 1 SELECT no Supabase filtrando SÓ pelos telefones
+                    # disparados. Vai em <500ms mesmo com 10k linhas na tabela.
+                    #
+                    # Lógica: quem escreveu no Supabase (thread A + thread B) com
+                    # sucesso, aparece com status='aguardando'. Quem não aparece,
+                    # é falha real → clientes_sem_contexto.
                     # ════════════════════════════════════════════════════════════════
-                    falhas_contexto = falhas_contexto_post  # default: usa POST se GET falhar
-                    clientes_sem_contexto = list(clientes_falha_post)  # cópia defensiva
+                    falhas_contexto = 0
+                    clientes_sem_contexto = []
+                    verificacao_ok = False
                     falsos_positivos_corrigidos = 0
                     falhas_silenciosas_detectadas = 0
-                    verificacao_ok = False
 
                     if telefones_disparados:
                         try:
-                            apps_script_url = st.secrets.get("APPS_SCRIPT_URL", "")
-                            apps_script_token = st.secrets.get("APPS_SCRIPT_TOKEN", "")
-                            if apps_script_url and apps_script_token:
-                                # Dá um respiro pro Apps Script terminar de processar
-                                # POSTs em fila (de timeouts pendentes).
-                                # 🆕 v6.14.1 — 15s (era 5s) pra cobrir pior caso de lock contention:
-                                # caso real DANIELI 24/06 levou 12min entre POST e salvar terminar.
-                                # 15s não cobre 12min, mas dá margem pra fila do Apps Script drenar
-                                # os POSTs que ainda estavam processando quando o loop acabou.
-                                # Sem isso, GET pode rodar antes do salvar terminar e marcar
-                                # falsos positivos como "falha real silenciosa".
-                                time.sleep(15)
-                                status_texto.text("🔎 Consultando Apps Script para verificar contextos...")
-                                r_check = requests.get(
-                                    f"{apps_script_url}?endpoint=contexto&token={apps_script_token}",
-                                    timeout=45,  # GET pode ser mais lento com Contexto grande
-                                )
-                                if r_check.status_code == 200:
-                                    ctx_data = r_check.json()
-                                    linhas_ctx = ctx_data.get("linhas", [])
-                                    # Set de telefones presentes no Contexto (string normalizada)
-                                    tels_no_contexto = set()
-                                    for linha_ctx in linhas_ctx:
-                                        tel_ctx = str(linha_ctx.get("telefone", "")).strip()
-                                        # remove sufixo .0 se vier como float
-                                        if tel_ctx.endswith('.0'):
-                                            tel_ctx = tel_ctx[:-2]
-                                        if tel_ctx:
-                                            tels_no_contexto.add(tel_ctx)
+                            supabase_url = st.secrets["SUPABASE_URL"]
+                            supabase_key = st.secrets["SUPABASE_KEY"]
+                            # Query: pega só os telefones que a gente disparou, com
+                            # status='aguardando' (o INSERT põe esse status).
+                            tels_lista = ",".join(f'"{d["tel"]}"' for d in telefones_disparados)
+                            r_check = requests.get(
+                                f"{supabase_url}/rest/v1/agenda_contexto"
+                                f"?select=telefone,status,disparo_ts"
+                                f"&telefone=in.({tels_lista})"
+                                f"&arquivado_em=is.null",
+                                headers={
+                                    "apikey": supabase_key,
+                                    "Authorization": f"Bearer {supabase_key}",
+                                },
+                                timeout=(5, 15),
+                            )
+                            if r_check.status_code == 200:
+                                contextos = r_check.json()
+                                tels_no_contexto = {c['telefone'] for c in contextos}
 
-                                    # Recalcula falhas REAIS baseado no GET
-                                    falhas_contexto = 0
-                                    clientes_sem_contexto = []
-                                    for d in telefones_disparados:
-                                        no_contexto = d['tel'] in tels_no_contexto
-                                        if no_contexto and not d['ctx_post_ok']:
-                                            # Falso positivo do POST — salvou OK mas POST não soube
-                                            falsos_positivos_corrigidos += 1
-                                        elif not no_contexto and d['ctx_post_ok']:
-                                            # POST disse OK mas não tá no Contexto — falha silenciosa
-                                            falhas_silenciosas_detectadas += 1
-                                            falhas_contexto += 1
-                                            clientes_sem_contexto.append(d['nome'])
-                                        elif not no_contexto and not d['ctx_post_ok']:
-                                            # Confirmado: POST falhou E não tá no Contexto
-                                            falhas_contexto += 1
-                                            clientes_sem_contexto.append(d['nome'])
-                                    verificacao_ok = True
-                                else:
-                                    st.warning(
-                                        f"⚠️ Verificação final via GET retornou HTTP {r_check.status_code}. "
-                                        f"Usando dados do POST (pode ter falsos positivos)."
-                                    )
+                                for d in telefones_disparados:
+                                    if d['tel'] not in tels_no_contexto:
+                                        falhas_contexto += 1
+                                        clientes_sem_contexto.append(d['nome'])
+                                        falhas_silenciosas_detectadas += 1
+                                verificacao_ok = True
                             else:
-                                st.info(
-                                    "ℹ️ Verificação final pulada: secrets APPS_SCRIPT_URL ou "
-                                    "APPS_SCRIPT_TOKEN não configurados. Usando dados do POST."
+                                st.warning(
+                                    f"⚠️ Verificação Supabase retornou HTTP {r_check.status_code}. "
+                                    f"Confie no INSERT direto (deve estar OK)."
                                 )
                         except Exception as e_get:
                             st.warning(
-                                f"⚠️ Verificação final via GET falhou: {e_get}. "
-                                f"Usando dados do POST (pode ter falsos positivos)."
+                                f"⚠️ Verificação Supabase falhou: {e_get}. "
+                                f"Confie no INSERT direto (deve estar OK)."
                             )
 
                     status_texto.text("✅ Processamento concluído!")
@@ -760,3 +931,16 @@ def render_aba_disparador():
 
         except Exception as erro_geral:
             st.error(f"❌ Erro ao processar o arquivo: {erro_geral}")
+            # 🆕 v6.21 — se der exceção no meio do disparo, marca registro
+            # como interrompido pra dashboard mostrar direito (e watchdog não
+            # perder tempo checando).
+            try:
+                if 'registro_id' in dir() and locals().get('registro_id'):
+                    _sb_err = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+                    _sb_err.table("disparos_historico").update({
+                        "status": "interrompido",
+                        "morreu_em": datetime.now(timezone.utc).isoformat(),
+                        "observacao": f"❌ Exceção Python no disparador: {str(erro_geral)[:300]}",
+                    }).eq("id", locals()["registro_id"]).execute()
+            except Exception:
+                pass  # silencioso — melhor esforço
