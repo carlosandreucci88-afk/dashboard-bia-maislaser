@@ -135,6 +135,19 @@ NOME_MODELO_MENSAGEM        = "confirmacao_agenda_maislaser_v4"
 NOME_MODELO_MENSAGEM_2SESS  = "confirmacao_agenda_maislaser_2sessoes_v2"  # DEPRECATED — não usar
 
 def limpar_numero(numero):
+    """
+    Normaliza telefone pro formato Meta (55 + DDD + número).
+    v6.22 (BUG-04): trata dígito lixo no fim (14 dígitos terminando em 0).
+
+    Casos válidos de saída:
+      • 5511987654321  (13 dígitos: 55 + DDD 2 + 9 dígitos celular)
+      • 551133334444   (12 dígitos: 55 + DDD 2 + 8 dígitos fixo)
+
+    Casos que o UNO gera com lixo:
+      • 55119537276720 (14 díg terminando em 0) → 5511953727672
+      • número sem 55  → prefixa 55
+      • .0 do float    → remove
+    """
     if pd.isna(numero):
         return None
     num_str = str(numero).strip()
@@ -143,12 +156,57 @@ def limpar_numero(numero):
     num_limpo = re.sub(r'\D', '', num_str)
     if num_limpo == '':
         return None
-    if num_limpo.startswith('55') and len(num_limpo) >= 12:
-        return num_limpo
-    elif not num_limpo.startswith('55'):
-        return '55' + num_limpo
-    else:
-        return num_limpo
+
+    # Garante prefixo 55
+    if not num_limpo.startswith('55'):
+        num_limpo = '55' + num_limpo
+
+    # 🆕 BUG-04 FIX: detecta dígito lixo no fim
+    # Telefone BR válido com 55: 12 díg (fixo) ou 13 díg (celular com 9).
+    # Se vier 14 díg terminando em 0, é o bug de exportação do UNO — remove o 0.
+    if len(num_limpo) == 14 and num_limpo.endswith('0'):
+        num_limpo = num_limpo[:-1]
+
+    # Se ainda tiver 14+ dígitos (outro tipo de lixo), tenta cortar pra 13
+    # mas só se os primeiros 13 formarem número plausível (55 + DDD 11-99)
+    if len(num_limpo) > 13:
+        candidato = num_limpo[:13]
+        ddd = candidato[2:4]
+        if ddd.isdigit() and 11 <= int(ddd) <= 99:
+            num_limpo = candidato
+
+    return num_limpo
+
+
+def limpar_nome_cliente(nome):
+    """
+    🆕 v6.22 (BUG-04): higieniza nome do cliente antes de renderizar no template.
+
+    Remove lixo que o UNO às vezes gera:
+      • '__maria Augusta'                → 'maria Augusta'  (prefixo __)
+      • 'Marisa Bueno Cpf: 231.073.738-00' → 'Marisa Bueno' (CPF exposto - LGPD)
+      • 'Isabelly ((11)96648-4870)'       → 'Isabelly'      (tel parentético)
+      • 'gabriela (pago 326.040...)'      → 'gabriela'      (anotação de pagamento)
+      • 'cliente (finan)'                 → 'cliente'       (anotação financeira)
+      • espaços múltiplos                 → espaço único
+    """
+    if pd.isna(nome) or str(nome).strip() == '':
+        return ''
+    s = str(nome).strip()
+    # Remove prefixo de underscores
+    s = s.lstrip('_').strip()
+    # Remove CPF (formato XXX.XXX.XXX-XX com ou sem "Cpf:")
+    s = re.sub(r'\s*C?[Pp][Ff]:?\s*\d{3}\.?\d{3}\.?\d{3}[-.]?\d{2}', '', s).strip()
+    # Remove CPF solto (11 dígitos) precedido de "cpf" ou "no cpf"
+    s = re.sub(r'\s*[Nn]?[Oo]?\s*[Cc][Pp][Ff]\s*\d{11}', '', s).strip()
+    # Remove telefone parentético: ((11)96648-4870) ou (11 99999-9999)
+    s = re.sub(r'\s*\(\(?\d{2}\)?\s*\d{4,5}[-.\s]?\d{4}\)?', '', s).strip()
+    # Remove anotações entre parênteses: (pago...), (finan...), (pede X)
+    s = re.sub(r'\s*\((?:pago|finan|pede|obs|nota)[^)]*\)?', '', s, flags=re.IGNORECASE).strip()
+    # Colapsa espaços múltiplos
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
 
 def limpar_nome_servico(servico):
     if pd.isna(servico) or str(servico).strip() == '':
@@ -528,7 +586,9 @@ def render_aba_disparador():
                             f"com situação 'Agendado' (cancelados, faltou, etc.)."
                         )
 
-                df['Cliente'] = df['Cliente'].fillna('').astype(str).str.strip()
+                # 🆕 v6.22 (BUG-04): higieniza nome antes de tudo — remove __,
+                # CPF, telefone parentético, anotações. Protege LGPD + template limpo.
+                df['Cliente'] = df['Cliente'].apply(limpar_nome_cliente)
                 df['Telefone'] = df['Telefone'].apply(limpar_numero).fillna('').astype(str)
                 df['Serviço'] = df['Serviço'].apply(limpar_nome_servico)
                 df['Horario'] = pd.to_datetime(df['Data']).dt.strftime('%d/%m/%Y às %Hh%M')
