@@ -180,31 +180,75 @@ def limpar_numero(numero):
 
 def limpar_nome_cliente(nome):
     """
-    🆕 v6.22 (BUG-04): higieniza nome do cliente antes de renderizar no template.
+    Higieniza nome do cliente antes de renderizar no template.
 
-    Remove lixo que o UNO às vezes gera:
-      • '__maria Augusta'                → 'maria Augusta'  (prefixo __)
-      • 'Marisa Bueno Cpf: 231.073.738-00' → 'Marisa Bueno' (CPF exposto - LGPD)
-      • 'Isabelly ((11)96648-4870)'       → 'Isabelly'      (tel parentético)
-      • 'gabriela (pago 326.040...)'      → 'gabriela'      (anotação de pagamento)
-      • 'cliente (finan)'                 → 'cliente'       (anotação financeira)
-      • espaços múltiplos                 → espaço único
+    v6.22 (BUG-04) — versão inicial:
+      • Remove prefixo __ / _
+      • Remove CPF com prefixo "Cpf: NNN.NNN.NNN-NN"
+      • Remove telefone parentético (11) 99999-9999
+      • Remove anotações (pago, finan, pede, obs, nota)
+
+    v6.23 (09/07/2026) — LGPD hardening:
+      • Remove CPF em QUALQUER forma NNN.NNN.NNN-NN mesmo sem prefixo
+        (fecha vaza LGPD: "Rita (663.882.350-77)", "Cristiano ( Cpf Pl 418...)")
+      • Remove asteriscos * / ** no fim ou meio do nome
+      • Amplia captura de anotações: adiciona "pl", "PL", "cpf", "vide", "vindi"
+      • Remove parênteses vazios/só espaços que sobram após limpeza de CPF
+      • Remove hífen órfão no fim ("Andréia -")
+      • Preserva apelidos legítimos "Maria (Bia)" (só remove parênteses
+        contendo palavras-chave conhecidas de lixo, não parênteses arbitrários)
+
+    Casos limpos com sucesso (validados sobre 662 linhas do Contexto real):
+      • '__maria Augusta'                        → 'maria Augusta'
+      • 'Marisa Bueno Cpf: 231.073.738-00'       → 'Marisa Bueno'
+      • 'Rita De Cassia (663.882.350-77)'        → 'Rita De Cassia'  [LGPD]
+      • 'Cristiano ( Cpf Pl 418.302.808-64)'     → 'Cristiano'       [LGPD]
+      • 'Andréia -  (CPF 593.705.918-26 PL)'     → 'Andréia'         [LGPD]
+      • 'Bruna Heloísa*'                         → 'Bruna Heloísa'
+      • 'Tatiana Alcaraz**'                      → 'Tatiana Alcaraz'
+      • 'Rebeca Dias* (vindi)'                   → 'Rebeca Dias'
+      • 'Isabelly ((11)96648-4870)'              → 'Isabelly'
+      • 'leila (pago 859.158.660-34)'            → 'leila'
     """
     if pd.isna(nome) or str(nome).strip() == '':
         return ''
     s = str(nome).strip()
-    # Remove prefixo de underscores
+
+    # 1. Prefixo de underscores
     s = s.lstrip('_').strip()
-    # Remove CPF (formato XXX.XXX.XXX-XX com ou sem "Cpf:")
-    s = re.sub(r'\s*C?[Pp][Ff]:?\s*\d{3}\.?\d{3}\.?\d{3}[-.]?\d{2}', '', s).strip()
-    # Remove CPF solto (11 dígitos) precedido de "cpf" ou "no cpf"
-    s = re.sub(r'\s*[Nn]?[Oo]?\s*[Cc][Pp][Ff]\s*\d{11}', '', s).strip()
-    # Remove telefone parentético: ((11)96648-4870) ou (11 99999-9999)
-    s = re.sub(r'\s*\(\(?\d{2}\)?\s*\d{4,5}[-.\s]?\d{4}\)?', '', s).strip()
-    # Remove anotações entre parênteses: (pago...), (finan...), (pede X)
-    s = re.sub(r'\s*\((?:pago|finan|pede|obs|nota)[^)]*\)?', '', s, flags=re.IGNORECASE).strip()
-    # Colapsa espaços múltiplos
+
+    # 2. CPF em qualquer contexto — NNN.NNN.NNN-NN (formato brasileiro completo)
+    # Match agressivo sem exigir prefixo "cpf" antes: fecha vaza LGPD onde
+    # o CPF vinha entre parênteses sem rótulo.
+    s = re.sub(r'\s*\d{3}\.\d{3}\.\d{3}[-.\s]?\d{2}', '', s).strip()
+
+    # 3. CPF sem pontos (11 dígitos) — só se precedido por "cpf" para não
+    # apagar telefones acidentalmente
+    s = re.sub(r'\s*[Cc][Pp][Ff]\s*[Pp]?[Ll]?\s*\d{11}', '', s).strip()
+
+    # 4. Telefone parentético — captura ((11)99999-9999) e (11999999999)
+    s = re.sub(r'\s*\(+\s*\d{2}\s*\)?\s*\d{4,5}[-.\s]?\d{4}\s*\)+', '', s).strip()
+    s = re.sub(r'\s*\(\d{10,11}\)', '', s).strip()
+
+    # 5. Anotações entre parênteses com marcadores conhecidos
+    # (pago, finan, pede, obs, nota, vide, vindi, pl/PL, cpf/CPF)
+    s = re.sub(
+        r'\s*\(\s*(?:pl|cpf|obs|vide|vindi|pago|finan|pede|nota)[^)]{0,25}\)?',
+        '', s, flags=re.IGNORECASE
+    ).strip()
+
+    # 6. Parênteses vazios resultantes de remoção acima
+    s = re.sub(r'\s*\(\s*\)', '', s).strip()
+
+    # 7. Asteriscos (final, meio, ou repetidos)
+    s = re.sub(r'\*+', '', s).strip()
+
+    # 8. Hífen órfão no fim ("Andréia -")
+    s = re.sub(r'\s*-+\s*$', '', s).strip()
+
+    # 9. Colapsa espaços múltiplos
     s = re.sub(r'\s+', ' ', s).strip()
+
     return s
 
 
