@@ -128,11 +128,11 @@ META_TIMEOUT = (5, 60)
 UPDATE_BATCH_SIZE = 3
 
 NOME_MODELO_MENSAGEM        = "confirmacao_agenda_maislaser_v4"
-# v6.20 (05/07/2026): Template `_2sessoes_v2` não existe mais na Meta —
-# causava HTTP 404 pra todo cliente com 2 horários diferentes no mesmo dia.
-# Fix: sempre usar `_v4` (unificado) concatenando horários e serviços em {{2}} e {{3}}.
-# Constante mantida só pra referência histórica.
-NOME_MODELO_MENSAGEM_2SESS  = "confirmacao_agenda_maislaser_2sessoes_v2"  # DEPRECATED — não usar
+# v6.20 (05/07/2026): Template único unificado. Para clientes com 2 sessões
+# no mesmo dia, concatena horários e serviços em {{2}} e {{3}} (ver loop
+# principal). Não existe template separado — `_v4` cobre 1 ou N sessões.
+# v6.23 (09/07/2026): removida constante NOME_MODELO_MENSAGEM_2SESS e função
+# enviar_mensagem_2sessoes (código morto pós-v6.20, zero callers).
 
 def limpar_numero(numero):
     """
@@ -252,42 +252,6 @@ def enviar_mensagem_whatsapp(nome, horario, procedimento, unidade, telefone_dest
         return 408, {"error": f"Timeout Meta (>{META_TIMEOUT[1]}s) — cliente pulado, loop continua"}
     except Exception as e:
         return 500, {"error": str(e)}
-
-def enviar_mensagem_2sessoes(nome, horario1, servico1, horario2, servico2, unidade, telefone_destino):
-    url = f"https://graph.facebook.com/v25.0/{st.secrets['ID_TELEFONE_META']}/messages"
-    headers = {
-        "Authorization": f"Bearer {st.secrets['TOKEN_META']}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": str(telefone_destino),
-        "type": "template",
-        "template": {
-            "name": NOME_MODELO_MENSAGEM_2SESS,
-            "language": {"code": "pt_BR"},
-            "components": [{
-                "type": "body",
-                "parameters": [
-                    {"type": "text", "text": str(nome)},
-                    {"type": "text", "text": str(horario1)},
-                    {"type": "text", "text": str(servico1).replace('\n', ' ').strip()},
-                    {"type": "text", "text": str(horario2)},
-                    {"type": "text", "text": str(servico2).replace('\n', ' ').strip()},
-                    {"type": "text", "text": str(unidade)}
-                ]
-            }]
-        }
-    }
-    try:
-        # 🆕 v6.21: timeout — mesma proteção da função principal
-        resposta = requests.post(url, headers=headers, json=payload, timeout=META_TIMEOUT)
-        return resposta.status_code, resposta.json()
-    except requests.exceptions.Timeout:
-        return 408, {"error": f"Timeout Meta (>{META_TIMEOUT[1]}s) — cliente pulado, loop continua"}
-    except Exception as e:
-        return 500, {"error": str(e)}
-
 
 def _criar_registro_inicial_historico(unidade, arquivo_nome, total_clientes,
                                        data_sessoes, numero_alerta):
