@@ -646,7 +646,25 @@ def render_aba_disparador():
                 st.subheader(f"Pré-visualização dos disparos ({unidade_selecionada}):")
                 st.dataframe(df_agrupado, use_container_width=True)
 
-                if st.button("🚀 Iniciar Disparos em Massa"):
+                if st.button("🚀 Iniciar Disparos em Massa", key="disp_btn_iniciar"):
+
+                    # v6.24 (13/07/2026) — proteção contra double-execution.
+                    # Streamlit pode reexecutar o script durante o disparo (WebSocket
+                    # reconnect, cold start, rerun de widget upstream). Sem esse guard,
+                    # o mesmo click seria interpretado como novo submit e criaria
+                    # registro fantasma no histórico com whatsapp_ok=0 (caso real:
+                    # id=65 em 13/07/2026 10:37, que ficou 3min50 travado enquanto
+                    # id=66 fazia o trabalho real).
+                    # UID em vez de bool: garante que só a execução dona do lock
+                    # limpa o flag no final (proteção contra race).
+                    _click_uid = datetime.now(timezone.utc).isoformat()
+                    if st.session_state.get("disp_em_andamento_uid"):
+                        st.warning(
+                            "⚠️ Disparo já em andamento. Aguarde a conclusão ou "
+                            "recarregue a página (F5) se travou de vez."
+                        )
+                        st.stop()
+                    st.session_state["disp_em_andamento_uid"] = _click_uid
 
                     _data_sessoes = ""
                     if not df_agrupado.empty and "Horario" in df_agrupado.columns:
@@ -997,8 +1015,17 @@ def render_aba_disparador():
                             + (f"\n\n... +{len(erros_envio_detalhes)-10} outros" if len(erros_envio_detalhes) > 10 else "")
                         )
 
+                    # v6.24 — libera lock do double-execution guard.
+                    # Só limpa se ainda somos donos do UID (proteção contra race).
+                    if st.session_state.get("disp_em_andamento_uid") == _click_uid:
+                        st.session_state["disp_em_andamento_uid"] = None
+
         except Exception as erro_geral:
             st.error(f"❌ Erro ao processar o arquivo: {erro_geral}")
+            # v6.24 — libera lock do double-execution guard mesmo em exceção.
+            # pop com default None é seguro se a chave não existir (exceção
+            # antes de qualquer setar do flag).
+            st.session_state.pop("disp_em_andamento_uid", None)
             # 🆕 v6.21 — se der exceção no meio do disparo, marca registro
             # como interrompido pra dashboard mostrar direito (e watchdog não
             # perder tempo checando).
