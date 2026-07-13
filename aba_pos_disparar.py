@@ -835,7 +835,40 @@ def _executar_disparo(df_ag: pd.DataFrame, unidade: str, nome_arquivo: str):
 
             if ok:
                 sucessos += 1
-                # ACUMULA — não escreve ainda
+
+                # v1.4 (13/07/2026) — WAMID PERSISTENTE.
+                # Grava o wamid imediatamente após envio Meta OK, em UPDATE
+                # individual (fora do batch final que pode falhar). Assim,
+                # se o batch de status falhar depois, ainda temos o wamid
+                # pra consultar status de entrega via Meta API.
+                # Caso motivador: 13/07/2026 11:01 — batch falhou, wamids
+                # perdidos, ficamos sem prova de entrega dos 16 clientes.
+                try:
+                    _get_sb().table("pos_atendimento_clientes").update({
+                        "wamid": resposta,
+                    }).eq("id", int(row["cliente_id"])).execute()
+                except Exception as e_wamid:
+                    # Não bloqueia disparo — só loga. WAMID é redundância.
+                    # O batch final ainda vai tentar setar (redundante mas ok).
+                    try:
+                        from utils_erros import registrar_erro
+                        registrar_erro(
+                            robo="pos_atendimento",
+                            origem="dashboard",
+                            modulo="aba_pos_disparar.py::_executar_disparo::wamid_imediato",
+                            severidade="warning",
+                            exc=e_wamid,
+                            contexto={
+                                "cliente_id": int(row["cliente_id"]),
+                                "wamid":      resposta,
+                                "telefone":   row["telefone"],
+                            },
+                            unidade=unidade,
+                        )
+                    except Exception:
+                        pass
+
+                # ACUMULA — não escreve ainda (batch final vai atualizar status)
                 updates_clientes.append({
                     "id":         int(row["cliente_id"]),
                     "status":     "template_enviado",
@@ -851,7 +884,7 @@ def _executar_disparo(df_ag: pd.DataFrame, unidade: str, nome_arquivo: str):
                     "status_antes":  "aguardando_disparo",
                     "status_depois": "template_enviado",
                     "unidade":       unidade,
-                    "observacao":    f"✅ Template enviado ({row['data_fmt']} {row['hora_sessao']})",
+                    "observacao":    f"✅ Template enviado ({row['data_fmt']} {row['hora_sessao']}) [wamid: {resposta[:20]}...]",
                     "cliente_id":    int(row["cliente_id"]),
                 })
             else:
@@ -873,8 +906,10 @@ def _executar_disparo(df_ag: pd.DataFrame, unidade: str, nome_arquivo: str):
                     "cliente_id":    int(row["cliente_id"]),
                 })
 
-            # Rate limit — pequena pausa entre envios
-            time.sleep(0.3)
+            # v1.4 (13/07/2026) — delay entre envios aumentado de 0.3s → 1.0s.
+            # Reduz risco de throttle Meta em bursts (16 templates em <10s).
+            # Impacto: disparo de 25 clientes vai de ~15s pra ~30s. Aceitável.
+            time.sleep(1.0)
 
         # ── 3.5. BATCH WRITE — persiste tudo de uma vez ──
         status_text.text(f"💾 Gravando status de {total} clientes no Supabase (batch)...")
