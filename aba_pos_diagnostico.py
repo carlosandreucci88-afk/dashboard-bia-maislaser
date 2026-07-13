@@ -128,11 +128,158 @@ def _badge(texto: str, cor: str = "#5BC0BE") -> str:
 # UI PRINCIPAL
 # ============================================================================
 
+def _gerar_snapshot_texto(diag: dict) -> str:
+    """
+    v1.1 (13/07/2026) — gera texto formatado em markdown com o estado atual
+    do sistema. Feito pra ser copiado do dashboard e colado em ferramentas
+    de análise externa (Claude, e-mail, relatório) sem precisar de screenshots.
+    """
+    if not diag:
+        return "❌ Sem dados de diagnóstico disponíveis."
+
+    linhas = []
+    linhas.append(f"# 🔧 Snapshot Robô Pós-atendimento")
+    linhas.append(f"_Gerado em {_fmt_dt(diag.get('gerado_em'))}_")
+    linhas.append("")
+
+    # ── Alertas críticos ──
+    alertas = diag.get("alertas_criticos", {}) or {}
+    presos_template = alertas.get("presos_template_enviado", []) or []
+    r1_atrasados = alertas.get("r1_atrasados", []) or []
+    presos_pos_r1 = alertas.get("presos_pos_r1", []) or []
+    falhas_envio = alertas.get("falhas_envio_24h", []) or []
+    sessoes_mult = diag.get("sessoes_multiplas", []) or []
+
+    total_alertas = (len(presos_template) + len(r1_atrasados) + len(presos_pos_r1)
+                     + len(falhas_envio) + len(sessoes_mult))
+
+    linhas.append("## 🚨 Alertas Críticos")
+    if total_alertas == 0:
+        linhas.append("✅ Nenhum alerta crítico. Sistema saudável.")
+    else:
+        linhas.append(f"⚠️ **{total_alertas} alerta(s) crítico(s)**")
+        if presos_template:
+            linhas.append(f"- 🔴 {len(presos_template)} preso(s) em `template_enviado` (sem responder)")
+        if r1_atrasados:
+            linhas.append(f"- 🔴 {len(r1_atrasados)} R1 atrasado(s)")
+        if presos_pos_r1:
+            linhas.append(f"- 🔴 {len(presos_pos_r1)} preso(s) pós-R1")
+        if falhas_envio:
+            linhas.append(f"- 🔴 {len(falhas_envio)} falha(s) de envio nas últimas 24h")
+        if sessoes_mult:
+            linhas.append(f"- 🔴 {len(sessoes_mult)} telefone(s) com múltiplas sessões ativas")
+    linhas.append("")
+
+    # ── Saúde geral ──
+    saude = diag.get("saude_geral", {}) or {}
+    hoje = saude.get("hoje", {}) or {}
+    d7 = saude.get("ultimos_7d", {}) or {}
+    d30 = saude.get("ultimos_30d", {}) or {}
+
+    linhas.append("## 📊 Saúde Geral")
+    linhas.append(f"| Período | Novos | Templates | Respostas | Alertas coord | R1 |")
+    linhas.append(f"|---|---|---|---|---|---|")
+    linhas.append(f"| Hoje | {hoje.get('clientes_novos', 0)} | {hoje.get('templates_enviados', 0)} | {hoje.get('respostas', 0)} | {hoje.get('alertas_coord', 0)} | {hoje.get('r1_enviados', 0)} |")
+    linhas.append(f"| 7 dias | {d7.get('clientes_novos', 0)} | {d7.get('templates_enviados', 0)} | {d7.get('respostas', 0)} | — | {d7.get('r1_enviados', 0)} |")
+    linhas.append(f"| 30 dias | {d30.get('clientes_novos', 0)} | {d30.get('templates_enviados', 0)} | {d30.get('respostas', 0)} | — | — |")
+    linhas.append("")
+
+    # ── Funil 7d ──
+    funil = diag.get("funil_7d", {}) or {}
+    tpls = funil.get("templates", 0) or 0
+    resps = funil.get("respostas", 0) or 0
+    tudo_otimo = funil.get("tudo_otimo", 0) or 0
+    problemas = funil.get("problemas", 0) or 0
+    cupom = funil.get("cupom_solicitado", 0) or 0
+    tx_resp = f"{(resps/tpls*100):.1f}%" if tpls > 0 else "0%"
+    tx_otimo = f"{(tudo_otimo/resps*100):.1f}%" if resps > 0 else "0%"
+    tx_cupom = f"{(cupom/tudo_otimo*100):.1f}%" if tudo_otimo > 0 else "0%"
+
+    linhas.append("## 🎯 Funil de Conversão (7 dias)")
+    linhas.append(f"- 📤 Templates enviados: **{tpls}**")
+    linhas.append(f"- 💬 Responderam: **{resps}** ({tx_resp} do total)")
+    linhas.append(f"- 🌟 Tudo ótimo: **{tudo_otimo}** ({tx_otimo} das respostas)")
+    linhas.append(f"- 🎁 Cupom pedido: **{cupom}** ({tx_cupom} dos satisfeitos)")
+    linhas.append(f"- 🚨 Problemas: **{problemas}**")
+    linhas.append("")
+
+    # ── Distribuição de status ──
+    breakdown = diag.get("breakdown_status", []) or []
+    if breakdown:
+        linhas.append("## 🔀 Distribuição de Status (base completa)")
+        for item in breakdown:
+            linhas.append(f"- `{item.get('status', '?')}`: **{item.get('qtd', 0)}**")
+        linhas.append("")
+
+    # ── R1 ──
+    r1 = diag.get("r1", {}) or {}
+    ultimo_r1 = r1.get("ultimo_r1_disparado")
+    taxa_conv_r1 = r1.get("taxa_conversao_pos_r1_7d")
+    conv_str = f"{taxa_conv_r1}%" if taxa_conv_r1 is not None else "—"
+
+    linhas.append("## 🔔 R1 — Lembretes (2h)")
+    linhas.append(f"- ⏳ Pendentes agora: **{r1.get('total_pendentes_agora', 0)}**")
+    linhas.append(f"- 📨 R1 enviados hoje: **{r1.get('total_enviados_hoje', 0)}**")
+    linhas.append(f"- 📈 R1 últimos 7 dias: **{r1.get('total_enviados_7d', 0)}**")
+    linhas.append(f"- 🎯 Conversão pós-R1 (7d): **{conv_str}**")
+    if ultimo_r1:
+        linhas.append(f"- ⏱️ Último R1: {_fmt_dt(ultimo_r1)} ({_tempo_desde(ultimo_r1)})")
+    linhas.append("")
+
+    # ── Alertas Coord ──
+    alrt = diag.get("alertas", {}) or {}
+    por_motivo = alrt.get("por_motivo_7d", []) or []
+    linhas.append("## 🚨 Alertas para Coordenadora")
+    linhas.append(f"- 📤 Alertas hoje: **{alrt.get('total_hoje', 0)}**")
+    linhas.append(f"- 📊 Alertas últimos 7d: **{alrt.get('total_7d', 0)}**")
+    if por_motivo:
+        linhas.append("- Breakdown 7d por motivo:")
+        for m in por_motivo:
+            linhas.append(f"  - `{m.get('motivo', '?')}`: {m.get('qtd', 0)}")
+    linhas.append("")
+
+    # ── Conectividade ──
+    conn = diag.get("conectividade", {}) or {}
+    ult_webhook = conn.get("ultima_entrada_webhook")
+    ult_saida = conn.get("ultima_saida_meta_ok")
+    total_erros_24h = conn.get("total_erros_24h", 0) or 0
+
+    linhas.append("## 🔌 Conectividade (Meta + Webhook)")
+    linhas.append(f"- 📥 Última entrada: {_fmt_dt(ult_webhook)} ({_tempo_desde(ult_webhook)})")
+    linhas.append(f"- 📤 Última saída OK: {_fmt_dt(ult_saida)} ({_tempo_desde(ult_saida)})")
+    linhas.append(f"- ❌ Erros últimas 24h: **{total_erros_24h}**")
+    linhas.append("")
+
+    # ── Último disparo ──
+    ult_disp = diag.get("ultimo_disparo") or {}
+    if ult_disp:
+        linhas.append("## 📦 Último Disparo")
+        linhas.append(f"- 📅 Quando: {_fmt_dt(ult_disp.get('criado_em'))}")
+        linhas.append(f"- 📍 Unidade: {ult_disp.get('unidade', '?')}")
+        linhas.append(f"- 📄 Arquivo: `{ult_disp.get('arquivo', '—')}`")
+        linhas.append(f"- ✅ Enviados: **{ult_disp.get('template_enviados_ok', 0)}**")
+        linhas.append(f"- ❌ Erros: **{ult_disp.get('erros_envio', 0)}**")
+        linhas.append(f"- 🎯 Fase: `{ult_disp.get('fase', '?')}`")
+        linhas.append(f"- 👥 Total únicos: {ult_disp.get('total_clientes_unicos', 0)}")
+        linhas.append("")
+
+    # ── Config ──
+    cfg = diag.get("config", {}) or {}
+    linhas.append("## ⚙️ Configuração Atual")
+    linhas.append(f"- `pos_habilitado`: {'✅ ligado' if cfg.get('pos_habilitado') else '🔴 DESLIGADO'}")
+    linhas.append(f"- `modo_manutencao`: {'🔴 ATIVO' if cfg.get('modo_manutencao') else '✅ inativo'}")
+    linhas.append(f"- Janela horário: {cfg.get('janela_inicio', '?')}h–{cfg.get('janela_fim', '?')}h")
+    linhas.append(f"- Cupom: `{cfg.get('codigo_cupom', '—')}`")
+    linhas.append("")
+
+    return "\n".join(linhas)
+
+
 def render_aba_pos_diagnostico():
     st.markdown("## 🔧 Diagnóstico do Sistema")
     st.caption("Saúde geral, alertas críticos e ações rápidas pra desengasgar clientes travados.")
 
-    col_refresh, col_upd = st.columns([1, 4])
+    col_refresh, col_snap, col_upd = st.columns([1, 1.5, 3.5])
     with col_refresh:
         if st.button("🔄 Atualizar", use_container_width=True, key="pos_diag_refresh"):
             st.cache_data.clear()
@@ -143,9 +290,25 @@ def render_aba_pos_diagnostico():
         st.error("Não consegui ler o diagnóstico. Verifica se a RPC `pos_diagnostico_completo` existe no Supabase.")
         return
 
+    # v1.1 (13/07/2026) — botão de snapshot pra copiar estado atual
+    with col_snap:
+        if st.button("📋 Gerar snapshot", use_container_width=True, key="pos_diag_btn_snap",
+                     help="Gera texto formatado com o estado atual do sistema. "
+                          "Use pra colar em ferramentas de análise externas ou relatórios."):
+            st.session_state["pos_diag_snapshot_texto"] = _gerar_snapshot_texto(diag)
+
     with col_upd:
         gerado_em = _fmt_dt(diag.get("gerado_em"))
         st.caption(f"📊 Dados atualizados: **{gerado_em}**  ·  cache 15s")
+
+    # v1.1 — se snapshot foi gerado, mostra num code block (Streamlit
+    # adiciona botão de copiar automático no canto superior direito)
+    if st.session_state.get("pos_diag_snapshot_texto"):
+        with st.expander("📋 Snapshot (clique no ícone de copiar no canto superior direito)", expanded=True):
+            st.code(st.session_state["pos_diag_snapshot_texto"], language="markdown")
+            if st.button("🗑️ Fechar snapshot", key="pos_diag_btn_snap_close"):
+                del st.session_state["pos_diag_snapshot_texto"]
+                st.rerun()
 
     # ══════════════════════════════════════════════════════════════════
     # 1. ALERTAS CRÍTICOS
