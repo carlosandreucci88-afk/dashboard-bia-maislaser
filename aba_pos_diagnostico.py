@@ -171,7 +171,7 @@ def _gerar_snapshot_texto(diag: dict) -> str:
     linhas.append("")
 
     # ── Saúde geral ──
-    saude = diag.get("saude_geral", {}) or {}
+    saude = diag.get("saude", {}) or {}
     hoje = saude.get("hoje", {}) or {}
     d7 = saude.get("ultimos_7d", {}) or {}
     d30 = saude.get("ultimos_30d", {}) or {}
