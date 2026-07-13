@@ -859,15 +859,46 @@ def _executar_disparo(df_ag: pd.DataFrame, unidade: str, nome_arquivo: str):
 
     sb = _get_sb()
 
-    # Batch UPDATE clientes: um update por id (não tem upsert em massa com PK,
-    # mas fazemos numa transação HTTP menor — 25 updates ainda é mais rápido que
-    # 75 chamadas serializadas). Usamos loop mas SEM sleep entre eles.
-    try:
-        for upd in updates_clientes:
-            cliente_id = upd.pop("id")
+    # v1.2 (13/07/2026) — BUG-FIX: try/except individual por UPDATE.
+    #
+    # Antes: try/except em volta do FOR inteiro. Se qualquer UPDATE no meio
+    # falhasse (rate limit transient, timeout, exceção de qualquer natureza),
+    # o `except` capturava e o loop PARAVA. Todos os UPDATEs restantes nunca
+    # aconteciam — clientes ficavam presos em 'aguardando_disparo' mesmo com
+    # Meta tendo enviado template com sucesso.
+    #
+    # Caso real: 13/07/2026 11:01 — id=15 do histórico registrou 16 templates
+    # enviados OK, mas os 16 clientes continuaram em 'aguardando_disparo'.
+    # Alguém que fosse "re-disparar" pra eles duplicaria mensagem pros clientes
+    # que já receberam.
+    #
+    # Agora: cada UPDATE é isolado. Se falhar, marca só aquele cliente como
+    # problemático e o loop continua. Erros individuais + resumo persistente.
+    erros_update_clientes = []
+    for upd in updates_clientes:
+        cliente_id = upd.pop("id")
+        try:
             sb.table("pos_atendimento_clientes").update(upd).eq("id", cliente_id).execute()
-    except Exception as e:
-        st.warning(f"⚠️ Erro parcial ao atualizar clientes: {e}")
+        except Exception as e_upd:
+            erros_update_clientes.append({
+                "cliente_id": cliente_id,
+                "erro":       str(e_upd)[:200],
+            })
+
+    if erros_update_clientes:
+        # Aviso visível ao usuário (persiste enquanto a página do Streamlit estiver aberta)
+        ids_falhos = [str(e["cliente_id"]) for e in erros_update_clientes]
+        st.warning(
+            f"⚠️ {len(erros_update_clientes)}/{len(updates_clientes)} cliente(s) tiveram "
+            f"template enviado com sucesso via Meta, mas o UPDATE do status no Supabase "
+            f"FALHOU. Eles continuam em `aguardando_disparo` mas JÁ RECEBERAM a mensagem. "
+            f"\n\n**NÃO redispare pra esses IDs** — vai duplicar mensagem. "
+            f"\n\nCorrija manualmente com:"
+            f"\n```sql\nUPDATE pos_atendimento_clientes "
+            f"\nSET status='template_enviado', ultima_atualizacao=NOW() "
+            f"\nWHERE id IN ({', '.join(ids_falhos)});\n```"
+        )
+        # Registro persistente pra não perder informação quando a página fechar
         try:
             from utils_erros import registrar_erro
             registrar_erro(
@@ -875,8 +906,21 @@ def _executar_disparo(df_ag: pd.DataFrame, unidade: str, nome_arquivo: str):
                 origem="dashboard",
                 modulo="aba_pos_disparar.py::_executar_disparo::batch_update_clientes",
                 severidade="error",
-                exc=e,
-                contexto={"total_updates": len(updates_clientes), "unidade": unidade},
+                exc=Exception(
+                    f"{len(erros_update_clientes)} de {len(updates_clientes)} UPDATEs de "
+                    f"status falharam. Clientes receberam Meta mas ficaram presos em "
+                    f"aguardando_disparo."
+                ),
+                contexto={
+                    "unidade":            unidade,
+                    "total_updates":      len(updates_clientes),
+                    "total_falhas":       len(erros_update_clientes),
+                    "clientes_falhos":    erros_update_clientes[:20],  # primeiros 20
+                    "sql_correcao":       (
+                        f"UPDATE pos_atendimento_clientes SET status='template_enviado', "
+                        f"ultima_atualizacao=NOW() WHERE id IN ({', '.join(ids_falhos)});"
+                    ),
+                },
                 unidade=unidade,
             )
         except Exception:
