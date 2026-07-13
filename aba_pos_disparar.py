@@ -748,224 +748,252 @@ def _executar_disparo(df_ag: pd.DataFrame, unidade: str, nome_arquivo: str):
     O rerun do chamador vai renderizar _render_tela_pos_disparo() em vez do fluxo normal.
     """
 
-    # ── 1. Cria linhas no pos_atendimento_clientes ──
-    with st.spinner("Cadastrando clientes no Supabase..."):
-        ids, erro = inserir_clientes_supabase(df_ag)
-        if erro:
-            st.error(f"❌ Falha ao inserir clientes: {erro}")
-            return
-        df_ag = df_ag.reset_index(drop=True)
-        df_ag["cliente_id"] = ids
-
-    st.success(f"✅ {len(ids)} clientes cadastrados no Supabase.")
-
-    # ── 2. Cria linha em pos_atendimento_disparos_historico ──
-    datas_sessoes = df_ag["data_fmt"].value_counts()
-    data_sessoes_str = ", ".join([f"{v}x {k}" for k, v in datas_sessoes.items()])
-
-    id_disparo = gravar_disparo_historico({
-        "criado_em":             datetime.now(TZ_SP).isoformat(),
-        "unidade":               unidade,
-        "arquivo":               nome_arquivo,
-        "data_sessoes":          data_sessoes_str,
-        "total_linhas_planilha": int(df_ag["qtd_servicos"].sum()),
-        "total_clientes_unicos": len(df_ag),
-        "duplicatas_ignoradas":  0,
-        "template_enviados_ok":  0,
-        "erros_envio":           0,
-        "erros_envio_detalhes":  None,
-        "janela_horario_ok":     True,
-        "fase":                  "DISPARANDO",
-    })
-
-    # ── 3. Loop de envio ──
-    # v1.2 (06/07/2026): BATCH de writes Supabase pra evitar timeout Streamlit Cloud.
-    # Antes: 3 chamadas HTTP por cliente (Meta + update + log) = 75 pra 25 clientes.
-    # Depois: 1 Meta por cliente + 2 batches finais = 27 pra 25 clientes.
-    # Reduz tempo total de ~30s pra ~15s, elimina risco de timeout.
-    st.markdown("---")
-    st.markdown("### 📤 Enviando templates...")
-
-    progress = st.progress(0.0)
-    status_text = st.empty()
-
-    total = len(df_ag)
-    sucessos = 0
-    erros_lista = []
-
-    # Acumuladores pra batch
-    updates_clientes = []  # lista de dicts {id, status, disparo_ts, wamid}
-    logs_pendentes = []    # lista de dicts pra pos_atendimento_log
-    agora_iso_batch = datetime.now(TZ_SP).isoformat()
-
-    for i, row in df_ag.iterrows():
-        status_text.text(f"Enviando {i+1}/{total} — {row['nome']} ({row['telefone']})...")
-        progress.progress((i+1) / total)
-
-        ok, resposta = enviar_template_pos(
-            telefone=row["telefone"],
-            nome=row["nome"],
-            data=row["data_fmt"],
-            hora=row["hora_sessao"],
-            areas=row["areas"],
-            profissional=row["profissional"]
-        )
-
-        if ok:
-            sucessos += 1
-            # ACUMULA — não escreve ainda
-            updates_clientes.append({
-                "id":         int(row["cliente_id"]),
-                "status":     "template_enviado",
-                "disparo_ts": agora_iso_batch,
-                "wamid":      resposta,
-            })
-            logs_pendentes.append({
-                "data_hora":     agora_iso_batch,
-                "telefone":      row["telefone"],
-                "nome":          row["nome"],
-                "tipo_mensagem": "saida_template",
-                "conteudo":      f"[template {TEMPLATE_NOME}]",
-                "status_antes":  "aguardando_disparo",
-                "status_depois": "template_enviado",
-                "unidade":       unidade,
-                "observacao":    f"✅ Template enviado ({row['data_fmt']} {row['hora_sessao']})",
-                "cliente_id":    int(row["cliente_id"]),
-            })
-        else:
-            erros_lista.append(f"{row['nome']} ({row['telefone']}): {resposta}")
-            updates_clientes.append({
-                "id":     int(row["cliente_id"]),
-                "status": "falha_envio",
-            })
-            logs_pendentes.append({
-                "data_hora":     agora_iso_batch,
-                "telefone":      row["telefone"],
-                "nome":          row["nome"],
-                "tipo_mensagem": "erro_envio",
-                "conteudo":      str(resposta)[:400],
-                "status_antes":  "aguardando_disparo",
-                "status_depois": "falha_envio",
-                "unidade":       unidade,
-                "observacao":    f"❌ FALHA NO ENVIO: {str(resposta)[:200]}",
-                "cliente_id":    int(row["cliente_id"]),
-            })
-
-        # Rate limit — pequena pausa entre envios
-        time.sleep(0.3)
-
-    # ── 3.5. BATCH WRITE — persiste tudo de uma vez ──
-    status_text.text(f"💾 Gravando status de {total} clientes no Supabase (batch)...")
-
-    sb = _get_sb()
-
-    # v1.2 (13/07/2026) — BUG-FIX: try/except individual por UPDATE.
+    # v1.3 (13/07/2026) — proteção contra double-execution.
     #
-    # Antes: try/except em volta do FOR inteiro. Se qualquer UPDATE no meio
-    # falhasse (rate limit transient, timeout, exceção de qualquer natureza),
-    # o `except` capturava e o loop PARAVA. Todos os UPDATEs restantes nunca
-    # aconteciam — clientes ficavam presos em 'aguardando_disparo' mesmo com
-    # Meta tendo enviado template com sucesso.
+    # Antes: se o Streamlit reexecutasse o script durante o disparo (cold start,
+    # WebSocket reconnect, ou usuário clicando novamente ao achar que travou),
+    # essa função podia ser chamada 2x e criar registros fantasma no histórico.
     #
-    # Caso real: 13/07/2026 11:01 — id=15 do histórico registrou 16 templates
-    # enviados OK, mas os 16 clientes continuaram em 'aguardando_disparo'.
-    # Alguém que fosse "re-disparar" pra eles duplicaria mensagem pros clientes
-    # que já receberam.
+    # Caso real: id=18 (13/07/2026 13:45:45 Suzano) — registro criado com 0
+    # templates enviados, id=19 (2.3s depois) criado e processou os 35 clientes.
+    # id=18 ficou pendurado em fase='DISPARANDO' pra sempre.
     #
-    # Agora: cada UPDATE é isolado. Se falhar, marca só aquele cliente como
-    # problemático e o loop continua. Erros individuais + resumo persistente.
-    erros_update_clientes = []
-    for upd in updates_clientes:
-        cliente_id = upd.pop("id")
-        try:
-            sb.table("pos_atendimento_clientes").update(upd).eq("id", cliente_id).execute()
-        except Exception as e_upd:
-            erros_update_clientes.append({
-                "cliente_id": cliente_id,
-                "erro":       str(e_upd)[:200],
-            })
-
-    if erros_update_clientes:
-        # Aviso visível ao usuário (persiste enquanto a página do Streamlit estiver aberta)
-        ids_falhos = [str(e["cliente_id"]) for e in erros_update_clientes]
+    # UID em vez de bool: garante que só a execução dona do lock limpa o flag
+    # no final (proteção contra race entre duas chamadas simultâneas).
+    _click_uid = datetime.now(TZ_SP).isoformat()
+    if st.session_state.get("pos_disparo_em_andamento_uid"):
         st.warning(
-            f"⚠️ {len(erros_update_clientes)}/{len(updates_clientes)} cliente(s) tiveram "
-            f"template enviado com sucesso via Meta, mas o UPDATE do status no Supabase "
-            f"FALHOU. Eles continuam em `aguardando_disparo` mas JÁ RECEBERAM a mensagem. "
-            f"\n\n**NÃO redispare pra esses IDs** — vai duplicar mensagem. "
-            f"\n\nCorrija manualmente com:"
-            f"\n```sql\nUPDATE pos_atendimento_clientes "
-            f"\nSET status='template_enviado', ultima_atualizacao=NOW() "
-            f"\nWHERE id IN ({', '.join(ids_falhos)});\n```"
+            "⚠️ Disparo já em andamento. Aguarde a conclusão ou recarregue a "
+            "página (F5) se travou de vez."
         )
-        # Registro persistente pra não perder informação quando a página fechar
-        try:
-            from utils_erros import registrar_erro
-            registrar_erro(
-                robo="pos_atendimento",
-                origem="dashboard",
-                modulo="aba_pos_disparar.py::_executar_disparo::batch_update_clientes",
-                severidade="error",
-                exc=Exception(
-                    f"{len(erros_update_clientes)} de {len(updates_clientes)} UPDATEs de "
-                    f"status falharam. Clientes receberam Meta mas ficaram presos em "
-                    f"aguardando_disparo."
-                ),
-                contexto={
-                    "unidade":            unidade,
-                    "total_updates":      len(updates_clientes),
-                    "total_falhas":       len(erros_update_clientes),
-                    "clientes_falhos":    erros_update_clientes[:20],  # primeiros 20
-                    "sql_correcao":       (
-                        f"UPDATE pos_atendimento_clientes SET status='template_enviado', "
-                        f"ultima_atualizacao=NOW() WHERE id IN ({', '.join(ids_falhos)});"
-                    ),
-                },
-                unidade=unidade,
-            )
-        except Exception:
-            pass
+        return
+    st.session_state["pos_disparo_em_andamento_uid"] = _click_uid
 
-    # Batch INSERT logs — 1 chamada só pros 25 logs
     try:
-        if logs_pendentes:
-            sb.table("pos_atendimento_log").insert(logs_pendentes).execute()
-    except Exception as e:
-        st.warning(f"⚠️ Erro ao gravar logs em batch: {e}")
-        try:
-            from utils_erros import registrar_erro
-            registrar_erro(
-                robo="pos_atendimento",
-                origem="dashboard",
-                modulo="aba_pos_disparar.py::_executar_disparo::batch_insert_logs",
-                severidade="error",
-                exc=e,
-                contexto={"total_logs": len(logs_pendentes), "unidade": unidade},
-                unidade=unidade,
+        # ── 1. Cria linhas no pos_atendimento_clientes ──
+        with st.spinner("Cadastrando clientes no Supabase..."):
+            ids, erro = inserir_clientes_supabase(df_ag)
+            if erro:
+                st.error(f"❌ Falha ao inserir clientes: {erro}")
+                return
+            df_ag = df_ag.reset_index(drop=True)
+            df_ag["cliente_id"] = ids
+
+        st.success(f"✅ {len(ids)} clientes cadastrados no Supabase.")
+
+        # ── 2. Cria linha em pos_atendimento_disparos_historico ──
+        datas_sessoes = df_ag["data_fmt"].value_counts()
+        data_sessoes_str = ", ".join([f"{v}x {k}" for k, v in datas_sessoes.items()])
+
+        id_disparo = gravar_disparo_historico({
+            "criado_em":             datetime.now(TZ_SP).isoformat(),
+            "unidade":               unidade,
+            "arquivo":               nome_arquivo,
+            "data_sessoes":          data_sessoes_str,
+            "total_linhas_planilha": int(df_ag["qtd_servicos"].sum()),
+            "total_clientes_unicos": len(df_ag),
+            "duplicatas_ignoradas":  0,
+            "template_enviados_ok":  0,
+            "erros_envio":           0,
+            "erros_envio_detalhes":  None,
+            "janela_horario_ok":     True,
+            "fase":                  "DISPARANDO",
+        })
+
+        # ── 3. Loop de envio ──
+        # v1.2 (06/07/2026): BATCH de writes Supabase pra evitar timeout Streamlit Cloud.
+        # Antes: 3 chamadas HTTP por cliente (Meta + update + log) = 75 pra 25 clientes.
+        # Depois: 1 Meta por cliente + 2 batches finais = 27 pra 25 clientes.
+        # Reduz tempo total de ~30s pra ~15s, elimina risco de timeout.
+        st.markdown("---")
+        st.markdown("### 📤 Enviando templates...")
+
+        progress = st.progress(0.0)
+        status_text = st.empty()
+
+        total = len(df_ag)
+        sucessos = 0
+        erros_lista = []
+
+        # Acumuladores pra batch
+        updates_clientes = []  # lista de dicts {id, status, disparo_ts, wamid}
+        logs_pendentes = []    # lista de dicts pra pos_atendimento_log
+        agora_iso_batch = datetime.now(TZ_SP).isoformat()
+
+        for i, row in df_ag.iterrows():
+            status_text.text(f"Enviando {i+1}/{total} — {row['nome']} ({row['telefone']})...")
+            progress.progress((i+1) / total)
+
+            ok, resposta = enviar_template_pos(
+                telefone=row["telefone"],
+                nome=row["nome"],
+                data=row["data_fmt"],
+                hora=row["hora_sessao"],
+                areas=row["areas"],
+                profissional=row["profissional"]
             )
-        except Exception:
-            pass
+
+            if ok:
+                sucessos += 1
+                # ACUMULA — não escreve ainda
+                updates_clientes.append({
+                    "id":         int(row["cliente_id"]),
+                    "status":     "template_enviado",
+                    "disparo_ts": agora_iso_batch,
+                    "wamid":      resposta,
+                })
+                logs_pendentes.append({
+                    "data_hora":     agora_iso_batch,
+                    "telefone":      row["telefone"],
+                    "nome":          row["nome"],
+                    "tipo_mensagem": "saida_template",
+                    "conteudo":      f"[template {TEMPLATE_NOME}]",
+                    "status_antes":  "aguardando_disparo",
+                    "status_depois": "template_enviado",
+                    "unidade":       unidade,
+                    "observacao":    f"✅ Template enviado ({row['data_fmt']} {row['hora_sessao']})",
+                    "cliente_id":    int(row["cliente_id"]),
+                })
+            else:
+                erros_lista.append(f"{row['nome']} ({row['telefone']}): {resposta}")
+                updates_clientes.append({
+                    "id":     int(row["cliente_id"]),
+                    "status": "falha_envio",
+                })
+                logs_pendentes.append({
+                    "data_hora":     agora_iso_batch,
+                    "telefone":      row["telefone"],
+                    "nome":          row["nome"],
+                    "tipo_mensagem": "erro_envio",
+                    "conteudo":      str(resposta)[:400],
+                    "status_antes":  "aguardando_disparo",
+                    "status_depois": "falha_envio",
+                    "unidade":       unidade,
+                    "observacao":    f"❌ FALHA NO ENVIO: {str(resposta)[:200]}",
+                    "cliente_id":    int(row["cliente_id"]),
+                })
+
+            # Rate limit — pequena pausa entre envios
+            time.sleep(0.3)
+
+        # ── 3.5. BATCH WRITE — persiste tudo de uma vez ──
+        status_text.text(f"💾 Gravando status de {total} clientes no Supabase (batch)...")
+
+        sb = _get_sb()
+
+        # v1.2 (13/07/2026) — BUG-FIX: try/except individual por UPDATE.
+        #
+        # Antes: try/except em volta do FOR inteiro. Se qualquer UPDATE no meio
+        # falhasse (rate limit transient, timeout, exceção de qualquer natureza),
+        # o `except` capturava e o loop PARAVA. Todos os UPDATEs restantes nunca
+        # aconteciam — clientes ficavam presos em 'aguardando_disparo' mesmo com
+        # Meta tendo enviado template com sucesso.
+        #
+        # Caso real: 13/07/2026 11:01 — id=15 do histórico registrou 16 templates
+        # enviados OK, mas os 16 clientes continuaram em 'aguardando_disparo'.
+        # Alguém que fosse "re-disparar" pra eles duplicaria mensagem pros clientes
+        # que já receberam.
+        #
+        # Agora: cada UPDATE é isolado. Se falhar, marca só aquele cliente como
+        # problemático e o loop continua. Erros individuais + resumo persistente.
+        erros_update_clientes = []
+        for upd in updates_clientes:
+            cliente_id = upd.pop("id")
+            try:
+                sb.table("pos_atendimento_clientes").update(upd).eq("id", cliente_id).execute()
+            except Exception as e_upd:
+                erros_update_clientes.append({
+                    "cliente_id": cliente_id,
+                    "erro":       str(e_upd)[:200],
+                })
+
+        if erros_update_clientes:
+            # Aviso visível ao usuário (persiste enquanto a página do Streamlit estiver aberta)
+            ids_falhos = [str(e["cliente_id"]) for e in erros_update_clientes]
+            st.warning(
+                f"⚠️ {len(erros_update_clientes)}/{len(updates_clientes)} cliente(s) tiveram "
+                f"template enviado com sucesso via Meta, mas o UPDATE do status no Supabase "
+                f"FALHOU. Eles continuam em `aguardando_disparo` mas JÁ RECEBERAM a mensagem. "
+                f"\n\n**NÃO redispare pra esses IDs** — vai duplicar mensagem. "
+                f"\n\nCorrija manualmente com:"
+                f"\n```sql\nUPDATE pos_atendimento_clientes "
+                f"\nSET status='template_enviado', ultima_atualizacao=NOW() "
+                f"\nWHERE id IN ({', '.join(ids_falhos)});\n```"
+            )
+            # Registro persistente pra não perder informação quando a página fechar
+            try:
+                from utils_erros import registrar_erro
+                registrar_erro(
+                    robo="pos_atendimento",
+                    origem="dashboard",
+                    modulo="aba_pos_disparar.py::_executar_disparo::batch_update_clientes",
+                    severidade="error",
+                    exc=Exception(
+                        f"{len(erros_update_clientes)} de {len(updates_clientes)} UPDATEs de "
+                        f"status falharam. Clientes receberam Meta mas ficaram presos em "
+                        f"aguardando_disparo."
+                    ),
+                    contexto={
+                        "unidade":            unidade,
+                        "total_updates":      len(updates_clientes),
+                        "total_falhas":       len(erros_update_clientes),
+                        "clientes_falhos":    erros_update_clientes[:20],  # primeiros 20
+                        "sql_correcao":       (
+                            f"UPDATE pos_atendimento_clientes SET status='template_enviado', "
+                            f"ultima_atualizacao=NOW() WHERE id IN ({', '.join(ids_falhos)});"
+                        ),
+                    },
+                    unidade=unidade,
+                )
+            except Exception:
+                pass
+
+        # Batch INSERT logs — 1 chamada só pros 25 logs
+        try:
+            if logs_pendentes:
+                sb.table("pos_atendimento_log").insert(logs_pendentes).execute()
+        except Exception as e:
+            st.warning(f"⚠️ Erro ao gravar logs em batch: {e}")
+            try:
+                from utils_erros import registrar_erro
+                registrar_erro(
+                    robo="pos_atendimento",
+                    origem="dashboard",
+                    modulo="aba_pos_disparar.py::_executar_disparo::batch_insert_logs",
+                    severidade="error",
+                    exc=e,
+                    contexto={"total_logs": len(logs_pendentes), "unidade": unidade},
+                    unidade=unidade,
+                )
+            except Exception:
+                pass
 
 
-    # ── 4. Finaliza histórico ──
-    atualizar_disparo_historico(id_disparo, {
-        "fase":                 "FINALIZADO",
-        "finalizado_em":        datetime.now(TZ_SP).isoformat(),
-        "template_enviados_ok": sucessos,
-        "erros_envio":          len(erros_lista),
-        "erros_envio_detalhes": "\n".join(erros_lista[:20]) if erros_lista else None,
-    })
+        # ── 4. Finaliza histórico ──
+        atualizar_disparo_historico(id_disparo, {
+            "fase":                 "FINALIZADO",
+            "finalizado_em":        datetime.now(TZ_SP).isoformat(),
+            "template_enviados_ok": sucessos,
+            "erros_envio":          len(erros_lista),
+            "erros_envio_detalhes": "\n".join(erros_lista[:20]) if erros_lista else None,
+        })
 
-    # Limpa cache pra próximo uso
-    st.cache_data.clear()
+        # Limpa cache pra próximo uso
+        st.cache_data.clear()
 
-    # ── 5. Salva resumo em session_state pra tela de resumo mostrar depois ──
-    st.session_state.pos_ultimo_resumo = {
-        "total":       total,
-        "sucessos":    sucessos,
-        "erros":       len(erros_lista),
-        "erros_lista": erros_lista,
-    }
-    st.session_state.pos_disparo_finalizado = True
-    # NÃO faz rerun aqui — quem chama (_executar_disparo dentro de "Sim, disparar")
-    # já faz o rerun logo depois. Isso deixa o Streamlit terminar o ciclo atual limpo.
+        # ── 5. Salva resumo em session_state pra tela de resumo mostrar depois ──
+        st.session_state.pos_ultimo_resumo = {
+            "total":       total,
+            "sucessos":    sucessos,
+            "erros":       len(erros_lista),
+            "erros_lista": erros_lista,
+        }
+        st.session_state.pos_disparo_finalizado = True
+        # NÃO faz rerun aqui — quem chama (_executar_disparo dentro de "Sim, disparar")
+        # já faz o rerun logo depois. Isso deixa o Streamlit terminar o ciclo atual limpo.
+
+    finally:
+        # v1.3 — libera lock do double-execution guard.
+        # Só limpa se ainda somos donos do UID (proteção contra race).
+        if st.session_state.get("pos_disparo_em_andamento_uid") == _click_uid:
+            st.session_state["pos_disparo_em_andamento_uid"] = None
