@@ -498,10 +498,13 @@ def render_aba_pos_monitor():
     if filtro_unidade != "Todas":
         df_f = df_f[df_f["unidade"] == filtro_unidade]
     if busca:
+        # v6.8 (13/07/2026) — regex=False: sem isso, `+`, `*`, `?` etc quebram
+        # o filtro. Caso real: usuário digitou "+5511973496625" e a busca
+        # tentou compilar como regex → re.error "nothing to repeat".
         bl = busca.lower()
         df_f = df_f[
-            df_f["nome"].astype(str).str.lower().str.contains(bl, na=False)
-            | df_f["telefone"].astype(str).str.contains(busca, na=False)
+            df_f["nome"].astype(str).str.lower().str.contains(bl, na=False, regex=False)
+            | df_f["telefone"].astype(str).str.contains(busca, na=False, regex=False)
         ]
 
     # v1.1: aplica filtro de data da sessão (se ativo e datas válidas)
