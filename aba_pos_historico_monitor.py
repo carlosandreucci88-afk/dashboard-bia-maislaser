@@ -492,7 +492,23 @@ def render_aba_pos_monitor():
     with col_f3:
         busca = st.text_input("🔎 Buscar por nome ou telefone", key="pos_mon_busca")
 
+    # v6.8 (13/07/2026) — checkbox pra ocultar clientes substituídos.
+    # Quando o mesmo telefone aparece em uploads diferentes, o dispatcher marca
+    # o antigo como 'substituido_por_novo_disparo' e cria linha nova. Isso é
+    # comportamento correto de dedup, mas polui o monitoramento mostrando o
+    # registro antigo que é lixo histórico. Default: oculto.
+    ocultar_substituidos = st.checkbox(
+        "🚫 Ocultar clientes substituídos por novo disparo",
+        value=True,
+        key="pos_mon_ocultar_sub",
+        help="Quando você sobe uma planilha com um telefone que já existe em disparo ativo, "
+             "o registro antigo vira 'substituido_por_novo_disparo'. Marcado por default pra "
+             "não poluir a lista com registros antigos.",
+    )
+
     df_f = df.copy()
+    if ocultar_substituidos:
+        df_f = df_f[df_f["status"] != "substituido_por_novo_disparo"]
     if filtro_status != "Todos":
         df_f = df_f[df_f["status"] == filtro_status]
     if filtro_unidade != "Todas":
@@ -534,7 +550,7 @@ def render_aba_pos_monitor():
     st.markdown(f"### {total_clientes_filtrado} cliente(s)")
 
     # Hash dos filtros ativos — se mudar, reseta pra página 1
-    filtros_hash = f"{filtro_status}|{filtro_unidade}|{busca}|{usar_data}|{data_de}|{data_ate}"
+    filtros_hash = f"{filtro_status}|{filtro_unidade}|{busca}|{usar_data}|{data_de}|{data_ate}|{ocultar_substituidos}"
     if st.session_state.get("pos_mon_filtros_hash") != filtros_hash:
         st.session_state.pos_mon_pag_atual = 1
         st.session_state.pos_mon_filtros_hash = filtros_hash
