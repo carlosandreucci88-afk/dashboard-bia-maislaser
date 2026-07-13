@@ -306,7 +306,82 @@ def render_aba_pos_historico():
     df_show["criado_em_fmt"] = df_show["criado_em"].apply(_fmt_dt)
     df_show["arquivo"] = df_show["arquivo"].fillna("—")
 
-    for _, row in df_show.iterrows():
+    # ═════════════════════════════════════════════════════════════════
+    # PAGINAÇÃO (v6.8, 13/07/2026) — mesmo padrão da aba Monitoramento
+    # ═════════════════════════════════════════════════════════════════
+    # Detecta mudança de filtros pra resetar página pra 1
+    filtros_hash = str((
+        st.session_state.pos_hist_unidade,
+        st.session_state.pos_hist_periodo,
+        limit,
+        str(data_de) if data_de else "",
+        str(data_ate) if data_ate else "",
+    ))
+    if st.session_state.get("pos_hist_filtros_hash") != filtros_hash:
+        st.session_state.pos_hist_pag_atual = 1
+        st.session_state.pos_hist_filtros_hash = filtros_hash
+
+    total_registros = len(df_show)
+
+    col_tam, col_prev, col_pag, col_next, col_info = st.columns([1.5, 1, 1.5, 1, 3])
+
+    with col_tam:
+        tam_pag = st.selectbox(
+            "Por página",
+            [10, 20, 50, 100],
+            index=1,
+            key="pos_hist_tam_pag",
+        )
+
+    total_paginas = max(1, (total_registros + tam_pag - 1) // tam_pag)
+
+    if "pos_hist_pag_atual" not in st.session_state:
+        st.session_state.pos_hist_pag_atual = 1
+    if st.session_state.pos_hist_pag_atual > total_paginas:
+        st.session_state.pos_hist_pag_atual = total_paginas
+
+    with col_prev:
+        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+        if st.button("◀ Anterior", use_container_width=True, key="pos_hist_btn_prev",
+                     disabled=(st.session_state.pos_hist_pag_atual <= 1)):
+            st.session_state.pos_hist_pag_atual -= 1
+            st.rerun()
+
+    with col_pag:
+        pag_input = st.number_input(
+            f"Página (1-{total_paginas})",
+            min_value=1,
+            max_value=total_paginas,
+            value=st.session_state.pos_hist_pag_atual,
+            step=1,
+            key="pos_hist_pag_input",
+        )
+        if pag_input != st.session_state.pos_hist_pag_atual:
+            st.session_state.pos_hist_pag_atual = pag_input
+            st.rerun()
+
+    with col_next:
+        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+        if st.button("Próxima ▶", use_container_width=True, key="pos_hist_btn_next",
+                     disabled=(st.session_state.pos_hist_pag_atual >= total_paginas)):
+            st.session_state.pos_hist_pag_atual += 1
+            st.rerun()
+
+    # Fatia o df pela página atual
+    inicio = (st.session_state.pos_hist_pag_atual - 1) * tam_pag
+    fim = inicio + tam_pag
+    df_pag = df_show.iloc[inicio:fim]
+
+    with col_info:
+        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+        st.caption(
+            f"Exibindo **{inicio + 1}–{min(fim, total_registros)}** "
+            f"de **{total_registros}** · Página **{st.session_state.pos_hist_pag_atual}/{total_paginas}**"
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    for _, row in df_pag.iterrows():
         with st.expander(
             f"📅 **{row['criado_em_fmt']}** · {row['unidade'].replace('Mogi das Cruzes', 'Mogi')} · "
             f"{row.get('template_enviados_ok', 0)} enviados / {row.get('erros_envio', 0)} erros · "
