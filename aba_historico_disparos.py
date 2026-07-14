@@ -148,10 +148,78 @@ def render_aba_historico_disparos():
 
     st.markdown("")
     st.markdown(f"### {len(df_filt)} disparo(s)")
+
+    # ═════════════════════════════════════════════════════════════════
+    # PAGINAÇÃO (v6.15, 14/07/2026) — mesmo padrão da aba do Pós
+    # ═════════════════════════════════════════════════════════════════
+    # Detecta mudança de filtro pra resetar página pra 1
+    filtros_hash = f"{filtro}|{len(df_filt)}"
+    if st.session_state.get("hist_ag_filtros_hash") != filtros_hash:
+        st.session_state.hist_ag_pag_atual = 1
+        st.session_state.hist_ag_filtros_hash = filtros_hash
+
+    total_registros = len(df_filt)
+
+    col_tam, col_prev, col_pag, col_next, col_info = st.columns([1.5, 1, 1.5, 1, 3])
+
+    with col_tam:
+        tam_pag = st.selectbox(
+            "Por página",
+            [10, 20, 50, 100],
+            index=1,
+            key="hist_ag_tam_pag",
+        )
+
+    total_paginas = max(1, (total_registros + tam_pag - 1) // tam_pag)
+
+    if "hist_ag_pag_atual" not in st.session_state:
+        st.session_state.hist_ag_pag_atual = 1
+    if st.session_state.hist_ag_pag_atual > total_paginas:
+        st.session_state.hist_ag_pag_atual = total_paginas
+
+    with col_prev:
+        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+        if st.button("◀ Anterior", use_container_width=True, key="hist_ag_btn_prev",
+                     disabled=(st.session_state.hist_ag_pag_atual <= 1)):
+            st.session_state.hist_ag_pag_atual -= 1
+            st.rerun()
+
+    with col_pag:
+        pag_input = st.number_input(
+            f"Página (1-{total_paginas})",
+            min_value=1,
+            max_value=total_paginas,
+            value=st.session_state.hist_ag_pag_atual,
+            step=1,
+            key="hist_ag_pag_input",
+        )
+        if pag_input != st.session_state.hist_ag_pag_atual:
+            st.session_state.hist_ag_pag_atual = pag_input
+            st.rerun()
+
+    with col_next:
+        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+        if st.button("Próxima ▶", use_container_width=True, key="hist_ag_btn_next",
+                     disabled=(st.session_state.hist_ag_pag_atual >= total_paginas)):
+            st.session_state.hist_ag_pag_atual += 1
+            st.rerun()
+
+    # Fatia o df pela página atual
+    inicio = (st.session_state.hist_ag_pag_atual - 1) * tam_pag
+    fim = inicio + tam_pag
+    df_pag = df_filt.iloc[inicio:fim]
+
+    with col_info:
+        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+        st.caption(
+            f"Exibindo **{inicio + 1}–{min(fim, total_registros)}** "
+            f"de **{total_registros}** · Página **{st.session_state.hist_ag_pag_atual}/{total_paginas}**"
+        )
+
     st.divider()
 
     # ─── Lista ───
-    for _, row in df_filt.iterrows():
+    for _, row in df_pag.iterrows():
         reg_id = int(row["id"])
 
         # Data formatada
