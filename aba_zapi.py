@@ -1549,8 +1549,14 @@ def _render_acao_auto_terminado(camp_id, tel, nome, contatos, bia_puxou_dt, stat
 
         if confirmar:
             with st.spinner(f"Marcando {decisao}..."):
-                # Modo AUTO — deixa o Apps Script saber que veio do fluxo AUTO
-                resp = _zapi_action("marcar_validacao", tel=tel, decisao=decisao, modo="AUTO")
+                # v10.7 (Fase 5): checa flag pra decidir caminho
+                # Se validacao_via_supabase_direto=TRUE → grava direto Supabase (<500ms)
+                # Se FALSE → chama Apps Script (comportamento atual, 5-15s)
+                # Modo AUTO preservado — ainda gera AUTO_VALIDADO_BIA no valor final
+                if _flag_validacao_via_supabase_direto():
+                    resp = _marcar_validacao_supabase_direto(tel, decisao, modo="AUTO")
+                else:
+                    resp = _zapi_action("marcar_validacao", tel=tel, decisao=decisao, modo="AUTO")
             if resp.get("_erro") or resp.get("erro"):
                 st.error(f"❌ Falhou: {resp.get('_erro') or resp.get('erro')}")
             elif resp.get("ja_marcado"):
@@ -1558,9 +1564,12 @@ def _render_acao_auto_terminado(camp_id, tel, nome, contatos, bia_puxou_dt, stat
                 st.session_state.pop(f"confirm_auto_{camp_id}", None)
                 _zapi_get.clear()
             else:
-                st.success(
-                    f"✅ {decisao} marcado! Trigger vai processar em até 5min e disparar a mensagem pra cliente."
-                )
+                # v10.7: mensagem dinâmica baseada no fluxo
+                if resp.get("_fonte") == "supabase_direto":
+                    msg_ok = f"✅ {decisao} marcado no Supabase! Polling vai sincronizar em até 1min e template dispara em até 6min pra cliente."
+                else:
+                    msg_ok = f"✅ {decisao} marcado! Trigger vai processar em até 5min e disparar a mensagem pra cliente."
+                st.success(msg_ok)
                 st.session_state.pop(f"confirm_auto_{camp_id}", None)
                 _zapi_get.clear()
                 _get_status_campanhas_auto.clear()
