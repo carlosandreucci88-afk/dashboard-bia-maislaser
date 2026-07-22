@@ -1390,6 +1390,7 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
                 st.warning(f"ℹ️ Já estava marcado como {decisao} (alguém adiantou).")
                 st.session_state.pop(f"confirm_pending_{camp_id}", None)
                 _zapi_get.clear()
+                _zapi_get_validacao_supabase.clear()
             else:
                 # v10.7: mensagem dinâmica baseada no fluxo
                 if resp.get("_fonte") == "supabase_direto":
@@ -1399,6 +1400,7 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
                 st.success(msg_ok)
                 st.session_state.pop(f"confirm_pending_{camp_id}", None)
                 _zapi_get.clear()
+                _zapi_get_validacao_supabase.clear()
                 st.balloons()
             st.rerun()
 
@@ -1658,6 +1660,7 @@ def _render_acao_auto_terminado(camp_id, tel, nome, contatos, bia_puxou_dt, stat
                 st.warning(f"ℹ️ Já estava marcado como {decisao} (alguém adiantou).")
                 st.session_state.pop(f"confirm_auto_{camp_id}", None)
                 _zapi_get.clear()
+                _zapi_get_validacao_supabase.clear()
             else:
                 # v10.7: mensagem dinâmica baseada no fluxo
                 if resp.get("_fonte") == "supabase_direto":
@@ -1667,6 +1670,7 @@ def _render_acao_auto_terminado(camp_id, tel, nome, contatos, bia_puxou_dt, stat
                 st.success(msg_ok)
                 st.session_state.pop(f"confirm_auto_{camp_id}", None)
                 _zapi_get.clear()
+                _zapi_get_validacao_supabase.clear()
                 _get_status_campanhas_auto.clear()
                 st.balloons()
             st.rerun()
@@ -1732,6 +1736,7 @@ def _executar_set_modo(tel, modo, nome):
         st.toast(f"Modo {modo} aplicado pra {nome}", icon="✅")
 
     _zapi_get.clear()
+    _zapi_get_validacao_supabase.clear()
     _get_status_campanhas_auto.clear()
     st.rerun()
 
@@ -2785,6 +2790,7 @@ def tela_zapi_clientes_programa():
     with col_btn:
         if st.button("🔄 Atualizar", key="cliprog_refresh", use_container_width=True):
             _zapi_get.clear()
+            _zapi_get_validacao_supabase.clear()
             _zapi_get_clientes_supabase.clear()
             st.rerun()
 
@@ -3024,6 +3030,7 @@ def tela_zapi_clientes_programa():
                     st.success(f"✅ Marcado como {decisao}! Trigger de 5min vai processar.")
                     st.session_state['cliprog_confirma_validacao'] = None
                     _zapi_get.clear()
+                    _zapi_get_validacao_supabase.clear()
                     st.balloons()
         with col_nao:
             if st.button("❌ Cancelar", key="cliprog_conf_nao", use_container_width=True):
