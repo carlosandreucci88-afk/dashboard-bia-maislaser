@@ -317,6 +317,101 @@ def _marcar_validacao_supabase_direto(tel: str, decisao: str, modo: str = "MANUA
         return {"_erro": f"Erro Supabase: {e}"}
 
 
+def _set_modo_supabase_direto(tel: str, modo: str) -> dict:
+    """
+    v10.8 (Fase 5.1): grava mudança de modo direto no Supabase. ~500ms.
+    Replica localmente as 3 regras do _endpointSetModoCampanha do Apps Script:
+      1. Bloqueia se validacao_marcada != '' (campanha já decidida)
+      2. Bloqueia se modo=MANUAL E bia_puxou_em preenchido
+      3. Só afeta cliente em AGUARDANDO_VALIDACAO e não arquivado
+
+    Retorna dict compatível com _zapi_action.
+    """
+    try:
+        modo_up = str(modo or "").upper().strip()
+        if modo_up not in ("", "AUTO", "MANUAL"):
+            return {"_erro": "modo deve ser AUTO, MANUAL ou vazio"}
+
+        sb = _get_supabase_zapi()
+
+        # SELECT pra ler estado atual + aplicar regras localmente
+        r = (
+            sb.table("clientes")
+              .select("validacao_marcada, bia_puxou_em, status_de_aonde_parou, modo")
+              .eq("telefone", str(tel))
+              .is_("arquivada_em", "null")
+              .order("criado_em", desc=True)
+              .limit(1)
+              .execute()
+        )
+
+        if not r.data or len(r.data) == 0:
+            return {"_erro": f"Cliente não encontrado (tel={tel})."}
+
+        row = r.data[0]
+        val_marcada = str(row.get("validacao_marcada") or "").strip()
+        bia_puxou   = row.get("bia_puxou_em")
+        status_rec  = str(row.get("status_de_aonde_parou") or "").strip()
+
+        # Regra 3 (do endpoint): bloqueia se já decidida
+        if val_marcada:
+            return {
+                "erro": f"campanha já foi decidida ('{val_marcada}'), não pode mudar modo",
+                "decisao_atual": val_marcada,
+            }
+
+        # Regra 2 (do endpoint): bloqueia MANUAL se Bia já puxou
+        if modo_up == "MANUAL" and bia_puxou:
+            return {
+                "erro": (
+                    f"Bia já puxou esse lote em {bia_puxou}, não dá pra mudar pra MANUAL. "
+                    f"Use 'Forçar VALIDAR' ou 'Forçar INVALIDAR'."
+                ),
+                "bia_puxou_em": str(bia_puxou),
+            }
+
+        # Só afeta se estiver em AGUARDANDO_VALIDACAO
+        if status_rec != "AGUARDANDO_VALIDACAO":
+            return {
+                "_erro": f"Cliente não está aguardando validação (status atual: {status_rec})."
+            }
+
+        # OK — UPDATE conditional (v10.8 FIX: proteção race SELECT/UPDATE).
+        # Adiciona filtros extras pra garantir atomicidade:
+        #   - validacao_marcada = '' → protege race com decisão simultânea
+        #   - bia_puxou_em IS NULL (só se MANUAL) → protege race com Bia puxando
+        r_upd = (
+            sb.table("clientes")
+              .update({
+                  "modo": modo_up,
+                  "modo_processada_em": None,  # crítico: NULL pra polling processar
+              })
+              .eq("telefone", str(tel))
+              .eq("status_de_aonde_parou", "AGUARDANDO_VALIDACAO")
+              .eq("validacao_marcada", "")
+              .is_("arquivada_em", "null")
+        )
+        if modo_up == "MANUAL":
+            r_upd = r_upd.is_("bia_puxou_em", "null")
+
+        r_upd = r_upd.execute()
+
+        if r_upd.data and len(r_upd.data) > 0:
+            return {
+                "ok": True,
+                "modo": modo_up,
+                "telefone": str(tel),
+                "_fonte": "supabase_direto",
+            }
+        else:
+            return {
+                "_erro": "UPDATE não afetou linhas (cliente pode ter mudado de status)."
+            }
+
+    except Exception as e:
+        return {"_erro": f"Erro Supabase: {e}"}
+
+
 # ============================================================================
 # v9.13 — CLIENTE HTTP PARA O FILTRO WEBHOOK BIA (Apps Script separado)
 # ============================================================================
@@ -1597,6 +1692,11 @@ def _executar_set_modo(tel, modo, nome):
     depois como backup).
     """
     with st.spinner(f"Definindo modo {modo} pra {nome}..."):
+        # v10.7 (Fase 5): set_modo ainda pelo caminho antigo (Apps Script).
+        # A migração pra Supabase direto está pronta em _set_modo_supabase_direto()
+        # mas depende de migrar antes _endpointCampanhasParaBia e
+        # _endpointMarcarBiaPuxou pro Supabase também (senão puxar_lote_agora
+        # falha por Sheets desatualizado). Fica pra Fase 5.2 dedicada.
         resp = _zapi_action("set_modo_campanha", tel=tel, modo=modo)
 
     if resp.get("_erro") or resp.get("erro"):
