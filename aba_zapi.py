@@ -178,6 +178,146 @@ def _zapi_action(endpoint: str, **params):
 
 
 # ============================================================================
+# v10.6 (Fase 5, 22/07/2026) — VALIDAÇÃO DIRETO NO SUPABASE
+# ============================================================================
+# Objetivo: eliminar latência de 5-15s da chamada Apps Script na validação.
+# Dashboard grava direto no Supabase (~500ms). Apps Script polling (1min)
+# sincroniza pro Sheets e dispara templates.
+#
+# ATIVAÇÃO: feature flag `configuracoes.validacao_via_supabase_direto`.
+#   TRUE  → dashboard usa caminho novo (Supabase direto)
+#   FALSE → dashboard usa caminho antigo (chama Apps Script) — DEFAULT
+#
+# ROLLBACK: `UPDATE configuracoes SET validacao_via_supabase_direto = FALSE`
+# Rollback = 1 SQL, 1 minuto pra cache limpar.
+# ============================================================================
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _flag_validacao_via_supabase_direto() -> bool:
+    """Lê flag configuracoes.validacao_via_supabase_direto (cache 30s).
+    Se qualquer erro, retorna False (safe fallback → caminho antigo)."""
+    try:
+        sb = _get_supabase_zapi()
+        r = (
+            sb.table("configuracoes")
+              .select("validacao_via_supabase_direto")
+              .eq("id", 1)
+              .limit(1)
+              .execute()
+        )
+        if r.data and len(r.data) > 0:
+            return bool(r.data[0].get("validacao_via_supabase_direto", False))
+        return False
+    except Exception:
+        return False
+
+
+def _marcar_validacao_supabase_direto(tel: str, decisao: str, modo: str = "MANUAL") -> dict:
+    """
+    Grava direto no Supabase (sem chamar Apps Script). ~500ms.
+    Retorna dict compatível com _zapi_action ({ok, decisao, modo, msg} ou {_erro}).
+
+    Idempotência + proteção contra conflito garantidas via UPDATE conditional:
+      - Só afeta cliente com status_de_aonde_parou='AGUARDANDO_VALIDACAO'
+      - Só afeta cliente NÃO arquivado
+      - Só afeta cliente ainda SEM decisão (validacao_marcada = '')
+      - Deixa processada_em=NULL pra polling processar
+
+    Se 0 linhas afetadas, faz SELECT pra descobrir o motivo real:
+      - Se cliente tem validacao_marcada preenchida com o mesmo valor → ja_marcado
+      - Se com valor diferente → conflito (não pode sobrescrever)
+      - Se cliente não existe / arquivado / não aguardando → erro claro
+
+    O polling do Apps Script (1min) vai:
+      1. Ver o pendente no Supabase
+      2. Chamar _endpointMarcarValidacao internamente
+      3. Escrever VALIDADO/INVALIDADO no Sheets
+      4. Marcar processada_em=NOW()
+      5. Trigger processarValidacoes (5min) envia template pro cliente
+    """
+    try:
+        # Valor da célula (equivalente ao valorCelula do Apps Script)
+        modo_up = (modo or "MANUAL").upper()
+        if modo_up == "AUTO":
+            valor = "AUTO_VALIDADO_BIA" if decisao == "VALIDADO" else "AUTO_INVALIDADO_BIA"
+        else:
+            valor = decisao  # 'VALIDADO' ou 'INVALIDADO'
+
+        sb = _get_supabase_zapi()
+
+        # UPDATE conditional — imita o filtro do _supabaseClientesUpdatePorTelefone
+        # + proteção contra conflito (validacao_marcada = '')
+        r = (
+            sb.table("clientes")
+              .update({
+                  "validacao_marcada": valor,
+                  "processada_em": None,  # crítico: NULL pra polling processar
+              })
+              .eq("telefone", str(tel))
+              .eq("status_de_aonde_parou", "AGUARDANDO_VALIDACAO")
+              .eq("validacao_marcada", "")  # v10.7 FIX: só afeta se ainda não decidido
+              .is_("arquivada_em", "null")
+              .execute()
+        )
+
+        if r.data and len(r.data) > 0:
+            return {
+                "ok": True,
+                "decisao": valor,
+                "modo": modo_up,
+                "msg": "Marcado no Supabase. Polling do Apps Script vai sincronizar em até 1min e disparar template em até 6min.",
+                "_fonte": "supabase_direto",
+            }
+
+        # 0 linhas afetadas — investiga por quê fazendo SELECT
+        try:
+            r_check = (
+                sb.table("clientes")
+                  .select("validacao_marcada, status_de_aonde_parou, arquivada_em")
+                  .eq("telefone", str(tel))
+                  .is_("arquivada_em", "null")
+                  .order("criado_em", desc=True)
+                  .limit(1)
+                  .execute()
+            )
+            if r_check.data and len(r_check.data) > 0:
+                row = r_check.data[0]
+                atual = str(row.get("validacao_marcada") or "").strip()
+                if atual == valor:
+                    # Mesma decisão já registrada → idempotência
+                    return {
+                        "ok": True,
+                        "ja_marcado": True,
+                        "decisao": valor,
+                        "modo": modo_up,
+                        "_fonte": "supabase_direto",
+                    }
+                if atual and atual != valor:
+                    # Conflito — outra decisão já foi tomada
+                    return {
+                        "erro": f"campanha já foi decidida como '{atual}', não pode mudar pra '{valor}'",
+                        "ja_marcado": True,
+                        "valor_anterior": atual,
+                        "valor_tentado": valor,
+                    }
+                # Cliente existe mas fora de AGUARDANDO_VALIDACAO
+                status = row.get("status_de_aonde_parou") or "?"
+                return {
+                    "_erro": f"Cliente não está mais aguardando validação (status atual: {status})."
+                }
+            return {
+                "_erro": f"Cliente não encontrado (tel={tel})."
+            }
+        except Exception as e_check:
+            return {
+                "_erro": f"UPDATE não afetou linhas, e SELECT de verificação falhou: {e_check}"
+            }
+
+    except Exception as e:
+        return {"_erro": f"Erro Supabase: {e}"}
+
+
+# ============================================================================
 # v9.13 — CLIENTE HTTP PARA O FILTRO WEBHOOK BIA (Apps Script separado)
 # ============================================================================
 # Usado pra chamar o endpoint puxar_lote_agora imediatamente após clicar AUTO,
@@ -1142,8 +1282,13 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
 
         if confirmar:
             with st.spinner(f"Marcando {decisao}..."):
-                # Modo MANUAL explícito (mesmo sendo default no Apps Script)
-                resp = _zapi_action("marcar_validacao", tel=tel, decisao=decisao, modo="MANUAL")
+                # v10.6 (Fase 5, 22/07/2026): checa flag pra decidir caminho
+                # Se validacao_via_supabase_direto=TRUE → grava direto Supabase (<500ms)
+                # Se FALSE → chama Apps Script (comportamento atual, 5-15s)
+                if _flag_validacao_via_supabase_direto():
+                    resp = _marcar_validacao_supabase_direto(tel, decisao, modo="MANUAL")
+                else:
+                    resp = _zapi_action("marcar_validacao", tel=tel, decisao=decisao, modo="MANUAL")
             if resp.get("_erro") or resp.get("erro"):
                 st.error(f"❌ Falhou: {resp.get('_erro') or resp.get('erro')}")
             elif resp.get("ja_marcado"):
@@ -1151,9 +1296,12 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
                 st.session_state.pop(f"confirm_pending_{camp_id}", None)
                 _zapi_get.clear()
             else:
-                st.success(
-                    f"✅ {decisao} marcado! Trigger vai processar em até 5min e disparar a mensagem pra cliente."
-                )
+                # v10.7: mensagem dinâmica baseada no fluxo
+                if resp.get("_fonte") == "supabase_direto":
+                    msg_ok = f"✅ {decisao} marcado no Supabase! Polling vai sincronizar em até 1min e template dispara em até 6min pra cliente."
+                else:
+                    msg_ok = f"✅ {decisao} marcado! Trigger vai processar em até 5min e disparar a mensagem pra cliente."
+                st.success(msg_ok)
                 st.session_state.pop(f"confirm_pending_{camp_id}", None)
                 _zapi_get.clear()
                 st.balloons()
