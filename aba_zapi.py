@@ -925,26 +925,6 @@ def tela_zapi_aguardando_validacao():
     )
 
     # ───────────────────────────────────────────────────────────────────
-    # v10.10: LIMPEZA DE OVERRIDES DE MODO
-    # ───────────────────────────────────────────────────────────────────
-    # tela_zapi_aguardando_validacao() só reexecuta em FULL RERUN (Streamlit
-    # não passa por aqui em rerun scope="fragment"). Full rerun = df fresco
-    # do Supabase = overrides de modo viram stale. Ex: coord clicou AUTO,
-    # override AUTO gravado; Bia puxou lote nesse meio-tempo; df fresco tem
-    # bia_puxou_em preenchido, mas override zera row["bia_puxou_em_dt"]
-    # localmente → card mostra AUTO_AGUARDANDO mesmo com Bia disparando.
-    # Limpar aqui garante que card sempre reflete estado do Supabase.
-    #
-    # NÃO limpa card_decisao_* — decisões finais devem persistir pra evitar
-    # edge case onde df stale (cache hit) mostra campanha já decidida.
-    _keys_p_limpar = [
-        k for k in st.session_state.keys()
-        if isinstance(k, str) and k.startswith("card_modo_override_")
-    ]
-    for _k in _keys_p_limpar:
-        del st.session_state[_k]
-
-    # ───────────────────────────────────────────────────────────────────
     # TOGGLE GLOBAL — Default das próximas campanhas
     # ───────────────────────────────────────────────────────────────────
     modo_default_atual = _get_default_modo()
@@ -1166,68 +1146,20 @@ def tela_zapi_aguardando_validacao():
 # ============================================================================
 # RENDERIZA UM CARD INDIVIDUAL DE CAMPANHA
 # ============================================================================
-# v10.10 (Refactor UX, 23/07/2026): @st.fragment isola cada card do rerun global.
-# Motivo: sem fragment, clicar Validar/MANUAL/AUTO dispara st.rerun() que
-# recarrega tela inteira (~5-6s do Streamlit re-executar todos os cards +
-# métricas + config recepção). Com fragment, só o card do clique re-renderiza
-# (<1s).
-#
-# Trade-off aceito: métricas do topo (Sem decisão/Manual/AUTO rodando/Em
-# processamento) ficam stale até próximo cache miss (30s TTL do
-# _zapi_get_validacao_supabase). Coord dá F5 se quiser refresh imediato.
-#
-# ARQUITETURA DE SESSION_STATE (v10.10 revisada 23/07/2026):
-# 2 chaves distintas por camp_id porque fragment não vê mudanças no row do
-# dataframe pai (row é congelado até full rerun):
-#
-#   card_decisao_{camp_id} = "VALIDADO" | "INVALIDADO"
-#     → decisão FINAL. Gate faz early return mostrando sucesso.
-#     Campanha vai sair do df_ativas no próximo full rerun natural.
-#
-#   card_modo_override_{camp_id} = "MANUAL" | "AUTO"
-#     → override transiente do modo. Fragment usa pra sobrescrever
-#     row["modo"] localmente e re-renderizar como se o df tivesse atualizado.
-#     Limpo no início da tela pai (tela_zapi_aguardando_validacao) porque
-#     full rerun natural = sync com df fresco do Supabase, override vira
-#     stale e pode mostrar estado errado (ex: AUTO_AGUARDANDO mesmo com
-#     Bia já tendo puxado o lote).
 
-@st.fragment
 def _renderizar_card_campanha(row, stats_por_camp, modo_default_atual):
-    camp_id = row["campanha_id"]
-
-    # v10.10 GATE 1: decisão final (Validar/Invalidar) → early return.
-    # Campanha some do df no próximo full rerun natural.
-    _key_decisao = f"card_decisao_{camp_id}"
-    if st.session_state.get(_key_decisao):
-        decisao = st.session_state[_key_decisao]
-        st.success(
-            f"✅ **{row.get('nome') or '(sem nome)'}** — {decisao} registrado. "
-            f"Métricas atualizam em até 30s (ou dá F5 pra ver agora)."
-        )
-        return
-
     tel = row["telefone"]
     nome = row["nome"] or "(sem nome)"
     func = row["funcionaria"] or "—"
     unid = row["unidade"] or "—"
     contatos = int(row["contatos"] or 0)
     priv = str(row.get("privacidade") or "").upper()
+    camp_id = row["campanha_id"]
     dt = row["data_hora_dt"]
     tempo = _humanizar_tempo(dt)
     urg = _classe_urgencia(dt)
     modo_atual = row["modo"]
     bia_puxou = row["bia_puxou_em_dt"]
-
-    # v10.10 OVERRIDE: se coord clicou MODO neste turno de session, sobrescreve
-    # row["modo"] localmente pra re-renderizar o card com estado novo (df pai
-    # não muda até full rerun). Também zera bia_puxou_em porque MODO novo
-    # significa "coord acabou de escolher, Bia ainda não puxou este lote".
-    _key_modo = f"card_modo_override_{camp_id}"
-    modo_override = st.session_state.get(_key_modo)
-    if modo_override:
-        modo_atual = modo_override
-        bia_puxou = pd.NaT  # override também zera puxada (novo modo = Bia ainda vai puxar)
 
     # v9.12: stats vem do dict global de status por campanha
     stats = stats_por_camp.get(camp_id, {}) if camp_id else {}
@@ -1375,7 +1307,7 @@ def _render_acao_sem_decisao(camp_id, tel, nome, modo_default_atual):
             use_container_width=True,
             help="Captadora liga pros indicados pra validar. Você aperta Validar/Invalidar depois.",
         ):
-            _executar_set_modo(tel, "MANUAL", nome, camp_id=camp_id)
+            _executar_set_modo(tel, "MANUAL", nome)
     with col_a:
         if st.button(
             "🤖 AUTO (Disparador AUTO)",
@@ -1384,7 +1316,7 @@ def _render_acao_sem_decisao(camp_id, tel, nome, modo_default_atual):
             use_container_width=True,
             help="Disparador AUTO dispara templates pros 20 indicados (1/min). Cada clique vira handoff pra recepção via Z-API.",
         ):
-            _executar_set_modo(tel, "AUTO", nome, camp_id=camp_id)
+            _executar_set_modo(tel, "AUTO", nome)
 
 
 def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
@@ -1420,7 +1352,7 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
                 use_container_width=True,
                 help="Cancela MANUAL. Disparador AUTO vai trabalhar este lote.",
             ):
-                _executar_set_modo(tel, "AUTO", nome, camp_id=camp_id)
+                _executar_set_modo(tel, "AUTO", nome)
         else:
             st.button(
                 "↩️ Mudar pra AUTO",
@@ -1465,7 +1397,7 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
 
         if cancelar:
             st.session_state.pop(f"confirm_pending_{camp_id}", None)
-            st.rerun(scope="fragment")
+            st.rerun()
 
         if confirmar:
             with st.spinner(f"Marcando {decisao}..."):
@@ -1478,14 +1410,9 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
                     resp = _zapi_action("marcar_validacao", tel=tel, decisao=decisao, modo="MANUAL")
             if resp.get("_erro") or resp.get("erro"):
                 st.error(f"❌ Falhou: {resp.get('_erro') or resp.get('erro')}")
-                # v10.10 FIX: return sem rerun pra mensagem de erro persistir.
-                # Fragment rerun apagaria st.error (não é state persistente).
-                return
             elif resp.get("ja_marcado"):
                 st.warning(f"ℹ️ Já estava marcado como {decisao} (alguém adiantou).")
                 st.session_state.pop(f"confirm_pending_{camp_id}", None)
-                # v10.10: DECISÃO FINAL — gate mostra sucesso, card some no próximo full rerun
-                st.session_state[f"card_decisao_{camp_id}"] = decisao
                 _zapi_get.clear()
                 _zapi_get_validacao_supabase.clear()
             else:
@@ -1496,14 +1423,10 @@ def _render_acao_manual(camp_id, tel, nome, bia_puxou_dt):
                     msg_ok = f"✅ {decisao} marcado! Trigger vai processar em até 5min e disparar a mensagem pra cliente."
                 st.success(msg_ok)
                 st.session_state.pop(f"confirm_pending_{camp_id}", None)
-                # v10.10: DECISÃO FINAL — gate mostra sucesso, card some no próximo full rerun
-                st.session_state[f"card_decisao_{camp_id}"] = decisao
                 _zapi_get.clear()
                 _zapi_get_validacao_supabase.clear()
                 st.balloons()
-            # v10.10: rerun scope="fragment" — só o card re-renderiza.
-            # Só chega aqui em elif/else (erro já retornou acima).
-            st.rerun(scope="fragment")
+            st.rerun()
 
 
 def _render_acao_auto_aguardando(camp_id, tel, nome):
@@ -1556,7 +1479,7 @@ def _render_acao_auto_aguardando(camp_id, tel, nome):
             use_container_width=True,
             help="Cancela AUTO. Captadora vai ter que ligar manualmente.",
         ):
-            _executar_set_modo(tel, "MANUAL", nome, camp_id=camp_id)
+            _executar_set_modo(tel, "MANUAL", nome)
 
 
 def _render_acao_auto_rodando(camp_id, contatos, bia_puxou_dt, stats):
@@ -1743,7 +1666,7 @@ def _render_acao_auto_terminado(camp_id, tel, nome, contatos, bia_puxou_dt, stat
 
         if cancelar:
             st.session_state.pop(f"confirm_auto_{camp_id}", None)
-            st.rerun(scope="fragment")
+            st.rerun()
 
         if confirmar:
             with st.spinner(f"Marcando {decisao}..."):
@@ -1757,13 +1680,9 @@ def _render_acao_auto_terminado(camp_id, tel, nome, contatos, bia_puxou_dt, stat
                     resp = _zapi_action("marcar_validacao", tel=tel, decisao=decisao, modo="AUTO")
             if resp.get("_erro") or resp.get("erro"):
                 st.error(f"❌ Falhou: {resp.get('_erro') or resp.get('erro')}")
-                # v10.10 FIX: return sem rerun pra mensagem de erro persistir.
-                return
             elif resp.get("ja_marcado"):
                 st.warning(f"ℹ️ Já estava marcado como {decisao} (alguém adiantou).")
                 st.session_state.pop(f"confirm_auto_{camp_id}", None)
-                # v10.10: DECISÃO FINAL — gate mostra sucesso, card some no próximo full rerun
-                st.session_state[f"card_decisao_{camp_id}"] = decisao
                 _zapi_get.clear()
                 _zapi_get_validacao_supabase.clear()
             else:
@@ -1774,22 +1693,18 @@ def _render_acao_auto_terminado(camp_id, tel, nome, contatos, bia_puxou_dt, stat
                     msg_ok = f"✅ {decisao} marcado! Trigger vai processar em até 5min e disparar a mensagem pra cliente."
                 st.success(msg_ok)
                 st.session_state.pop(f"confirm_auto_{camp_id}", None)
-                # v10.10: DECISÃO FINAL — gate mostra sucesso, card some no próximo full rerun
-                st.session_state[f"card_decisao_{camp_id}"] = decisao
                 _zapi_get.clear()
                 _zapi_get_validacao_supabase.clear()
                 _get_status_campanhas_auto.clear()
                 st.balloons()
-            # v10.10: rerun scope="fragment" — só card re-renderiza (<1s).
-            # Só chega aqui em elif/else (erro já retornou acima).
-            st.rerun(scope="fragment")
+            st.rerun()
 
 
 # ============================================================================
 # AÇÕES AUXILIARES
 # ============================================================================
 
-def _executar_set_modo(tel, modo, nome, camp_id=None):
+def _executar_set_modo(tel, modo, nome):
     """
     Chama set_modo_campanha no Apps Script + trata resposta + rerun.
 
@@ -1803,10 +1718,6 @@ def _executar_set_modo(tel, modo, nome, camp_id=None):
     esperar até 10min pelo cron — primeiro template sai em ~1min.
     Se puxar_lote_agora falhar, mostra warning mas não bloqueia (cron pega
     depois como backup).
-
-    v10.10 (23/07/2026): param camp_id opcional pra marcar session_state
-    do card processado (fragment scope). Se camp_id não passado, comportamento
-    é o antigo (st.rerun global — pra retrocompat com chamadas fora do card).
     """
     with st.spinner(f"Definindo modo {modo} pra {nome}..."):
         # v10.9 (Fase 5.2, 23/07/2026): checa flag pra decidir caminho.
@@ -1856,21 +1767,7 @@ def _executar_set_modo(tel, modo, nome, camp_id=None):
     _zapi_get.clear()
     _zapi_get_validacao_supabase.clear()
     _get_status_campanhas_auto.clear()
-
-    # v10.10 revisada: se camp_id foi passado (fluxo dentro do fragment do card),
-    # marca card_modo_override_ (não decisão final — coord ainda vai clicar
-    # Validar/Invalidar depois) e faz rerun scope="fragment" pra card
-    # re-renderizar com estado novo. Fragment lê override e sobrescreve
-    # row["modo"] localmente. Override é limpo no início da tela pai
-    # (limpeza no full rerun natural sincroniza com df fresco).
-    #
-    # Se camp_id não foi passado (retrocompat com chamadas fora do card),
-    # cai no comportamento antigo (rerun global).
-    if camp_id is not None:
-        st.session_state[f"card_modo_override_{camp_id}"] = modo
-        st.rerun(scope="fragment")
-    else:
-        st.rerun()
+    st.rerun()
 
 
 def _render_lista_contatos(camp_id, nome):
