@@ -212,6 +212,30 @@ def _flag_validacao_via_supabase_direto() -> bool:
         return False
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def _flag_set_modo_via_supabase_direto() -> bool:
+    """v10.9 (Fase 5.2, 23/07/2026): flag SEPARADA pra migração do set_modo.
+    Motivo de flag distinta da _flag_validacao_via_supabase_direto: permite
+    rollback granular do set_modo sem derrubar a validação (que tá saudável
+    em produção desde 22/07). Se der bug só no set_modo, desliga só ele.
+
+    Cache 30s. Erro → False (safe fallback → _zapi_action antigo)."""
+    try:
+        sb = _get_supabase_zapi()
+        r = (
+            sb.table("configuracoes")
+              .select("set_modo_via_supabase_direto")
+              .eq("id", 1)
+              .limit(1)
+              .execute()
+        )
+        if r.data and len(r.data) > 0:
+            return bool(r.data[0].get("set_modo_via_supabase_direto", False))
+        return False
+    except Exception:
+        return False
+
+
 def _marcar_validacao_supabase_direto(tel: str, decisao: str, modo: str = "MANUAL") -> dict:
     """
     Grava direto no Supabase (sem chamar Apps Script). ~500ms.
@@ -1696,12 +1720,17 @@ def _executar_set_modo(tel, modo, nome):
     depois como backup).
     """
     with st.spinner(f"Definindo modo {modo} pra {nome}..."):
-        # v10.7 (Fase 5): set_modo ainda pelo caminho antigo (Apps Script).
-        # A migração pra Supabase direto está pronta em _set_modo_supabase_direto()
-        # mas depende de migrar antes _endpointCampanhasParaBia e
-        # _endpointMarcarBiaPuxou pro Supabase também (senão puxar_lote_agora
-        # falha por Sheets desatualizado). Fica pra Fase 5.2 dedicada.
-        resp = _zapi_action("set_modo_campanha", tel=tel, modo=modo)
+        # v10.9 (Fase 5.2, 23/07/2026): checa flag pra decidir caminho.
+        # Se set_modo_via_supabase_direto=TRUE → grava direto Supabase (<500ms).
+        # Se FALSE → chama Apps Script (comportamento antigo, 5-15s).
+        #
+        # Se AUTO ligado E flag ligada: puxar_lote_agora agora consegue achar
+        # a campanha porque _endpointCampanhasParaBia (v10.9) lê Supabase
+        # também, eliminando o gap dashboard→polling que impedia a migração.
+        if _flag_set_modo_via_supabase_direto():
+            resp = _set_modo_supabase_direto(tel, modo)
+        else:
+            resp = _zapi_action("set_modo_campanha", tel=tel, modo=modo)
 
     if resp.get("_erro") or resp.get("erro"):
         st.error(f"❌ Falhou: {resp.get('_erro') or resp.get('erro')}")
