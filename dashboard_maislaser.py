@@ -60,7 +60,6 @@ from aba_zapi import (
     render_aba_zapi_metricas,
     render_aba_zapi_clientes,
     render_aba_zapi_funcionarias,  # v6.4: CRUD funcionárias (Fase 4.6)
-    render_aba_zapi_diagnostico,   # v6.5: Diagnóstico (Fase 4.9)
 )
 from aba_historico_disparos import render_aba_historico_disparos
 from aba_disparador_auto import render_aba_disparador_auto
@@ -556,7 +555,7 @@ def main():
         # v6.4: aba "👥 Funcionárias" (CRUD) logo após Ranking
         # v6.5: aba "🔧 Diagnóstico" no final (Fase 4.9)
         (tab_aguard, tab_clientes, tab_indic, tab_disp_auto, tab_conv,
-         tab_rank, tab_func, tab_metr, tab_base, tab_diag) = st.tabs([
+         tab_rank, tab_func, tab_metr, tab_base) = st.tabs([
             "⏳ Aguardando validação",
             "👥 Clientes no programa",
             "📨 Indicações",
@@ -566,7 +565,6 @@ def main():
             "👥 Funcionárias",
             "📊 Métricas",
             "📊 Base de clientes",
-            "🔧 Diagnóstico",
         ])
 
         with tab_aguard:
@@ -595,9 +593,6 @@ def main():
 
         with tab_base:
             render_aba_base_clientes(get_supabase())
-
-        with tab_diag:
-            render_aba_zapi_diagnostico()
 
     elif robo == 'pos':
         # v6.6: Robô Pós-atendimento (número 97502-5297) — arquitetura sem
