@@ -337,6 +337,55 @@ def _card_pos(dados: dict, semaforo: str):
 
 
 # ============================================================================
+# Mini-widget de sidebar — 3 semáforos + botão "Ver detalhes"
+# ============================================================================
+
+def render_sidebar():
+    """
+    Renderiza mini-widget de saúde na sidebar do dashboard.
+    Deve ser chamado dentro de `with st.sidebar:`.
+
+    Compartilha o mesmo cache de _carregar_saude() do render() principal,
+    então sidebar + página de detalhes = 1 única chamada Supabase por 60s.
+    """
+    st.markdown(
+        '<div class="sidebar-info-label" style="font-size: 11px; '
+        'margin-bottom: 8px; letter-spacing: 0.06em;">SAÚDE DO SISTEMA</div>',
+        unsafe_allow_html=True,
+    )
+
+    try:
+        payload = _carregar_saude()
+    except Exception as e:
+        st.caption(f"⚠️ erro RPC: {e}")
+        return
+
+    if not payload:
+        st.caption("⚠️ sem dados")
+        return
+
+    sem_agenda = (payload.get("agenda") or {}).get("semaforo", "verde")
+    sem_bia = (payload.get("bia") or {}).get("semaforo", "verde")
+    sem_pos = (payload.get("pos") or {}).get("semaforo", "verde")
+
+    st.markdown(
+        f"<div style='display:flex; justify-content:space-between; "
+        f"font-size:13px; margin: 4px 0 6px 0;'>"
+        f"<span>{CORES.get(sem_agenda, '🟢')} Agenda</span>"
+        f"<span>{CORES.get(sem_bia, '🟢')} Bia</span>"
+        f"<span>{CORES.get(sem_pos, '🟢')} Pós</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.caption(f"Atualizado {_tempo_desde(payload.get('gerado_em'))}")
+
+    if st.button("🔍 Ver detalhes", key="saude_ver_detalhes_btn", use_container_width=True):
+        st.session_state["robo_ativo"] = "saude"
+        st.rerun()
+
+
+# ============================================================================
 # Entrada pública — chamar em app.py
 # ============================================================================
 
