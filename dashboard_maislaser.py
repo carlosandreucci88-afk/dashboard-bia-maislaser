@@ -72,6 +72,8 @@ from aba_pos_historico_monitor import render_aba_pos_historico, render_aba_pos_m
 from aba_pos_ranking import render_aba_pos_ranking
 from aba_pos_config import render_aba_pos_config
 from aba_pos_diagnostico import render_aba_pos_diagnostico  # v6.7: aba diagnóstico
+# v6.9: aba de saúde consolidada (sidebar + página completa)
+from aba_saude import render as render_saude, render_sidebar as render_sidebar_saude
 
 
 # ============================================================================
@@ -463,8 +465,10 @@ def main():
 
     # v6.1: robô Bia conversacional foi removido. Default = confirmacao.
     # Sessões antigas com robo_ativo='bia' são normalizadas pra confirmacao.
+    # v6.9: 'saude' é modo válido mesmo não estando em ROBOS (não vira botão).
+    _MODOS_VALIDOS = set(ROBOS.keys()) | {'saude'}
     if ('robo_ativo' not in st.session_state
-            or st.session_state['robo_ativo'] not in ROBOS):
+            or st.session_state['robo_ativo'] not in _MODOS_VALIDOS):
         st.session_state['robo_ativo'] = 'confirmacao'
 
     robo = st.session_state['robo_ativo']
@@ -499,6 +503,11 @@ def main():
                 if robo != key:
                     st.session_state['robo_ativo'] = key
                     st.rerun()
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # v6.9: mini-widget de saúde do sistema (3 semáforos + botão detalhes)
+        render_sidebar_saude()
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -627,6 +636,10 @@ def main():
 
         with tab_pos_diag:
             render_aba_pos_diagnostico()
+
+    elif robo == 'saude':
+        # v6.9: página completa de saúde consolidada (RPC saude_consolidada)
+        render_saude()
 
     if auto_refresh:
         time.sleep(30)
