@@ -65,6 +65,11 @@ from datetime import datetime, timezone
 
 NOME_MODELO_MENSAGEM = "confirmacao_agenda_maislaser_v4"  # quem usa é o worker
 
+# Carimbo visível na tela. Serve pra responder "qual versão está no ar?"
+# sem abrir o repo — em 28/07 perdemos tempo com um erro que já estava
+# corrigido, mas numa versão que não tinha subido.
+VERSAO_ABA = "v7.1.2"
+
 
 # ============================================================================
 # HIGIENIZAÇÃO — extraída literalmente do v6.25 em produção
@@ -356,6 +361,7 @@ def render_aba_disparador():
         st.divider()
 
     st.markdown("### 🚀 Novo disparo")
+    st.caption(f"disparador {VERSAO_ABA} · fila assíncrona")
 
     unidade_selecionada = st.selectbox(
         "Selecione a Unidade que está operando hoje:",
@@ -534,7 +540,11 @@ def render_aba_disparador():
                 "disparo continua do ponto onde parou.\n\n"
                 "Volte a esta tela quando quiser para acompanhar o progresso."
             )
-            st.session_state["disp_alertas_ativados"] = False
+            # NAO resetar st.session_state["disp_alertas_ativados"] aqui: o
+            # Streamlit proibe alterar session_state de chave ligada a widget ja
+            # instanciado, e levantava um erro vermelho na tela DEPOIS do
+            # enfileiramento ter dado certo — assustando a coordenadora a toa.
+            # Reenvio acidental ja e barrado pela guarda de duplicidade da RPC.
 
     except Exception as e:
         st.error(f"❌ Erro ao processar o arquivo: {e}")
