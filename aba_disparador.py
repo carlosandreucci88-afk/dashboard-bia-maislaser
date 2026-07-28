@@ -790,6 +790,24 @@ def render_aba_disparador():
                                 telefones_disparados.append({
                                     'tel': telefone_formatado,
                                     'nome': nome_cliente,
+                                    # 🆕 v6.25 (28/07/2026) — BUG-06
+                                    #   O retry sincrono la embaixo passava "-" literal em
+                                    #   servico/unidade/horario e "" no numero_alerta, porque
+                                    #   esses campos nao eram guardados aqui. Como o UPSERT usa
+                                    #   merge-duplicates e o POST salvar_contexto sobrescreve a
+                                    #   linha INTEIRA do Sheets, o retry apagava os dados bons
+                                    #   dos DOIS lados. 24 clientes corrompidos entre 24 e 28/07
+                                    #   (unidade='-', horario='-', servico='-', alerta='').
+                                    #   Guardar os valores reais fecha o buraco.
+                                    #   ATENCAO: mesmos valores passados no submit acima —
+                                    #   `procedimento` e `horario_cliente`, NAO `servico_final`
+                                    #   nem `horario_final` (esses sao so pro corpo do template).
+                                    'servico':  procedimento,
+                                    'unidade':  unidade_selecionada,
+                                    'horario':  horario_cliente,
+                                    'horario2': horario2_cliente,
+                                    'servico2': servico2_cliente,
+                                    'alerta':   numero_alerta_formatado,
                                     'fut_supabase': fut_supabase,
                                     'fut_appscript': fut_appscript,
                                 })
@@ -916,20 +934,47 @@ def render_aba_disparador():
                     executor.shutdown(wait=False)
 
                     # 🆕 v6.21 — Retry síncrono das falhas (última chance)
+                    # 🆕 v6.25 — BUG-06: agora com os dados REAIS do cliente.
+                    #    Antes mandava "-" literal e destruia o registro que estava
+                    #    tentando salvar. Ver comentario no append la em cima.
                     if supabase_falhas:
                         status_texto.text(f"🔁 Retentando {len(supabase_falhas)} INSERT(s) Supabase...")
                         for d in supabase_falhas[:]:
                             if _insert_supabase_contexto(
-                                d['tel'], d['nome'], "-", "-", "-", "", "", ""
+                                d['tel'], d['nome'], d['servico'], d['unidade'],
+                                d['horario'], d['horario2'], d['servico2'], d['alerta']
                             ):
                                 supabase_falhas.remove(d)
                     if appscript_falhas:
                         status_texto.text(f"🔁 Retentando {len(appscript_falhas)} POST(s) Apps Script...")
                         for d in appscript_falhas[:]:
                             if _post_apps_script_salvar(
-                                d['tel'], d['nome'], "-", "-", "-", "", "", ""
+                                d['tel'], d['nome'], d['servico'], d['unidade'],
+                                d['horario'], d['horario2'], d['servico2'], d['alerta']
                             ):
                                 appscript_falhas.remove(d)
+
+                    # 🆕 v6.25 — quem falhou nas DUAS tentativas do Apps Script ficou
+                    #    SEM linha no Sheets e SEM flags no PropertiesService. O robo nao
+                    #    reconhece a resposta dessa cliente e nunca manda lembrete.
+                    #    A verificacao final abaixo so olha o SUPABASE, entao esses casos
+                    #    passavam batido e o disparo era reportado como 100% OK.
+                    #    Caso real: 27/07, cliente com sessao no dia seguinte ficou invisivel.
+                    #    Agora aparece na tela E fica gravado em disparos_historico.
+                    if appscript_falhas:
+                        for _d in appscript_falhas:
+                            erros_envio_detalhes.append(
+                                f"{_d['nome']} ({_d['tel']}) | SEM CONTEXTO APPS SCRIPT | "
+                                f"WhatsApp entregue, mas Sheets e PropertiesService nao gravaram "
+                                f"(2 tentativas). Robo nao reconhece resposta nem envia lembrete."
+                            )
+                        st.error(
+                            f"🚨 **{len(appscript_falhas)} cliente(s) receberam o WhatsApp mas "
+                            f"ficaram INVISIVEIS pro robo** (Sheets + PropertiesService nao gravaram).\n\n"
+                            + "\n".join(f"• {_d['nome']} ({_d['tel']})" for _d in appscript_falhas)
+                            + "\n\n💡 Essas clientes precisam de contato manual — "
+                              "elas nao vao receber lembrete e a resposta delas sera ignorada."
+                        )
 
                     status_texto.text("✅ Loop de envios concluído. Verificando contextos no Supabase...")
 
