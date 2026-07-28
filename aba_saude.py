@@ -195,7 +195,7 @@ def _card_bia(dados: dict, semaforo: str):
             ("🚨 Aguardando contatos 48h+",   "aguardando_contatos_48h"),
             ("🚨 Aguardando privacidade 48h+", "aguardando_privacidade_48h"),
             ("🚨 Finalizado sem voucher",     "finalizado_sem_voucher"),
-            ("🚨 Duplicatas telefone ativo",  "duplicatas_telefone_ativo"),
+            ("🚨 Indicados duplicados (bug dedup)", "indicados_duplicados"),
         ])
 
         # Erros sistema 7d
