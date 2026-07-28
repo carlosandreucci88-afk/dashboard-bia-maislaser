@@ -275,31 +275,31 @@ _ROTULO = {
 
 
 def _painel_progresso(titulo="📡 Disparos em andamento"):
-    """Mostra disparos abertos com contagem real da fila. Retorna quantos achou."""
-    abertos = _get(
-        "disparos_historico?status=in.(fila,em_andamento,interrompido)"
-        "&select=id,unidade,arquivo,data_sessoes,total_clientes,whatsapp_ok,"
-        "erros_envio,status,criado_em,heartbeat_em&order=id.desc&limit=10"
-    )
-    if not abertos:
+    """
+    Mostra disparos abertos com contagem real da fila. Retorna quantos achou.
+
+    Usa a RPC fila_painel() em vez de consultar disparos_historico direto.
+    Motivo: filtrar por status IN ('fila','em_andamento','interrompido') no
+    PostgREST trazia TODO disparo síncrono que o watchdog matou semanas atrás
+    (9 registros de 14 a 17/07). Eles não têm linha em disparos_fila_clientes
+    e nunca vão andar — a RPC faz JOIN com a fila, então ficam de fora.
+
+    A RPC também traz as contagens agregadas: antes era 1 query pro histórico
+    + 1 por disparo. Agora é uma chamada só.
+    """
+    ok, abertos, _err = _rpc("fila_painel", {"p_limite": 10})
+    if not ok or not abertos:
         return 0
 
     st.markdown(f"### {titulo}")
     for d in abertos:
         did = d["id"]
         icone, texto = _ROTULO.get(d["status"], ("•", d["status"]))
-        total = d.get("total_clientes") or 0
-
-        contagens = _get(
-            f"disparos_fila_clientes?disparo_id=eq.{did}&select=status"
-        ) or []
-        por_status = {}
-        for c in contagens:
-            por_status[c["status"]] = por_status.get(c["status"], 0) + 1
-        enviados = por_status.get("enviado", 0)
-        erros = por_status.get("erro", 0)
-        pendentes = por_status.get("pendente", 0)
-        processando = por_status.get("processando", 0)
+        total = d.get("total") or 0
+        enviados = d.get("enviados", 0)
+        erros = d.get("erros", 0)
+        pendentes = d.get("pendentes", 0)
+        processando = d.get("processando", 0)
         feitos = enviados + erros
 
         st.markdown(
@@ -313,15 +313,14 @@ def _painel_progresso(titulo="📡 Disparos em andamento"):
             f"⏳ {pendentes} na fila · 🔄 {processando} em voo · de {total}"
         )
 
-        if pendentes == 0 and processando == 0 and d["status"] != "concluido":
-            st.info(
-                "Fila zerada. O worker fecha o disparo na próxima passada "
-                "(até 1min)."
-            )
-        if d["status"] == "interrompido":
+        # Um estado, uma mensagem. Antes as duas condições disparavam juntas e
+        # a tela dizia "fila zerada" e "ainda há fila pendente" ao mesmo tempo.
+        if pendentes == 0 and processando == 0:
+            st.info("Fila zerada. O worker fecha o disparo na próxima passada.")
+        elif d["status"] == "interrompido":
             st.warning(
                 "Marcado como interrompido, mas ainda há fila pendente — "
-                "o worker retoma automaticamente. Nenhuma ação necessária."
+                "o worker retoma sozinho. Nenhuma ação necessária."
             )
 
         # Erros detalhados, só se houver
