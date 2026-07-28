@@ -85,6 +85,7 @@ import requests
 import json
 import time
 import re
+import threading
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
@@ -838,6 +839,57 @@ def render_aba_disparador():
                             ultimo_batch_atualizado = i + 1
 
                     # ═════════════════════════════════════════════════════════════
+                    # 🆕 v6.22 (28/07/2026) — FIX A: flush final do contador
+                    # ═════════════════════════════════════════════════════════════
+                    # Bug: se total_linhas % UPDATE_BATCH_SIZE != 0, os últimos N
+                    # clientes (resto da divisão) não entram no último batch. O
+                    # banco fica com whatsapp_ok < total_clientes e o watchdog
+                    # SQL calcula "faltantes = total - whatsapp_ok" reportando
+                    # falso positivo (ex: 34 clientes, batch=3 → whatsapp_ok fica
+                    # em 33 mesmo tendo processado o 34º).
+                    # Fix: força 1 update final após o loop, se o contador ainda
+                    # não bate com total_linhas. Idempotente (guard evita rodar 2x).
+                    if total_linhas > 0 and ultimo_batch_atualizado < total_linhas:
+                        _atualizar_progresso_parcial(
+                            registro_id=registro_id,
+                            sucessos=sucessos,
+                            erros=erros,
+                            ultimo_cliente=f"loop finalizado ({sucessos} ok, {erros} erro)",
+                        )
+                        ultimo_batch_atualizado = total_linhas
+
+                    # ═════════════════════════════════════════════════════════════
+                    # 🆕 v6.22 (28/07/2026) — FIX B: heartbeat guard em thread
+                    # ═════════════════════════════════════════════════════════════
+                    # Bug: as fases pós-loop (wait threads timeout 60s × N clientes
+                    # + retry síncrono + verificação final GET Supabase) podem
+                    # somar >3min sem atualizar heartbeat_em. Watchdog vê como
+                    # "travado" e mata o registro, mesmo tendo processado todos
+                    # os clientes com sucesso.
+                    # Fix: thread daemon separada que atualiza heartbeat_em a
+                    # cada 30s enquanto essas fases rodam. Para logo antes do
+                    # _atualizar_registro_historico (que faz o UPDATE final com
+                    # status='concluido').
+                    _hb_stop_evt = threading.Event()
+                    def _hb_guard_worker():
+                        while not _hb_stop_evt.wait(30):
+                            try:
+                                _atualizar_progresso_parcial(
+                                    registro_id=registro_id,
+                                    sucessos=sucessos,
+                                    erros=erros,
+                                    ultimo_cliente="pós-loop: threads/verificação em curso",
+                                )
+                            except Exception as _e_hb:
+                                # Log silencioso — não polui UI, watchdog vai
+                                # detectar via ausência de heartbeat mesmo assim.
+                                print(f"[v6.22 heartbeat_guard] falhou: {_e_hb}")
+                    _hb_guard_thread = threading.Thread(
+                        target=_hb_guard_worker, daemon=True
+                    )
+                    _hb_guard_thread.start()
+
+                    # ═════════════════════════════════════════════════════════════
                     # 🆕 v6.21 — WAIT THREADS EM VOO (fire-and-forget cleanup)
                     # ═════════════════════════════════════════════════════════════
                     # Loop terminou. Threads Supabase + Apps Script podem ainda estar
@@ -940,6 +992,11 @@ def render_aba_disparador():
                             )
 
                     status_texto.text("✅ Processamento concluído!")
+
+                    # 🆕 v6.22 — para heartbeat guard antes do UPDATE final
+                    # (_atualizar_registro_historico grava status='concluido' + heartbeat)
+                    _hb_stop_evt.set()
+                    _hb_guard_thread.join(timeout=2)
 
                     if registro_id:
                         ok = _atualizar_registro_historico(
