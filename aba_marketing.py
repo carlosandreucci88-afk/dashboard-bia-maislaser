@@ -723,8 +723,19 @@ def _executar_criacao(sb, nome, template_nome, template_lang, telefone_alerta,
             del st.session_state[k]
 
     if iniciar_apos:
-        st.markdown("---")
-        disparar_campanha_loop(sb, campanha_id, int(ritmo))
+        # v1.4 (07/08/2026): DISPARO ASSINCRONO
+        # Backend (cron dispararProximoLote do Apps Script) processa a fila.
+        # Streamlit nao bloqueia mais - usuario pode fechar aba sem perda.
+        st.success(
+            "🚀 Campanha em execucao! Backend esta enviando as mensagens em segundo plano. "
+            "Voce pode fechar esta aba sem problemas. "
+            "Acompanhe o progresso na aba **Ativas**."
+        )
+        st.info(
+            "Ritmo: ~60 msg/min (limite do cron). Para " + str(analise["total_validos"]) +
+            " contatos, previsao de conclusao: ~" +
+            str(max(1, round(analise["total_validos"] / 60))) + " minuto(s)."
+        )
 
 
 # ============================================================================
@@ -803,11 +814,15 @@ def _renderizar_acoes(sb, row):
 
 
 def _acao_iniciar(sb, camp_id, ritmo):
+    # v1.4 (07/08/2026): assincrono - so muda status, backend cron processa a fila
     sb.table("mkt_campanhas").update({
         "status": "RODANDO",
         "iniciado_em": datetime.now(TZ_SP).isoformat()
     }).eq("id", camp_id).execute()
-    disparar_campanha_loop(sb, camp_id, ritmo)
+    st.success(
+        "🚀 Campanha #" + str(camp_id) + " iniciada! Backend esta enviando em segundo plano. "
+        "Voce pode fechar esta aba."
+    )
 
 
 # ============================================================================
