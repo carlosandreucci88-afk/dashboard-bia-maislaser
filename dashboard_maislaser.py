@@ -2,7 +2,7 @@
 ==============================================================================
 ROBÔ MARKETING — Aba "📤 Disparos MKT"
 ==============================================================================
-v1.1 (06/08/2026) — aviso janela 24h no telefone_alerta
+v1.1.1 (06/08/2026) — hotfix defensive st.secrets
 
 Fluxo:
     1. Sub-aba 📤 Nova campanha:
@@ -704,7 +704,10 @@ def _sub_aba_nova_campanha():
             help="Recebe wa.me com link quando cliente responder."
         )
         # v1.1: Aviso sobre janela 24h (Meta Cloud API)
-        _numero_mkt = st.secrets.get("NUMERO_MKT_DISPLAY", "XXXXXXXXXXX")
+        try:
+            _numero_mkt = st.secrets["NUMERO_MKT_DISPLAY"]
+        except Exception:
+            _numero_mkt = "XXXXXXXXXXX"
         st.caption(
             f"⚠️ **Antes de disparar:** abra a janela de 24h mandando uma mensagem "
             f"do WhatsApp da recepção pro número MKT **{_numero_mkt}**. "
@@ -851,8 +854,11 @@ def _executar_criacao(nome, template_nome, template_lang, telefone_alerta,
 
     st.success(f"✅ Campanha criada! ID = **{campanha_id}**")
 
-    # v1.1: Lembrete critico sobre janela 24h
-    _numero_mkt = st.secrets.get("NUMERO_MKT_DISPLAY", "XXXXXXXXXXX")
+    # v1.1.1: Lembrete critico sobre janela 24h (defensive)
+    try:
+        _numero_mkt = st.secrets["NUMERO_MKT_DISPLAY"]
+    except Exception:
+        _numero_mkt = "XXXXXXXXXXX"
     st.info(
         f"🔔 **Lembrete:** a recepção precisa ter mandado uma mensagem "
         f"pro número MKT (**{_numero_mkt}**) nas últimas 24h pra receber "
