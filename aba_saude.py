@@ -29,6 +29,7 @@ Cache: 60s (@st.cache_data). Botão "Atualizar agora" limpa o cache.
 """
 
 import streamlit as st
+from aba_saude_urlfetch import render_cota_urlfetch  # v1.0 (07/08/2026)
 from supabase import create_client
 from datetime import datetime, timezone
 import pandas as pd
@@ -195,7 +196,7 @@ def _card_bia(dados: dict, semaforo: str):
             ("🚨 Aguardando contatos 48h+",   "aguardando_contatos_48h"),
             ("🚨 Aguardando privacidade 48h+", "aguardando_privacidade_48h"),
             ("🚨 Finalizado sem voucher",     "finalizado_sem_voucher"),
-            ("🚨 Indicados duplicados (bug dedup)", "indicados_duplicados"),
+            ("🚨 Duplicatas telefone ativo",  "duplicatas_telefone_ativo"),
         ])
 
         # Erros sistema 7d
@@ -437,3 +438,7 @@ def render():
             pos.get("diagnostico", {}) or {},
             pos.get("semaforo", "verde"),
         )
+
+    # v1.0 (07/08/2026): card de cota UrlFetch dos 5 robos
+    st.divider()
+    render_cota_urlfetch()
