@@ -69,6 +69,8 @@ from aba_pos_disparar import render_aba_pos_disparar
 from aba_pos_historico_monitor import render_aba_pos_historico, render_aba_pos_monitor
 from aba_pos_ranking import render_aba_pos_ranking
 from aba_pos_config import render_aba_pos_config
+
+from aba_marketing import render_aba_marketing  # v1.2 (07/08)
 # v6.9: aba de saúde consolidada (sidebar + página completa)
 from aba_saude import render as render_saude, render_sidebar as render_sidebar_saude
 
@@ -95,6 +97,7 @@ ROBOS = {
     'confirmacao': '📅 Robô Confirmação Agenda',
     'zapi':        '🎁 Robô Z-API Indicações',
     'pos':         '🚀 Robô Pós-atendimento',
+    'mkt':         '📤 Disparos MKT',
 }
 
 
@@ -621,6 +624,9 @@ def main():
 
         with tab_pos_cfg:
             render_aba_pos_config()
+
+    elif robo == 'mkt':
+        render_aba_marketing()
 
     elif robo == 'saude':
         # v6.9: página completa de saúde consolidada (RPC saude_consolidada)
