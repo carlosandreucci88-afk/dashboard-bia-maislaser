@@ -1,7 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 Robo Marketing - Aba Disparos MKT
-v1.2 (07/08/2026)
+v1.5 (07/08/2026)
+
+v1.5: UX FIX — troca st.tabs por st.radio horizontal com estado persistente
+      via session_state (st.tabs no Streamlit 1.35 nao guarda tab selecionada
+      entre reruns e voltava sempre pra 'Nova campanha'). Adiciona tambem
+      botao '🔄 Atualizar' local em cada card da aba Ativas pra ver progresso
+      evoluindo sem sair da aba.
+v1.4: DISPARO ASSINCRONO — backend cron dispararProximoLote processa a fila;
+      UI nao bloqueia mais e pode ser fechada sem perda.
 
 Streamlit envia direto pra Meta Cloud API (padrao aba_pos_disparar).
 Cron do Apps Script fica como backup automatico.
@@ -812,6 +820,11 @@ def _renderizar_acoes(sb, row):
             }).eq("id", camp_id).execute()
             st.rerun()
 
+    # v1.5: botao local pra refresh sem sair da aba Ativas
+    # (session_state[mkt_aba_ativa] preserva a aba no rerun)
+    if st.button("🔄 Atualizar", key="refresh_" + str(camp_id), use_container_width=True):
+        st.rerun()
+
 
 def _acao_iniciar(sb, camp_id, ritmo):
     # v1.4 (07/08/2026): assincrono - so muda status, backend cron processa a fila
@@ -934,21 +947,23 @@ def render_aba_marketing():
     if not meta_ok:
         st.warning(meta_msg + " - Voce pode criar campanhas em RASCUNHO.")
 
-    tab_nova, tab_ativas, tab_relatorio, tab_optouts = st.tabs([
-        "Nova campanha",
-        "Ativas",
-        "Relatorio",
-        "Opt-outs",
-    ])
+    # v1.5: st.radio horizontal com key persistente em session_state
+    # substitui st.tabs (1.35 nao mantem tab selecionada entre reruns).
+    aba = st.radio(
+        label="Aba do robô MKT",
+        options=["Nova campanha", "Ativas", "Relatorio", "Opt-outs"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="mkt_aba_ativa",
+    )
 
-    with tab_nova:
+    st.markdown("---")
+
+    if aba == "Nova campanha":
         _sub_aba_nova_campanha(sb, meta_ok, meta_msg)
-
-    with tab_ativas:
+    elif aba == "Ativas":
         _sub_aba_ativas(sb)
-
-    with tab_relatorio:
+    elif aba == "Relatorio":
         _sub_aba_relatorio(sb)
-
-    with tab_optouts:
+    elif aba == "Opt-outs":
         _sub_aba_opt_outs(sb)
