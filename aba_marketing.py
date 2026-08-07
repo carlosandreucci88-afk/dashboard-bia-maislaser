@@ -1,8 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 Robo Marketing - Aba Disparos MKT
-v1.5 (07/08/2026)
+v1.6 (07/08/2026)
 
+v1.6: FIX BUG-04 — dedup 60d nao pegava disparos recentes. Fix duplo:
+      1) filtro de status agora inclui FILA + ENVIADO
+         (antes so ENTREGUE/LIDO/RESPONDIDO)
+      2) filtro de tempo migrado de disparado_em (NULLABLE, nulo em FILA)
+         pra fila_em (NOT NULL, sempre existe desde criacao do disparo).
+      Cenario reproduzido: dispara lista, sobe mesma lista antes do Meta
+      confirmar delivered -> dedup mostrava 0 e disparo era duplicado.
+      Mantém ERRO fora do filtro (permite retry manual).
 v1.5: UX FIX — troca st.tabs por st.radio horizontal com estado persistente
       via session_state (st.tabs no Streamlit 1.35 nao guarda tab selecionada
       entre reruns e voltava sempre pra 'Nova campanha'). Adiciona tambem
@@ -236,10 +244,17 @@ def _consultar_dedup_60d(sb, telefones):
     limite = (datetime.now(TZ_SP) - timedelta(days=DEDUP_DIAS)).isoformat()
     for batch in _chunks(telefones, 100):
         try:
+            # v1.6: fix duplo do dedup:
+            # 1) filtro de status agora inclui FILA + ENVIADO (antes so ENTREGUE/LIDO/RESPONDIDO)
+            # 2) filtro de tempo migrado de disparado_em (NULLABLE, nulo em FILA)
+            #    pra fila_em (NOT NULL, sempre existe desde criacao do disparo).
+            # Sem esse fix, disparo em FILA era descartado silenciosamente
+            # (WHERE disparado_em IS NULL sempre falso). Mesma lista podia
+            # ser disparada 2x em poucos minutos gerando 2 templates pro cliente.
             r = (sb.table("mkt_disparos")
                    .select("telefone")
-                   .in_("status", ["ENTREGUE", "LIDO", "RESPONDIDO"])
-                   .gte("disparado_em", limite)
+                   .in_("status", ["FILA", "ENVIADO", "ENTREGUE", "LIDO", "RESPONDIDO"])
+                   .gte("fila_em", limite)
                    .in_("telefone", batch)
                    .execute())
             for row in (r.data or []):
