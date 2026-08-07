@@ -38,6 +38,12 @@ DEDUP_DIAS             = 60
 BATCH_INSERT_SIZE      = 500
 UNIDADES               = ["mogi", "suzano"]
 
+# v1.3 (07/08/2026): Templates aprovados pela Meta (nome, descricao)
+TEMPLATES_DISPONIVEIS = [
+    ("confirmacaosessao_80",   "confirmacaosessao_80 (sessao gratis + areas)"),
+    ("confirmacaosessao_comb", "confirmacaosessao_comb (combos com 80%)"),
+]
+
 STATUS_CAMP = {
     "RASCUNHO":   "Rascunho",
     "PENDENTE":   "Pendente",
@@ -564,9 +570,21 @@ def _sub_aba_nova_campanha(sb, meta_ok, meta_msg):
         nome_campanha = st.text_input("Nome da campanha", placeholder="Promo agosto Suzano")
         unidade = st.selectbox("Unidade", options=UNIDADES,
                                 format_func=lambda u: "Mogi" if u == "mogi" else "Suzano")
-        template_nome = st.text_input("Nome do template Meta", placeholder="mkt_isca_ativos_v1")
+        # v1.3: template agora e selectbox (2 templates aprovados)
+        template_idx = st.selectbox(
+            "Template Meta",
+            options=list(range(len(TEMPLATES_DISPONIVEIS))),
+            format_func=lambda i: TEMPLATES_DISPONIVEIS[i][1]
+        )
+        template_nome = TEMPLATES_DISPONIVEIS[template_idx][0]
 
     with col2:
+        # v1.3: Nome da atendente ACIMA do telefone recepcao (vira {{2}} no template)
+        nome_atendente = st.text_input(
+            "Nome da atendente",
+            placeholder="Rebeca",
+            help="Aparece no {{2}} do template, no follow-up e nos alertas pra recepcao."
+        )
         telefone_alerta = st.text_input("Telefone recepcao (alerta)", placeholder="(11) 99999-9999")
         numero_mkt = _numero_mkt_display()
         st.caption(
@@ -643,16 +661,20 @@ def _sub_aba_nova_campanha(sb, meta_ok, meta_msg):
         if criar_only or criar_e_disparar:
             _executar_criacao(sb, nome_campanha, template_nome, template_lang,
                               telefone_alerta, unidade, ritmo, analise,
-                              criar_e_disparar)
+                              criar_e_disparar, nome_atendente)
 
 
 def _executar_criacao(sb, nome, template_nome, template_lang, telefone_alerta,
-                       unidade, ritmo, analise, iniciar_apos):
+                       unidade, ritmo, analise, iniciar_apos, nome_atendente=None):
     if not nome:
         st.error("Nome da campanha obrigatorio.")
         return
     if not template_nome:
         st.error("Nome do template obrigatorio.")
+        return
+    # v1.3: nome_atendente obrigatorio
+    if not nome_atendente or not str(nome_atendente).strip():
+        st.error("Nome da atendente obrigatorio.")
         return
     tel_alerta_norm = normalizar_telefone(telefone_alerta)
     if not tel_alerta_norm or not telefone_valido(tel_alerta_norm):
@@ -664,6 +686,7 @@ def _executar_criacao(sb, nome, template_nome, template_lang, telefone_alerta,
         "template_nome":       template_nome,
         "template_lang":       template_lang or TEMPLATE_LANG_DEFAULT,
         "telefone_alerta":     tel_alerta_norm,
+        "nome_atendente":      str(nome_atendente).strip()[:60],
         "unidade":             unidade,
         "ritmo_segundos":      int(ritmo),
         "status":              "RODANDO" if iniciar_apos else "RASCUNHO",
