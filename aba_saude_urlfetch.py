@@ -1,11 +1,25 @@
 # -*- coding: utf-8 -*-
 """
 Card de Cota UrlFetch - 5 robos
-v1.0 (07/08/2026)
+v1.1 (10/08/2026)
+
+v1.1: FIX cirurgico pos-migracao Google Workspace Business Starter:
+      - LIMITE_DIA_DEFAULT: 20000 -> 100000 (quota Workspace, 5x mais)
+      - Total sistema: agora usa a quota compartilhada correta (100k
+        por conta Google, nao a soma dos limites de cada script).
+        Antes: total_limite = sum(cada_robo["limite_dia"]) -> falso 500k
+        Agora: total_limite = LIMITE_DIA_DEFAULT (100k, compartilhado)
+      - Cada barra: sempre usa LIMITE_DIA_DEFAULT como denominador,
+        ignorando o "limite_dia" retornado pelo robo (que pode estar
+        desatualizado com 20000 no ScriptProperty).
+      - PCT recalculado localmente em vez de confiar no que vem do robo.
+      - Legenda atualizada: "Workspace Business Starter: 100k/dia,
+        reseta 24h apos 1o fetch" (Google nao reseta a meia-noite).
+v1.0: Versao inicial (07/08/2026) - assumia Gmail free 20k por script.
 
 Consulta 5 endpoints Apps Script (Agenda, Bia, IeG, Pos, MKT) e mostra
-consumo diario de UrlFetch. Cotas do Google Workspace Free: 20.000/dia
-por script.
+consumo diario de UrlFetch. Cotas do Google Workspace: 100.000/dia
+compartilhado entre todos os scripts da mesma conta Google.
 
 Config obrigatoria em .streamlit/secrets.toml:
 
@@ -47,7 +61,7 @@ ROBOS_CONFIG = [
     {"nome": "MKT",        "secret_url": "mkt_url",    "secret_token": "mkt_token",    "param": "action"},
 ]
 
-LIMITE_DIA_DEFAULT = 20000
+LIMITE_DIA_DEFAULT = 100000  # v1.1: Workspace Business Starter (era 20000 no Gmail free)
 
 
 # ============================================================================
@@ -174,9 +188,13 @@ def render_cota_urlfetch():
     with st.spinner("Consultando os 5 robos..."):
         resultados = _fetch_all_paralelo()
 
-    # Total
+    # v1.1: Total sistema usa a quota compartilhada da conta Google (100k),
+    # nao a soma dos limites individuais (que dava falso 500k).
+    # Explicacao: quota UrlFetch e POR USER Google, nao POR SCRIPT.
+    # Como os 5 scripts estao sob a mesma conta carlos@franquiasmaislaser.com.br,
+    # todos compartilham o mesmo teto de 100000 fetches/dia.
     total_hoje = sum(r["urlfetch_hoje"] for r in resultados if r["ok"])
-    total_limite = sum(r["limite_dia"] for r in resultados if r["ok"]) or LIMITE_DIA_DEFAULT
+    total_limite = LIMITE_DIA_DEFAULT
     pct_total = int((total_hoje / total_limite) * 100) if total_limite else 0
     total_emoji = _emoji_semaforo(pct_total)
 
@@ -196,9 +214,12 @@ def render_cota_urlfetch():
             st.error("**" + nome + "** — erro: " + str(r.get("erro") or "desconhecido"))
             continue
 
-        pct = r["pct"]
+        # v1.1: usa quota compartilhada (100k) como denominador em vez do
+        # r["limite_dia"] que pode estar desatualizado (20k) no ScriptProperty.
+        # PCT recalculado localmente pra evitar inconsistencia com o total.
         hoje = r["urlfetch_hoje"]
-        limite = r["limite_dia"]
+        limite = LIMITE_DIA_DEFAULT
+        pct = int((hoje / limite) * 100) if limite else 0
         emoji = _emoji_semaforo(pct)
 
         col_nome, col_bar, col_num = st.columns([1, 3, 1])
@@ -215,8 +236,14 @@ def render_cota_urlfetch():
         with col_num:
             st.markdown(str(hoje) + " / " + str(limite))
 
-    # Aviso quando algum >= 85%
-    criticos = [r for r in resultados if r["ok"] and r["pct"] >= 85]
+    # v1.1: Aviso quando algum >= 85% recalculado com limite compartilhado
+    criticos = []
+    for r in resultados:
+        if not r["ok"]:
+            continue
+        pct_local = int((r["urlfetch_hoje"] / LIMITE_DIA_DEFAULT) * 100) if LIMITE_DIA_DEFAULT else 0
+        if pct_local >= 85:
+            criticos.append(r)
     if criticos:
         nomes = ", ".join(c["nome"] for c in criticos)
         st.error(
@@ -225,6 +252,9 @@ def render_cota_urlfetch():
         )
 
     st.caption(
-        "Cota Google Workspace Free: 20.000 fetches/dia por script. "
-        "Reseta 00:00 SP. Verde <60% | Amarelo 60-85% | Vermelho >85%."
+        "Cota Google Workspace Business Starter: 100.000 fetches/dia "
+        "compartilhado entre os 5 scripts (mesma conta Google). "
+        "Reseta 24h apos 1o fetch do ciclo anterior "
+        "(nao a meia-noite). "
+        "Verde <60% | Amarelo 60-85% | Vermelho >85%."
     )
