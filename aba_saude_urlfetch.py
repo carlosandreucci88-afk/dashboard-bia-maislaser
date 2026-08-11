@@ -1,8 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 Card de Cota UrlFetch - 5 robos
-v1.1 (10/08/2026)
+v1.2 (11/08/2026)
 
+v1.2: FIX timeout curto que causava erro visual rotativo nos 5 robos:
+      - Timeout individual: 5s -> 15s (Apps Script cold start / fila
+        de execucao serializada pode passar de 5s facil, causando
+        HTTPSConnectionPool Read timed out no card).
+      - Timeout total as_completed: 6s -> 18s (coerente com o novo
+        individual + margem de 3s).
+      - Zero mudanca nos robos. Fix 100% no dashboard.
 v1.1: FIX cirurgico pos-migracao Google Workspace Business Starter:
       - LIMITE_DIA_DEFAULT: 20000 -> 100000 (quota Workspace, 5x mais)
       - Total sistema: agora usa a quota compartilhada correta (100k
@@ -81,7 +88,7 @@ def _get_secret(chave):
 def _fetch_uso_robo(config):
     """
     Chama endpoint 'uso' do robo e retorna dict com resultado.
-    Timeout 5s. Retorna dict com erro em caso de falha.
+    Timeout 15s (v1.2). Retorna dict com erro em caso de falha.
     """
     nome = config["nome"]
     url = _get_secret(config["secret_url"])
@@ -100,7 +107,7 @@ def _fetch_uso_robo(config):
 
     try:
         params = {param: "uso", "token": token}
-        r = requests.get(url, params=params, timeout=5, allow_redirects=True)
+        r = requests.get(url, params=params, timeout=15, allow_redirects=True)
         if r.status_code != 200:
             return {
                 "nome": nome,
@@ -140,11 +147,11 @@ def _fetch_uso_robo(config):
 
 
 def _fetch_all_paralelo():
-    """Chama os 5 endpoints em paralelo com timeout total 6s."""
+    """Chama os 5 endpoints em paralelo com timeout total 18s (v1.2)."""
     resultados = []
     with ThreadPoolExecutor(max_workers=5) as ex:
         futures = [ex.submit(_fetch_uso_robo, cfg) for cfg in ROBOS_CONFIG]
-        for f in as_completed(futures, timeout=6):
+        for f in as_completed(futures, timeout=18):
             try:
                 resultados.append(f.result())
             except Exception as e:
