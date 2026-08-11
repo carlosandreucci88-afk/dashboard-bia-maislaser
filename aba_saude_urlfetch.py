@@ -1,8 +1,19 @@
 # -*- coding: utf-8 -*-
 """
 Card de Cota UrlFetch - 5 robos
-v1.2 (11/08/2026)
+v1.3 (11/08/2026)
 
+v1.3: FIX CRITICO — as_completed(timeout=N) levanta TimeoutError que
+      quebra a pagina inteira quando qualquer future demora mais que
+      o timeout total. Bug latente desde v1.0 (era mascarado porque
+      timeout individual 5s < timeout total 6s, entao quase nunca
+      chegava a estourar o total). Com v1.2 (individual 15s, total 18s)
+      ficou vulneravel — se algum robo em cold start passa de 15s,
+      o loop as_completed estoura TimeoutError e a UI quebra.
+      Correcao: envolver o for as_completed em try/except
+      FuturesTimeoutError, marcando as futures pendentes como erro
+      individual e continuando com os resultados parciais.
+      Zero impacto na UX quando tudo funciona.
 v1.2: FIX timeout curto que causava erro visual rotativo nos 5 robos:
       - Timeout individual: 5s -> 15s (Apps Script cold start / fila
         de execucao serializada pode passar de 5s facil, causando
@@ -53,7 +64,7 @@ Estrategia defensiva pra Streamlit 1.35:
 
 import streamlit as st
 import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 
 
 # ============================================================================
@@ -147,16 +158,50 @@ def _fetch_uso_robo(config):
 
 
 def _fetch_all_paralelo():
-    """Chama os 5 endpoints em paralelo com timeout total 18s (v1.2)."""
+    """Chama os 5 endpoints em paralelo com timeout total 18s (v1.2).
+    v1.3: try/except FuturesTimeoutError pra nao quebrar a pagina se
+    o timeout total estourar — futures pendentes viram erro individual."""
     resultados = []
     with ThreadPoolExecutor(max_workers=5) as ex:
-        futures = [ex.submit(_fetch_uso_robo, cfg) for cfg in ROBOS_CONFIG]
-        for f in as_completed(futures, timeout=18):
-            try:
-                resultados.append(f.result())
-            except Exception as e:
-                resultados.append({"nome": "?", "ok": False, "erro": str(e),
-                                    "urlfetch_hoje": 0, "limite_dia": LIMITE_DIA_DEFAULT, "pct": 0})
+        # v1.3: mapear future -> cfg pra saber qual robo em caso de timeout do loop
+        future_to_cfg = {ex.submit(_fetch_uso_robo, cfg): cfg for cfg in ROBOS_CONFIG}
+        futures = list(future_to_cfg.keys())
+        try:
+            for f in as_completed(futures, timeout=18):
+                try:
+                    resultados.append(f.result())
+                except Exception as e:
+                    cfg_erro = future_to_cfg.get(f, {})
+                    resultados.append({
+                        "nome": cfg_erro.get("nome", "?"),
+                        "ok": False,
+                        "erro": str(e)[:100],
+                        "urlfetch_hoje": 0,
+                        "limite_dia": LIMITE_DIA_DEFAULT,
+                        "pct": 0,
+                    })
+        except FuturesTimeoutError:
+            # v1.3: timeout total estourou. Marca as futures que ainda nao completaram
+            # como erro individual e mantem as que ja voltaram.
+            nomes_ja_ok = {r["nome"] for r in resultados}
+            for fut, cfg in future_to_cfg.items():
+                if cfg["nome"] in nomes_ja_ok:
+                    continue
+                if fut.done():
+                    try:
+                        resultados.append(fut.result())
+                    except Exception as e:
+                        resultados.append({
+                            "nome": cfg["nome"], "ok": False,
+                            "erro": str(e)[:100],
+                            "urlfetch_hoje": 0, "limite_dia": LIMITE_DIA_DEFAULT, "pct": 0,
+                        })
+                else:
+                    resultados.append({
+                        "nome": cfg["nome"], "ok": False,
+                        "erro": "timeout global (>18s) - Apps Script cold start?",
+                        "urlfetch_hoje": 0, "limite_dia": LIMITE_DIA_DEFAULT, "pct": 0,
+                    })
     # Preservar ordem original
     ordem = {c["nome"]: i for i, c in enumerate(ROBOS_CONFIG)}
     resultados.sort(key=lambda r: ordem.get(r["nome"], 99))
