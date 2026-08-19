@@ -1,7 +1,21 @@
 # -*- coding: utf-8 -*-
 """
 Robo Marketing - Aba Disparos MKT
-v1.6 (07/08/2026)
+v1.9 (19/08/2026)
+
+v1.9: FEATURE — sistema de WABA ciclavel (Modelo A2 sticky) integrado com
+      Apps Script v1.9.1 e migration SQL do dia.
+      - Dropdown WABA no form nova campanha (PRINCIPAL/SECUNDARIO), com
+        quality rating cacheado 5min ao lado.
+      - Interruptor global persistido em configuracoes.mkt_waba_ativa.
+      - Cada campanha grava mkt_campanhas.waba na criacao (sticky: virar
+        interruptor depois nao afeta campanhas ja criadas).
+      - Ordem de escrita: INSERT campanha PRIMEIRO, UPDATE configuracoes
+        DEPOIS (se INSERT falha, interruptor nem toca).
+      - Badge WABA na aba Ativas + coluna WABA no Relatorio.
+      - Caption "abra janela 24h com {WABA display}" dinamica.
+      - _meta_config_ok simplificado: so checa TOKEN_META (META_PHONE_ID_MKT
+        vira secret legacy — phone_id agora vem da WABA da campanha).
 
 v1.6: FIX BUG-04 — dedup 60d nao pegava disparos recentes. Fix duplo:
       1) filtro de status agora inclui FILA + ENVIADO
@@ -26,8 +40,8 @@ Config obrigatoria em .streamlit/secrets.toml:
     SUPABASE_URL
     SUPABASE_KEY
     TOKEN_META
-    META_PHONE_ID_MKT
-    NUMERO_MKT_DISPLAY (opcional)
+    NUMERO_MKT_DISPLAY (opcional — v1.9 substituido por WABAS_DISPONIVEIS)
+    META_PHONE_ID_MKT (LEGACY — v1.9 obsoleto, pode remover do secrets)
 """
 
 import re
@@ -60,6 +74,15 @@ TEMPLATES_DISPONIVEIS = [
     ("confirmacaosessao_comb", "confirmacaosessao_comb (combos com 80%)"),
 ]
 
+# v1.9 (19/08/2026): WABAs disponiveis (Modelo A2 sticky).
+# Tupla (key, label, phone_id, waba_id). Espelha MKT_WABAS no gs_robo_MKT.txt.
+# Adicionar 3a WABA aqui + no Apps Script + no CHECK constraint SQL.
+WABAS_DISPONIVEIS = [
+    ("principal",  "PRINCIPAL (Robos, 93386-6074)",       "1169585616248862", "2004870373571114"),
+    ("secundario", "SECUNDARIO (Comercial, 92692-0757)",  "1196949620177526", "1389569236042484"),
+]
+WABA_DEFAULT = "principal"
+
 STATUS_CAMP = {
     "RASCUNHO":   "Rascunho",
     "PENDENTE":   "Pendente",
@@ -82,19 +105,16 @@ def _get_sb():
 # CONFIG META
 # ============================================================================
 def _meta_config_ok():
+    # v1.9: check META_PHONE_ID_MKT REMOVIDO. Phone_id agora vem da WABA da
+    # campanha (mkt_campanhas.waba resolvido pelo Apps Script). Streamlit so
+    # precisa do TOKEN_META (compartilhado entre WABAs porque o system user
+    # MAISLASER ROBOS tem acesso total as duas).
     try:
         token = st.secrets.get("TOKEN_META", "") if hasattr(st.secrets, "get") else st.secrets["TOKEN_META"]
         if not token:
             return False, "TOKEN_META nao configurado em secrets.toml"
     except Exception:
         return False, "TOKEN_META nao configurado em secrets.toml"
-
-    try:
-        phone = st.secrets.get("META_PHONE_ID_MKT", "") if hasattr(st.secrets, "get") else st.secrets["META_PHONE_ID_MKT"]
-        if not phone:
-            return False, "META_PHONE_ID_MKT nao configurado (preencha quando Meta aprovar o numero)"
-    except Exception:
-        return False, "META_PHONE_ID_MKT nao configurado (preencha quando Meta aprovar o numero)"
 
     return True, ""
 
@@ -104,6 +124,88 @@ def _numero_mkt_display():
         return st.secrets["NUMERO_MKT_DISPLAY"]
     except Exception:
         return "XXXXXXXXXXX"
+
+
+# ============================================================================
+# v1.9: HELPERS WABA (WABA ciclavel - Modelo A2 sticky)
+# ============================================================================
+def _waba_config(waba_key):
+    """Retorna a tupla (key, label, phone_id, waba_id) da WABA. Fallback pro default."""
+    for entry in WABAS_DISPONIVEIS:
+        if entry[0] == waba_key:
+            return entry
+    # fallback: primeira entry (default)
+    for entry in WABAS_DISPONIVEIS:
+        if entry[0] == WABA_DEFAULT:
+            return entry
+    return WABAS_DISPONIVEIS[0]
+
+
+def _ler_waba_ativa(sb):
+    """Le mkt_waba_ativa de configuracoes (linha id=1). Fallback WABA_DEFAULT se erro."""
+    try:
+        r = sb.table("configuracoes").select("mkt_waba_ativa").eq("id", 1).execute()
+        if r.data and r.data[0].get("mkt_waba_ativa"):
+            v = r.data[0]["mkt_waba_ativa"]
+            # valida se e um valor conhecido
+            for entry in WABAS_DISPONIVEIS:
+                if entry[0] == v:
+                    return v
+    except Exception:
+        pass
+    return WABA_DEFAULT
+
+
+def _gravar_waba_ativa(sb, waba_key):
+    """Atualiza configuracoes.mkt_waba_ativa. Retorna True/False.
+    Chamado APOS criar campanha com sucesso (ordem: campanha primeiro, config depois)."""
+    if not any(entry[0] == waba_key for entry in WABAS_DISPONIVEIS):
+        return False
+    try:
+        sb.table("configuracoes").update({"mkt_waba_ativa": waba_key}).eq("id", 1).execute()
+        return True
+    except Exception as e:
+        st.warning("Interruptor global WABA nao atualizado: " + str(e) + " (campanha ja foi criada com WABA correta)")
+        return False
+
+
+def _get_quality_rating_cached(waba_key, phone_id, ttl_seconds=300):
+    """Busca quality_rating do Meta com cache 5min via session_state.
+    Retorna 'GREEN'/'YELLOW'/'RED'/'UNKNOWN'/'ERR'.
+    Custa 1 chamada Meta API por WABA por 5min."""
+    cache_key = "mkt_quality_" + str(waba_key)
+    now = time.time()
+    cached = st.session_state.get(cache_key)
+    if cached and (now - cached.get("ts", 0)) < ttl_seconds:
+        return cached.get("value", "UNKNOWN")
+
+    try:
+        token = st.secrets["TOKEN_META"]
+        url = "https://graph.facebook.com/" + META_API_VERSION + "/" + str(phone_id) + "?fields=quality_rating"
+        r = requests.get(url,
+                         headers={"Authorization": "Bearer " + token},
+                         timeout=8)
+        if r.status_code == 200:
+            qr = r.json().get("quality_rating") or "UNKNOWN"
+        else:
+            qr = "ERR"
+    except Exception:
+        qr = "ERR"
+
+    st.session_state[cache_key] = {"value": qr, "ts": now}
+    return qr
+
+
+def _quality_emoji(qr):
+    """Emoji do quality rating pra dropdown."""
+    m = {
+        "GREEN":   "🟢",
+        "YELLOW":  "🟡",
+        "RED":     "🔴",
+        "UNKNOWN": "⚪",
+        "ERR":     "❓",
+    }
+    return m.get(qr, "⚪")
 
 
 # ============================================================================
@@ -400,12 +502,19 @@ def criar_campanha(sb, dados_campanha, disparos_prep):
 # ============================================================================
 # META API (envio direto)
 # ============================================================================
+# ⚠️ DEAD CODE desde v1.4 — disparo virou 100% assincrono via cron Apps Script.
+# Mantido pra referencia historica. Se um dia reativar (fluxo sincrono),
+# atualizar pra usar WABA da campanha em vez de META_PHONE_ID_MKT do secret.
 def enviar_template_meta(telefone_e164, template_nome, template_lang, nome_cliente):
     ok, msg = _meta_config_ok()
     if not ok:
         return False, "", msg
 
-    phone_id = st.secrets["META_PHONE_ID_MKT"]
+    # v1.9: guard defensivo — se secret nao existe mais, nao crasha
+    try:
+        phone_id = st.secrets["META_PHONE_ID_MKT"]
+    except Exception:
+        return False, "", "META_PHONE_ID_MKT nao esta em secrets.toml (v1.9 legacy). Use fluxo assincrono via cron."
     token = st.secrets["TOKEN_META"]
     url = "https://graph.facebook.com/" + META_API_VERSION + "/" + phone_id + "/messages"
 
@@ -587,6 +696,16 @@ def _sub_aba_nova_campanha(sb, meta_ok, meta_msg):
         st.error("Meta ainda nao configurado: " + meta_msg)
         st.info("Voce pode criar campanha em RASCUNHO agora e disparar depois.")
 
+    # v1.9: le WABA persistida em configuracoes (interruptor global). Pre-seleciona
+    # dropdown na WABA atual. Se usuario mudar dropdown, escreve em configuracoes
+    # SO na hora de criar campanha (ordem: campanha primeiro, config depois).
+    waba_persistida = _ler_waba_ativa(sb)
+    waba_idx_default = 0
+    for i, entry in enumerate(WABAS_DISPONIVEIS):
+        if entry[0] == waba_persistida:
+            waba_idx_default = i
+            break
+
     col1, col2 = st.columns(2)
 
     with col1:
@@ -601,6 +720,24 @@ def _sub_aba_nova_campanha(sb, meta_ok, meta_msg):
         )
         template_nome = TEMPLATES_DISPONIVEIS[template_idx][0]
 
+        # v1.9: dropdown WABA com quality rating cacheado (5min)
+        # Labels calculados em tempo real (custa 1 GET Meta por WABA a cada 5min).
+        waba_labels = []
+        for key, label, phone_id, waba_id in WABAS_DISPONIVEIS:
+            qr = _get_quality_rating_cached(key, phone_id)
+            waba_labels.append("📱 " + label + " — " + _quality_emoji(qr) + " " + qr)
+
+        waba_selecionada_idx = st.selectbox(
+            "WhatsApp de disparo (WABA)",
+            options=list(range(len(WABAS_DISPONIVEIS))),
+            index=waba_idx_default,
+            format_func=lambda i: waba_labels[i],
+            key="mkt_waba_selector",
+            help="Qual numero WhatsApp vai disparar esta campanha. WABA fica CONGELADA na criacao — mudar depois nao afeta ela."
+        )
+        waba_escolhida = WABAS_DISPONIVEIS[waba_selecionada_idx][0]
+        waba_display_escolhida = WABAS_DISPONIVEIS[waba_selecionada_idx][1]
+
     with col2:
         # v1.3: Nome da atendente ACIMA do telefone recepcao (vira {{2}} no template)
         nome_atendente = st.text_input(
@@ -609,10 +746,10 @@ def _sub_aba_nova_campanha(sb, meta_ok, meta_msg):
             help="Aparece no {{2}} do template, no follow-up e nos alertas pra recepcao."
         )
         telefone_alerta = st.text_input("Telefone recepcao (alerta)", placeholder="(11) 99999-9999")
-        numero_mkt = _numero_mkt_display()
+        # v1.9: display do numero MKT agora vem do WABA escolhido no dropdown (nao mais do secret)
         st.caption(
             "Antes de disparar: abra a janela de 24h mandando uma mensagem "
-            "do WhatsApp da recepcao pro numero MKT **" + numero_mkt + "**. "
+            "do WhatsApp da recepcao pro numero MKT **" + waba_display_escolhida + "**. "
             "Sem isso, os alertas de resposta nao chegam."
         )
         template_lang = st.text_input("Idioma do template", value="pt_BR")
@@ -684,11 +821,12 @@ def _sub_aba_nova_campanha(sb, meta_ok, meta_msg):
         if criar_only or criar_e_disparar:
             _executar_criacao(sb, nome_campanha, template_nome, template_lang,
                               telefone_alerta, unidade, ritmo, analise,
-                              criar_e_disparar, nome_atendente)
+                              criar_e_disparar, nome_atendente, waba_escolhida)
 
 
 def _executar_criacao(sb, nome, template_nome, template_lang, telefone_alerta,
-                       unidade, ritmo, analise, iniciar_apos, nome_atendente=None):
+                       unidade, ritmo, analise, iniciar_apos, nome_atendente=None,
+                       waba_escolhida=None):
     if not nome:
         st.error("Nome da campanha obrigatorio.")
         return
@@ -702,6 +840,12 @@ def _executar_criacao(sb, nome, template_nome, template_lang, telefone_alerta,
     tel_alerta_norm = normalizar_telefone(telefone_alerta)
     if not tel_alerta_norm or not telefone_valido(tel_alerta_norm):
         st.error("Telefone de alerta invalido.")
+        return
+
+    # v1.9: valida waba_escolhida. Fallback pro default se algo estranho.
+    waba_final = waba_escolhida if waba_escolhida else WABA_DEFAULT
+    if not any(entry[0] == waba_final for entry in WABAS_DISPONIVEIS):
+        st.error("WABA invalida: " + str(waba_final))
         return
 
     dados = {
@@ -722,6 +866,8 @@ def _executar_criacao(sb, nome, template_nome, template_lang, telefone_alerta,
         "total_leads":         analise["total_validos"],
         "criado_por":          "streamlit",
         "iniciado_em":         datetime.now(TZ_SP).isoformat() if iniciar_apos else None,
+        # v1.9: WABA congelada na criacao (sticky A2)
+        "waba":                waba_final,
     }
 
     with st.spinner("Criando campanha..."):
@@ -734,10 +880,18 @@ def _executar_criacao(sb, nome, template_nome, template_lang, telefone_alerta,
 
     st.success("Campanha criada! ID = " + str(campanha_id))
 
-    numero_mkt = _numero_mkt_display()
+    # v1.9: SO APOS sucesso do INSERT campanha, atualiza interruptor global.
+    # Ordem crítica (ver Ajuste 1 do design): se INSERT falha, interruptor nem toca.
+    # _gravar_waba_ativa e best-effort — se falhar, campanha ja foi criada com WABA
+    # correta, so o interruptor global fica desatualizado (warning na UI).
+    _gravar_waba_ativa(sb, waba_final)
+
+    # v1.9: display do numero MKT vem do WABA da campanha (nao mais do secret)
+    waba_cfg = _waba_config(waba_final)
+    numero_mkt_display = waba_cfg[1]
     st.info(
         "Lembrete: a recepcao precisa ter mandado uma mensagem pro numero MKT (**"
-        + numero_mkt + "**) nas ultimas 24h pra receber alertas. Caso contrario, veja as respostas "
+        + numero_mkt_display + "**) nas ultimas 24h pra receber alertas. Caso contrario, veja as respostas "
         "pelo dashboard na aba Ativas."
     )
 
@@ -785,6 +939,11 @@ def _sub_aba_ativas(sb):
                     + ("Mogi" if row["unidade"] == "mogi" else "Suzano")
                     + " | template " + str(row["template_nome"])
                 )
+                # v1.9: badge WABA (Modelo A2 sticky)
+                waba_camp = row.get("waba") or WABA_DEFAULT
+                waba_cfg = _waba_config(waba_camp)
+                waba_badge = "🟦 " + waba_cfg[1] if waba_camp == "principal" else "🟨 " + waba_cfg[1]
+                st.caption("WABA: " + waba_badge)
                 st.caption("Criada: " + _fmt_data(row.get("criado_em")))
 
             with col_metricas:
@@ -881,6 +1040,8 @@ def _sub_aba_relatorio(sb):
             "ID":          row["id"],
             "Nome":        row["nome"],
             "Unidade":     "Mogi" if row["unidade"] == "mogi" else "Suzano",
+            # v1.9: coluna WABA (Modelo A2 sticky)
+            "WABA":        "PRINCIPAL" if (row.get("waba") or WABA_DEFAULT) == "principal" else "SECUNDARIO",
             "Status":      STATUS_CAMP.get(row["status"], row["status"]),
             "Template":    row["template_nome"],
             "Alvo":        tot,
