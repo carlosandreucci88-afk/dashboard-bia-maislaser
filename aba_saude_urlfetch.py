@@ -1,8 +1,17 @@
 # -*- coding: utf-8 -*-
 """
 Card de Cota UrlFetch - 5 robos
-v1.3 (11/08/2026)
+v1.4 (09/09/2026)
 
+v1.4 (09/09/2026): REVERTE o denominador da v1.1. LIMITE_DIA_DEFAULT
+      100000 -> 20000. A v1.1 assumiu "Workspace = 100k/dia"; a doc oficial
+      condiciona esse limite ao patamar de US$ 100 acumulados + 60 dias
+      (D-04, fechado em 09/09 com fonte). Consequencia da v1.1: em 08/09 o
+      sistema consumiu 25.304 fetches e o card mostrou VERDE (25%) — os
+      robos Bia, IeG e Pos ficaram ~16h30 fora do ar sem nenhum alarme.
+      Com 20000 o mesmo dia marca 126% (vermelho) e um dia normal (10.511)
+      marca 52% (amarelo), que e o sinal util: mostra a folga ANTES do
+      disparo. Legenda e docstring corrigidas junto.
 v1.3: FIX CRITICO — as_completed(timeout=N) levanta TimeoutError que
       quebra a pagina inteira quando qualquer future demora mais que
       o timeout total. Bug latente desde v1.0 (era mascarado porque
@@ -36,8 +45,9 @@ v1.1: FIX cirurgico pos-migracao Google Workspace Business Starter:
 v1.0: Versao inicial (07/08/2026) - assumia Gmail free 20k por script.
 
 Consulta 5 endpoints Apps Script (Agenda, Bia, IeG, Pos, MKT) e mostra
-consumo diario de UrlFetch. Cotas do Google Workspace: 100.000/dia
-compartilhado entre todos os scripts da mesma conta Google.
+consumo diario de UrlFetch. Teto EFETIVO da conta: ~20.000/dia
+compartilhado entre todos os scripts da mesma conta Google (Workspace
+abaixo do patamar de US$ 100 acumulados + 60 dias — ver D-04, 09/09).
 
 Config obrigatoria em .streamlit/secrets.toml:
 
@@ -79,7 +89,13 @@ ROBOS_CONFIG = [
     {"nome": "MKT",        "secret_url": "mkt_url",    "secret_token": "mkt_token",    "param": "action"},
 ]
 
-LIMITE_DIA_DEFAULT = 100000  # v1.1: Workspace Business Starter (era 20000 no Gmail free)
+LIMITE_DIA_DEFAULT = 20000  # v1.4: teto EFETIVO da conta (D-04, 09/09).
+# A v1.1 subiu para 100000 assumindo que "Workspace = 100k". Errado: a doc
+# oficial condiciona o limite de Workspace ao patamar de US$ 100 acumulados
+# + 60 dias, que esta conta ainda nao atingiu. Ate atingir, o teto real e
+# 20.000/dia — o mesmo valor que os robos devolvem em limite_dia e que a
+# v1.1 descartou por "desatualizado". Trocar para 100000 SO depois do
+# pagamento + 60 dias.
 
 
 # ============================================================================
@@ -304,7 +320,8 @@ def render_cota_urlfetch():
         )
 
     st.caption(
-        "Cota Google Workspace Business Starter: 100.000 fetches/dia "
+        "Teto EFETIVO da conta: ~20.000 fetches/dia (Workspace abaixo do "
+        "patamar de US$ 100 acumulados + 60 dias — ver D-04), "
         "compartilhado entre os 5 scripts (mesma conta Google). "
         "Reseta 24h apos 1o fetch do ciclo anterior "
         "(nao a meia-noite). "
