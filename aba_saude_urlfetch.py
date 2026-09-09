@@ -256,11 +256,11 @@ def render_cota_urlfetch():
     with st.spinner("Consultando os 5 robos..."):
         resultados = _fetch_all_paralelo()
 
-    # v1.1: Total sistema usa a quota compartilhada da conta Google (100k),
-    # nao a soma dos limites individuais (que dava falso 500k).
+    # O total do sistema usa a cota COMPARTILHADA da conta Google, nao a
+    # soma dos limites individuais (que dava falso 500k na v1.0).
     # Explicacao: quota UrlFetch e POR USER Google, nao POR SCRIPT.
     # Como os 5 scripts estao sob a mesma conta carlos@franquiasmaislaser.com.br,
-    # todos compartilham o mesmo teto de 100000 fetches/dia.
+    # todos compartilham o mesmo teto — hoje LIMITE_DIA_DEFAULT (v1.4: 20.000).
     total_hoje = sum(r["urlfetch_hoje"] for r in resultados if r["ok"])
     total_limite = LIMITE_DIA_DEFAULT
     pct_total = int((total_hoje / total_limite) * 100) if total_limite else 0
@@ -282,9 +282,10 @@ def render_cota_urlfetch():
             st.error("**" + nome + "** — erro: " + str(r.get("erro") or "desconhecido"))
             continue
 
-        # v1.1: usa quota compartilhada (100k) como denominador em vez do
-        # r["limite_dia"] que pode estar desatualizado (20k) no ScriptProperty.
-        # PCT recalculado localmente pra evitar inconsistencia com o total.
+        # Usa a cota compartilhada (LIMITE_DIA_DEFAULT) como denominador em
+        # vez do r["limite_dia"] devolvido pelo robo — os dois coincidem
+        # desde a v1.4. PCT recalculado localmente para evitar
+        # inconsistencia com o total.
         hoje = r["urlfetch_hoje"]
         limite = LIMITE_DIA_DEFAULT
         pct = int((hoje / limite) * 100) if limite else 0
