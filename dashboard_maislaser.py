@@ -69,6 +69,7 @@ from aba_pos_disparar import render_aba_pos_disparar
 from aba_pos_historico_monitor import render_aba_pos_historico, render_aba_pos_monitor
 from aba_pos_ranking import render_aba_pos_ranking
 from aba_pos_config import render_aba_pos_config
+from aba_fidelizacao import render_aba_fid_mogi, render_aba_fid_suzano
 
 from aba_marketing import render_aba_marketing  # v1.2 (07/08)
 # v6.9: aba de saúde consolidada (sidebar + página completa)
@@ -98,6 +99,7 @@ ROBOS = {
     'zapi':        '🎁 Robô Z-API Indicações',
     'pos':         '🚀 Robô Pós-atendimento',
     'mkt':         '📤 Disparos MKT',
+    'fid':         '💚 Robô Fidelização',
 }
 
 
@@ -624,6 +626,16 @@ def main():
 
         with tab_pos_cfg:
             render_aba_pos_config()
+
+    elif robo == 'fid':
+        tab_fid_mogi, tab_fid_suzano = st.tabs([
+            "💚 Fidelização Mogi",
+            "💚 Fidelização Suzano",
+        ])
+        with tab_fid_mogi:
+            render_aba_fid_mogi()
+        with tab_fid_suzano:
+            render_aba_fid_suzano()
 
     elif robo == 'mkt':
         render_aba_marketing()
