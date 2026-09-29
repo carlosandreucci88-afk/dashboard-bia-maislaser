@@ -17,6 +17,8 @@ FID-10 v1 (29/09/2026) - cada aba de unidade ganha 2 sub-abas: "Disparo" (a tela
   sempre, intocada) e "Indicacoes": participantes, indicacoes recebidas por contato,
   FECHOU / NAO FECHOU (manda o template de aviso) e sessoes a agendar. Relatorio
   ganha AVISO_NAO_SAIU e AVISO_NAO_ENTREGUE.
+FID-11 v1 (29/09/2026) - Relatorio ganha CARTAO_EM_TEXTO (a imagem do cartao falhou e o
+  robo mandou o texto no lugar). Nada mais muda.
 
 Fluxo:
   1. Le fid_config da unidade (ativo, telefone_alerta) + modo_manutencao
@@ -58,7 +60,7 @@ META_API         = "v23.0"                                 # a mesma da webhook-
 HORA_INICIO      = 8                                       # espelha o default do Pos
 HORA_FIM         = 19
 DIAS_REINSCRICAO = 60                                      # espelho do fid_criar_lote
-VERSAO_ABA       = "FID-10 v1"
+VERSAO_ABA       = "FID-11 v1"
 TEMPLATE_FECHOU     = "maislaser_fid_indicacao_fechou_v1"      # Ativo · Servicos (29/09)
 TEMPLATE_NAO_FECHOU = "maislaser_fid_indicacao_nao_fechou_v1"  # Ativo · Servicos (29/09)
 
@@ -105,6 +107,9 @@ PENDENCIAS = [
     ("ERRO_NO_DISPARO", "❌ Erro no disparo",
      "NAO_SAIU: não chegou. TALVEZ_SAIU: conferir no WhatsApp Manager antes de "
      "qualquer coisa. Reenvio é caso a caso."),
+    ("CARTAO_EM_TEXTO", "🖼️ Cartão saiu em texto",
+     "A imagem do cartão não saiu e o robô mandou o texto no lugar — a cliente recebeu a "
+     "informação. Se aparecer mais de uma vez, avisar o Carlos (ver Detalhe: etapa e erro)."),
     ("RELOGIO_RELIGADO", "🔧 Consertado sozinho",
      "A pergunta tinha ficado sem programar e a varredura religou. Nada a fazer — é só registro."),
 ]
