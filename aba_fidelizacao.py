@@ -29,6 +29,9 @@ FID-09 v2.2 (29/09/2026) - Relatorio ganha CARTAO_NAO_ENTREGUE (a imagem do cart
 FID-12 v1 (29/09/2026) - Carlos: a tela de Indicacoes "ficou misturada, carregada". Vira
   FILA: em cima so o que tem para fazer, cada linha com o seu botao (sem caixa de
   selecao); secao vazia some; clientes e historico recolhidos embaixo. SO A TELA.
+FID-12 v1.2 (29/09/2026) - Carlos: "nao precisa do resolvido, ja foi consertado sozinho".
+  No Relatorio, o que e SO registro (Consertado sozinho) sai da tabela de erros e do
+  "Resolver um erro" e fica recolhido embaixo. A tabela e o botao sao so de erro de verdade.
 
 Fluxo:
   1. Le fid_config da unidade (ativo, telefone_alerta) + modo_manutencao
@@ -70,7 +73,7 @@ META_API         = "v23.0"                                 # a mesma da webhook-
 HORA_INICIO      = 8                                       # espelha o default do Pos
 HORA_FIM         = 19
 DIAS_REINSCRICAO = 60                                      # espelho do fid_criar_lote
-VERSAO_ABA       = "FID-12 v1"
+VERSAO_ABA       = "FID-12 v1.2"
 TEMPLATE_FECHOU     = "maislaser_fid_indicacao_fechou_v1"      # Ativo · Servicos (29/09)
 TEMPLATE_NAO_FECHOU = "maislaser_fid_indicacao_nao_fechou_v1"  # Ativo · Servicos (29/09)
 
@@ -541,15 +544,20 @@ def render_aba_fid_relatorio():
     m3.metric("❌ Erros de envio", len(reais))
 
     st.markdown("### ❌ Erros de envio")
-    if erros:
-        st.dataframe(pd.DataFrame(_linhas_erros(erros, len(unidades) > 1)),
+    if reais:
+        st.dataframe(pd.DataFrame(_linhas_erros(reais, len(unidades) > 1)),
                      use_container_width=True, hide_index=True)
-        st.caption("\"Consertado sozinho\" é só registro. Um erro sai da lista quando a "
-                   "situação da cliente muda, quando é marcado como resolvido, ou quando "
-                   "passa do período escolhido.")
-        _resolver(erros)
+        st.caption("Um erro sai da lista quando a situação da cliente muda, quando é "
+                   "marcado como resolvido, ou quando passa do período escolhido.")
+        _resolver(reais)
     else:
         st.success("Nenhum erro de envio no período.")
+    # v1.2 (Carlos): o que o robo JA consertou e so registro — sem botao, recolhido
+    registros = [i for i in erros if i.get("tipo") in ("RELOGIO_RELIGADO", "CONSERTADO_SOZINHO")]
+    if registros:
+        with st.expander(f"🔧 Consertado sozinho ({len(registros)}) — só registro, nada a fazer"):
+            st.dataframe(pd.DataFrame(_linhas_erros(registros, len(unidades) > 1)),
+                         use_container_width=True, hide_index=True)
 
     st.markdown("### 📋 Disparos")
     if lotes:
