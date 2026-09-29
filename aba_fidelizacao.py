@@ -6,6 +6,10 @@ FID-06 v1 (26/09/2026) - degrau 2 do FID.
 FID-08 v1 (29/09/2026) - o numero de alerta e editado AQUI, na tela de disparo,
   e cada lote herda o numero da hora do disparo, pra sempre (fid_trocar_alerta,
   fid_disparos_historico.telefone_alerta, webhook-fid v5.2). Titulo do erro corrigido.
+FID-05 v1 (29/09/2026) - bloco "Pendencias" no topo da aba: quem travou no meio do
+  fluxo, por unidade (fid_pendencias). SO LISTA - nenhum botao de reenvio (Carlos,
+  29/09). O unico conserto automatico (religar o relogio da pergunta) roda no banco,
+  pelo pg_cron, e aparece aqui como registro.
 
 Fluxo:
   1. Le fid_config da unidade (ativo, telefone_alerta) + modo_manutencao
@@ -28,6 +32,7 @@ Segredos (st.secrets), NUNCA impressos:
 """
 
 import re
+import json
 import time
 import urllib.parse
 import streamlit as st
@@ -46,9 +51,49 @@ META_API         = "v23.0"                                 # a mesma da webhook-
 HORA_INICIO      = 8                                       # espelha o default do Pos
 HORA_FIM         = 19
 DIAS_REINSCRICAO = 60                                      # espelho do fid_criar_lote
-VERSAO_ABA       = "FID-08 v1"
+VERSAO_ABA       = "FID-05 v1"
 
 UNIDADE_ROTULO = {"MOGI": "Mogi das Cruzes", "SUZANO": "Suzano"}
+
+# FID-05: tipo da fid_pendencias -> (como aparece, o que fazer). A ORDEM desta
+# lista e a ordem na tela: o que deixa a cliente sem resposta vem primeiro.
+PENDENCIAS = [
+    ("ALERTA_NAO_SAIU", "🔔 Recepção NÃO foi avisada",
+     "Ela disse que TEM DÚVIDA e o aviso à recepção não saiu. Chamar a cliente agora."),
+    ("ALERTA_NAO_ENTREGUE", "🔔 Aviso à recepção não chegou",
+     "Ela disse que TEM DÚVIDA e a Meta não confirmou a entrega do aviso (o número de "
+     "alerta estava sem a janela de 24 h?). Chamar a cliente."),
+    ("ANEXOS_INCOMPLETOS", "📎 Faltou anexo",
+     "Ela tocou em Pode enviar e não recebeu tudo (ver Detalhe). Mandar o que faltou "
+     "pelo WhatsApp da unidade."),
+    ("PERGUNTA_NAO_SAIU", "❓ A pergunta não saiu",
+     "A Meta recusou o \"Recebeu tudo certinho?\". Falar com ela para confirmar."),
+    ("PERGUNTA_NAO_ENTREGUE", "❓ A pergunta não chegou",
+     "A Meta aceitou o \"Recebeu tudo certinho?\" e depois falhou. Falar com ela."),
+    ("PERGUNTA_JANELA_FECHADA", "⌛ A pergunta passou das 24 h",
+     "Não deu tempo de perguntar dentro da janela da Meta. Falar com ela se quiser confirmar."),
+    ("PERGUNTA_ATRASADA", "⏱️ A pergunta está atrasada",
+     "O relógio da pergunta ligou e ela não saiu (o relógio do FID-07 parou?). "
+     "Avisar o Carlos e falar com ela."),
+    ("PERGUNTA_NUNCA_PROGRAMADA", "❓ A pergunta nunca foi programada",
+     "Ela tocou em Pode enviar e a pergunta não foi programada (a varredura está "
+     "parada?). Avisar o Carlos e falar com ela."),
+    ("FILA_PARADA", "📭 O disparo parou antes dela",
+     "O envio foi interrompido (F5, aba fechada, reboot) e ela ficou na fila sem "
+     "receber. Subir a planilha de novo e disparar."),
+    ("TEMPLATE_NAO_ENTREGUE", "📵 As boas-vindas não chegaram",
+     "A Meta aceitou e depois falhou (ver Detalhe). A cliente não recebeu nada. Falar "
+     "com ela por outro canal."),
+    ("RESERVADO_PRESO", "⏳ Disparo parou no meio",
+     "O template PODE ter saído. Conferir no WhatsApp Manager antes de qualquer coisa. "
+     "NÃO redisparar."),
+    ("ERRO_NO_DISPARO", "❌ Erro no disparo",
+     "NAO_SAIU: não chegou. TALVEZ_SAIU: conferir no WhatsApp Manager antes de "
+     "qualquer coisa. Reenvio é caso a caso."),
+    ("RELOGIO_RELIGADO", "🔧 Consertado sozinho",
+     "A pergunta tinha ficado sem programar e a varredura religou. Nada a fazer — é só registro."),
+]
+PERIODOS = {"7 dias": 7, "30 dias": 30, "Tudo": 3650}
 
 
 # ------------------------------------------------------------------ supabase
@@ -375,6 +420,58 @@ def _tela_resumo(k):
 
 
 # ------------------------------------------------------------------ tela
+def _hora_sp(iso):
+    if not iso:
+        return "—"
+    try:
+        return pd.to_datetime(iso, utc=True).tz_convert(TZ_SP).strftime("%d/%m %H:%M")
+    except Exception:
+        return str(iso)
+
+
+def _pendencias(unidade, k):
+    """FID-05: quem travou no meio do fluxo, por unidade. SO LISTA (Carlos, 29/09):
+    nenhum botao de reenvio. Falhar aqui NAO bloqueia o disparo - so avisa."""
+    rot = st.session_state.get(k + "pend_periodo", "7 dias")
+    dias = PERIODOS.get(rot, 7)
+    try:
+        itens = _sb().rpc("fid_pendencias", {"p_unidade": unidade, "p_dias": dias}).execute().data
+    except Exception as e:
+        st.warning(f"⚠️ Não consegui ler as pendências: {str(e)[:200]}")
+        return
+    if not isinstance(itens, list):
+        st.warning(f"⚠️ Não consegui ler as pendências: {str(itens)[:200]}")
+        return
+
+    ordem = {t: n for n, (t, _, _) in enumerate(PENDENCIAS)}
+    textos = {t: (r, f) for t, r, f in PENDENCIAS}
+    reais = [i for i in itens if i.get("tipo") != "RELOGIO_RELIGADO"]
+    titulo = (f"⚠️ Pendências desta unidade: {len(reais)}" if reais
+              else "✅ Sem pendências") + f" — {rot}"
+    with st.expander(titulo, expanded=bool(reais)):
+        st.selectbox("Período", list(PERIODOS), key=k + "pend_periodo")
+        if not itens:
+            st.caption("Nada no período.")
+            return
+        # mais recente primeiro, depois a ordem de gravidade (sort estavel)
+        itens = sorted(itens, key=lambda i: str(i.get("desde") or ""), reverse=True)
+        itens = sorted(itens, key=lambda i: ordem.get(i.get("tipo"), 99))
+        linhas = []
+        for i in itens:
+            rotulo, fazer = textos.get(i.get("tipo"), (i.get("tipo"), "—"))
+            linhas.append({
+                "Situação": rotulo,
+                "Nome": i.get("nome"),
+                "Telefone": i.get("telefone"),
+                "Desde": _hora_sp(i.get("desde")),
+                "O que fazer": fazer,
+                "Detalhe": json.dumps(i.get("detalhe"), ensure_ascii=False)[:300],
+            })
+        st.dataframe(pd.DataFrame(linhas), use_container_width=True, hide_index=True)
+        st.caption("\"Consertado sozinho\" é só registro. Um item sai da lista quando a "
+                   "situação da cliente muda ou quando passa do período escolhido.")
+
+
 def _alerta_editar(unidade, alerta, k):
     """FID-08: o numero de alerta e editado AQUI, na tela de disparo (Carlos, 29/09).
     Cada disparo herda o numero que estiver aqui na hora, pra sempre: trocar so vale
@@ -444,6 +541,7 @@ def _render(unidade):
         st.error("🔴 **MODO MANUTENÇÃO ATIVO** — todos os robôs estão pausados.")
         return
 
+    _pendencias(unidade, k)
     _alerta_editar(unidade, cfg["telefone_alerta"], k)
 
     hora = datetime.now(TZ_SP).hour
