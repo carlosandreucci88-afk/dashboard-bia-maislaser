@@ -10,6 +10,9 @@ FID-05 v1 (29/09/2026) - bloco "Pendencias" no topo da aba: quem travou no meio 
   fluxo, por unidade (fid_pendencias). SO LISTA - nenhum botao de reenvio (Carlos,
   29/09). O unico conserto automatico (religar o relogio da pergunta) roda no banco,
   pelo pg_cron, e aparece aqui como registro.
+FID-05 v2 (29/09/2026) - Carlos: "isso nao e pendencia, e erro" e "fica numa aba nova
+  Relatorio, igual o do Pos". A lista SAI da tela de disparo e vai para a aba
+  "Relatorio" (render_aba_fid_relatorio), junto com o historico dos disparos.
 
 Fluxo:
   1. Le fid_config da unidade (ativo, telefone_alerta) + modo_manutencao
@@ -51,12 +54,12 @@ META_API         = "v23.0"                                 # a mesma da webhook-
 HORA_INICIO      = 8                                       # espelha o default do Pos
 HORA_FIM         = 19
 DIAS_REINSCRICAO = 60                                      # espelho do fid_criar_lote
-VERSAO_ABA       = "FID-05 v1"
+VERSAO_ABA       = "FID-05 v2"
 
 UNIDADE_ROTULO = {"MOGI": "Mogi das Cruzes", "SUZANO": "Suzano"}
 
-# FID-05: tipo da fid_pendencias -> (como aparece, o que fazer). A ORDEM desta
-# lista e a ordem na tela: o que deixa a cliente sem resposta vem primeiro.
+# FID-05: tipo da fid_pendencias -> (como aparece, o que fazer) na aba Relatorio.
+# A ORDEM desta lista e a ordem na tela: o que deixa a cliente sem resposta vem primeiro.
 PENDENCIAS = [
     ("ALERTA_NAO_SAIU", "🔔 Recepção NÃO foi avisada",
      "Ela disse que TEM DÚVIDA e o aviso à recepção não saiu. Chamar a cliente agora."),
@@ -429,47 +432,103 @@ def _hora_sp(iso):
         return str(iso)
 
 
-def _pendencias(unidade, k):
-    """FID-05: quem travou no meio do fluxo, por unidade. SO LISTA (Carlos, 29/09):
-    nenhum botao de reenvio. Falhar aqui NAO bloqueia o disparo - so avisa."""
-    rot = st.session_state.get(k + "pend_periodo", "7 dias")
-    dias = PERIODOS.get(rot, 7)
-    try:
-        itens = _sb().rpc("fid_pendencias", {"p_unidade": unidade, "p_dias": dias}).execute().data
-    except Exception as e:
-        st.warning(f"⚠️ Não consegui ler as pendências: {str(e)[:200]}")
-        return
-    if not isinstance(itens, list):
-        st.warning(f"⚠️ Não consegui ler as pendências: {str(itens)[:200]}")
-        return
-
+def _linhas_erros(itens, com_unidade):
+    """FID-05: itens da fid_pendencias -> linhas da tabela, na ordem de gravidade."""
     ordem = {t: n for n, (t, _, _) in enumerate(PENDENCIAS)}
     textos = {t: (r, f) for t, r, f in PENDENCIAS}
-    reais = [i for i in itens if i.get("tipo") != "RELOGIO_RELIGADO"]
-    titulo = (f"⚠️ Pendências desta unidade: {len(reais)}" if reais
-              else "✅ Sem pendências") + f" — {rot}"
-    with st.expander(titulo, expanded=bool(reais)):
-        st.selectbox("Período", list(PERIODOS), key=k + "pend_periodo")
-        if not itens:
-            st.caption("Nada no período.")
-            return
-        # mais recente primeiro, depois a ordem de gravidade (sort estavel)
-        itens = sorted(itens, key=lambda i: str(i.get("desde") or ""), reverse=True)
-        itens = sorted(itens, key=lambda i: ordem.get(i.get("tipo"), 99))
-        linhas = []
-        for i in itens:
-            rotulo, fazer = textos.get(i.get("tipo"), (i.get("tipo"), "—"))
-            linhas.append({
-                "Situação": rotulo,
-                "Nome": i.get("nome"),
-                "Telefone": i.get("telefone"),
-                "Desde": _hora_sp(i.get("desde")),
-                "O que fazer": fazer,
-                "Detalhe": json.dumps(i.get("detalhe"), ensure_ascii=False)[:300],
-            })
-        st.dataframe(pd.DataFrame(linhas), use_container_width=True, hide_index=True)
-        st.caption("\"Consertado sozinho\" é só registro. Um item sai da lista quando a "
+    # mais recente primeiro, depois a ordem de gravidade (sort estavel)
+    itens = sorted(itens, key=lambda i: str(i.get("desde") or ""), reverse=True)
+    itens = sorted(itens, key=lambda i: ordem.get(i.get("tipo"), 99))
+    linhas = []
+    for i in itens:
+        rotulo, fazer = textos.get(i.get("tipo"), (i.get("tipo"), "—"))
+        linha = {"Erro": rotulo}
+        if com_unidade:
+            linha["Unidade"] = UNIDADE_ROTULO.get(i.get("unidade"), i.get("unidade"))
+        linha.update({
+            "Nome": i.get("nome"),
+            "Telefone": i.get("telefone"),
+            "Desde": _hora_sp(i.get("desde")),
+            "O que fazer": fazer,
+            "Detalhe": json.dumps(i.get("detalhe"), ensure_ascii=False)[:300],
+        })
+        linhas.append(linha)
+    return linhas
+
+
+def render_aba_fid_relatorio():
+    """FID-05 v2: aba Relatorio do FID - erros de envio + historico dos disparos.
+    SO LE. Nenhum botao de reenvio (Carlos, 29/09). Falhar uma leitura nao
+    derruba a outra."""
+    k = "fid_rel_"
+    st.markdown("## 📋 Relatório — Fidelização")
+    c1, c2 = st.columns(2)
+    with c1:
+        un_rot = st.radio("Unidade", ["Todas", "Mogi", "Suzano"], horizontal=True,
+                          key=k + "unidade")
+    with c2:
+        per_rot = st.radio("Período", list(PERIODOS), horizontal=True, key=k + "periodo")
+    unidades = {"Todas": ["MOGI", "SUZANO"], "Mogi": ["MOGI"], "Suzano": ["SUZANO"]}[un_rot]
+    dias = PERIODOS[per_rot]
+
+    falhas = []
+    erros = []
+    for u in unidades:
+        try:
+            d = _sb().rpc("fid_pendencias", {"p_unidade": u, "p_dias": dias}).execute().data
+        except Exception as e:
+            falhas.append(f"erros de {u}: {str(e)[:150]}")
+            continue
+        if not isinstance(d, list):
+            falhas.append(f"erros de {u}: {str(d)[:150]}")
+            continue
+        for i in d:
+            i["unidade"] = u
+            erros.append(i)
+
+    lotes = []
+    try:
+        desde = (datetime.now(timezone.utc) - timedelta(days=dias)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        lotes = (_sb().table("fid_disparos_historico")
+                   .select("id,unidade,arquivo_nome,linhas_lidas,linhas_validas,"
+                           "linhas_puladas,telefone_alerta,criado_em")
+                   .in_("unidade", unidades).gte("criado_em", desde)
+                   .order("criado_em", desc=True).limit(500).execute().data) or []
+    except Exception as e:
+        falhas.append(f"disparos: {str(e)[:150]}")
+
+    for f in falhas:
+        st.warning(f"⚠️ Não consegui ler {f}")
+
+    reais = [i for i in erros if i.get("tipo") != "RELOGIO_RELIGADO"]
+    m1, m2, m3 = st.columns(3)
+    m1.metric("📤 Disparos", len(lotes))
+    m2.metric("👥 Clientes nos disparos", sum(int(l.get("linhas_validas") or 0) for l in lotes))
+    m3.metric("❌ Erros de envio", len(reais))
+
+    st.markdown("### ❌ Erros de envio")
+    if erros:
+        st.dataframe(pd.DataFrame(_linhas_erros(erros, len(unidades) > 1)),
+                     use_container_width=True, hide_index=True)
+        st.caption("\"Consertado sozinho\" é só registro. Um erro sai da lista quando a "
                    "situação da cliente muda ou quando passa do período escolhido.")
+    else:
+        st.success("Nenhum erro de envio no período.")
+
+    st.markdown("### 📋 Disparos")
+    if lotes:
+        st.dataframe(pd.DataFrame([{
+            "Data": _hora_sp(l.get("criado_em")),
+            "Unidade": UNIDADE_ROTULO.get(l.get("unidade"), l.get("unidade")),
+            "Arquivo": l.get("arquivo_nome"),
+            "Linhas": l.get("linhas_lidas"),
+            "Entraram": l.get("linhas_validas"),
+            "Pularam": l.get("linhas_puladas"),
+            "Alerta do lote": ("+" + l["telefone_alerta"]) if l.get("telefone_alerta") else "—",
+            "Lote": l.get("id"),
+        } for l in lotes]), use_container_width=True, hide_index=True)
+    else:
+        st.info("Nenhum disparo no período.")
 
 
 def _alerta_editar(unidade, alerta, k):
@@ -541,7 +600,6 @@ def _render(unidade):
         st.error("🔴 **MODO MANUTENÇÃO ATIVO** — todos os robôs estão pausados.")
         return
 
-    _pendencias(unidade, k)
     _alerta_editar(unidade, cfg["telefone_alerta"], k)
 
     hora = datetime.now(TZ_SP).hour

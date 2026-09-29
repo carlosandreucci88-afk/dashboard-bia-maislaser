@@ -69,7 +69,7 @@ from aba_pos_disparar import render_aba_pos_disparar
 from aba_pos_historico_monitor import render_aba_pos_historico, render_aba_pos_monitor
 from aba_pos_ranking import render_aba_pos_ranking
 from aba_pos_config import render_aba_pos_config
-from aba_fidelizacao import render_aba_fid_mogi, render_aba_fid_suzano
+from aba_fidelizacao import render_aba_fid_mogi, render_aba_fid_suzano, render_aba_fid_relatorio
 
 from aba_marketing import render_aba_marketing  # v1.2 (07/08)
 # v6.9: aba de saúde consolidada (sidebar + página completa)
@@ -628,14 +628,18 @@ def main():
             render_aba_pos_config()
 
     elif robo == 'fid':
-        tab_fid_mogi, tab_fid_suzano = st.tabs([
+        # FID-05 v2 (29/09): aba Relatorio, igual a do Pos (Carlos)
+        tab_fid_mogi, tab_fid_suzano, tab_fid_rel = st.tabs([
             "💚 Fidelização Mogi",
             "💚 Fidelização Suzano",
+            "📋 Relatório",
         ])
         with tab_fid_mogi:
             render_aba_fid_mogi()
         with tab_fid_suzano:
             render_aba_fid_suzano()
+        with tab_fid_rel:
+            render_aba_fid_relatorio()
 
     elif robo == 'mkt':
         render_aba_marketing()
