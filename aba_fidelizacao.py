@@ -3,6 +3,9 @@
 ROBO FIDELIZACAO (FID) - disparo das boas-vindas, uma aba por unidade
 ==============================================================================
 FID-06 v1 (26/09/2026) - degrau 2 do FID.
+FID-08 v1 (29/09/2026) - o numero de alerta e editado AQUI, na tela de disparo,
+  e cada lote herda o numero da hora do disparo, pra sempre (fid_trocar_alerta,
+  fid_disparos_historico.telefone_alerta, webhook-fid v5.2). Titulo do erro corrigido.
 
 Fluxo:
   1. Le fid_config da unidade (ativo, telefone_alerta) + modo_manutencao
@@ -43,7 +46,7 @@ META_API         = "v23.0"                                 # a mesma da webhook-
 HORA_INICIO      = 8                                       # espelha o default do Pos
 HORA_FIM         = 19
 DIAS_REINSCRICAO = 60                                      # espelho do fid_criar_lote
-VERSAO_ABA       = "FID-06 v1"
+VERSAO_ABA       = "FID-08 v1"
 
 UNIDADE_ROTULO = {"MOGI": "Mogi das Cruzes", "SUZANO": "Suzano"}
 
@@ -256,7 +259,7 @@ def _executar(unidade, validos, lidas, arquivo_nome, k):
         st.warning("⚠️ Disparo já em andamento. Aguarde, ou recarregue (F5) se travou.")
         return
     st.session_state[k + "em_andamento"] = uid
-    resumo = {"lote_id": None, "enviados": 0, "erros": [], "presos": [],
+    resumo = {"lote_id": None, "alerta": None, "enviados": 0, "erros": [], "presos": [],
               "pulados_banco": [], "tomados_por_outro": [], "falhas_inesperadas": []}
     try:
         # 1. lote + participantes, numa transacao so
@@ -270,6 +273,7 @@ def _executar(unidade, validos, lidas, arquivo_nome, k):
             st.error(f"❌ O banco não criou o lote: {lote}")
             return
         resumo["lote_id"] = lote["lote_id"]
+        resumo["alerta"] = lote.get("telefone_alerta")      # FID-08: o que ESTE lote herdou
         resumo["pulados_banco"] = lote.get("puladas") or []
 
         # 2. quem ficou na FILA deste lote - relido do banco, que e quem manda
@@ -332,7 +336,7 @@ def _tela_resumo(k):
     c1.metric("✅ Enviados", r.get("enviados", 0))
     c2.metric("❌ Erros", len(r.get("erros", [])))
     c3.metric("⏭️ Pulados pelo banco", len(r.get("pulados_banco", [])))
-    st.caption(f"Lote {r.get('lote_id')} · {VERSAO_ABA}")
+    st.caption(f"Lote {r.get('lote_id')} · alerta deste lote: +{r.get('alerta')} · {VERSAO_ABA}")
 
     if r.get("presos"):
         st.error(
@@ -343,7 +347,15 @@ def _tela_resumo(k):
                           for p in r["presos"] if p.get("wamid")), language="sql")
         st.dataframe(pd.DataFrame(r["presos"]), use_container_width=True, hide_index=True)
     if r.get("erros"):
-        with st.expander(f"❌ {len(r['erros'])} erro(s) — TALVEZ_SAIU = não dá para afirmar que não chegou"):
+        # FID-08: o titulo dizia TALVEZ_SAIU para QUALQUER erro. Agora conta cada um.
+        talvez = sum(1 for e in r["erros"] if str(e.get("codigo", "")).startswith("TALVEZ_SAIU"))
+        nao = len(r["erros"]) - talvez
+        partes = []
+        if talvez:
+            partes.append(f"{talvez} TALVEZ_SAIU (não dá para afirmar que não chegou)")
+        if nao:
+            partes.append(f"{nao} NAO_SAIU (não chegou)")
+        with st.expander(f"❌ {len(r['erros'])} erro(s) — " + " · ".join(partes)):
             st.dataframe(pd.DataFrame(r["erros"]), use_container_width=True, hide_index=True)
     if r.get("pulados_banco"):
         with st.expander(f"⏭️ {len(r['pulados_banco'])} pulada(s) pelo banco"):
@@ -363,6 +375,40 @@ def _tela_resumo(k):
 
 
 # ------------------------------------------------------------------ tela
+def _alerta_editar(unidade, alerta, k):
+    """FID-08: o numero de alerta e editado AQUI, na tela de disparo (Carlos, 29/09).
+    Cada disparo herda o numero que estiver aqui na hora, pra sempre: trocar so vale
+    para os PROXIMOS disparos. A troca e do banco (fid_trocar_alerta, loga de/para)."""
+    if st.session_state.get(k + "alerta_msg"):
+        st.success(st.session_state.pop(k + "alerta_msg"))
+    with st.expander(f"🔔 Número de alerta desta unidade: +{alerta} — trocar"):
+        st.caption("Vale só para os **próximos** disparos. Quem já recebeu continua "
+                   "alertando o número do disparo dela.")
+        bruto = st.text_input("Novo número (com DDD)", key=k + "alerta_novo")
+        if st.button("💾 Salvar número de alerta", key=k + "btn_alerta"):
+            novo, motivo = normalizar_telefone(bruto)
+            if motivo:
+                st.error(f"❌ {motivo}")
+                return
+            try:
+                res = _sb().rpc("fid_trocar_alerta", {"p_unidade": unidade, "p_telefone": novo,
+                                                      "p_por": "painel"}).execute().data
+            except Exception as e:
+                res = {"ok": False, "motivo": str(e)[:200]}
+            if not (isinstance(res, dict) and res.get("ok")):
+                st.error(f"❌ Não troquei: {res}")
+                return
+            if not res.get("mudou"):
+                st.info("Esse já é o número de alerta.")
+                return
+            # numero novo = a janela de 24 h confirmada era do numero ANTIGO
+            st.session_state.pop(k + "janela_ok", None)
+            st.session_state.pop(k + "confirmar", None)
+            st.session_state[k + "alerta_msg"] = (f"✅ Alerta trocado: +{res.get('de')} → "
+                                                  f"+{res.get('para')}. Vale a partir do próximo disparo.")
+            st.rerun()
+
+
 def _render(unidade):
     # st.tabs renderiza as DUAS abas em toda execucao: TODA chave e prefixada
     # pela unidade, senao Mogi e Suzano dividem estado (FID-06 §4 item 8)
@@ -397,6 +443,8 @@ def _render(unidade):
     if manut:
         st.error("🔴 **MODO MANUTENÇÃO ATIVO** — todos os robôs estão pausados.")
         return
+
+    _alerta_editar(unidade, cfg["telefone_alerta"], k)
 
     hora = datetime.now(TZ_SP).hour
     dentro = HORA_INICIO <= hora < HORA_FIM
