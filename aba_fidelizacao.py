@@ -13,6 +13,10 @@ FID-05 v1 (29/09/2026) - bloco "Pendencias" no topo da aba: quem travou no meio 
 FID-05 v2 (29/09/2026) - Carlos: "isso nao e pendencia, e erro" e "fica numa aba nova
   Relatorio, igual o do Pos". A lista SAI da tela de disparo e vai para a aba
   "Relatorio" (render_aba_fid_relatorio), junto com o historico dos disparos.
+FID-10 v1 (29/09/2026) - cada aba de unidade ganha 2 sub-abas: "Disparo" (a tela de
+  sempre, intocada) e "Indicacoes": participantes, indicacoes recebidas por contato,
+  FECHOU / NAO FECHOU (manda o template de aviso) e sessoes a agendar. Relatorio
+  ganha AVISO_NAO_SAIU e AVISO_NAO_ENTREGUE.
 
 Fluxo:
   1. Le fid_config da unidade (ativo, telefone_alerta) + modo_manutencao
@@ -54,7 +58,9 @@ META_API         = "v23.0"                                 # a mesma da webhook-
 HORA_INICIO      = 8                                       # espelha o default do Pos
 HORA_FIM         = 19
 DIAS_REINSCRICAO = 60                                      # espelho do fid_criar_lote
-VERSAO_ABA       = "FID-05 v2"
+VERSAO_ABA       = "FID-10 v1"
+TEMPLATE_FECHOU     = "maislaser_fid_indicacao_fechou_v1"      # Ativo · Servicos (29/09)
+TEMPLATE_NAO_FECHOU = "maislaser_fid_indicacao_nao_fechou_v1"  # Ativo · Servicos (29/09)
 
 UNIDADE_ROTULO = {"MOGI": "Mogi das Cruzes", "SUZANO": "Suzano"}
 
@@ -81,6 +87,12 @@ PENDENCIAS = [
     ("PERGUNTA_NUNCA_PROGRAMADA", "❓ A pergunta nunca foi programada",
      "Ela tocou em Pode enviar e a pergunta não foi programada (a varredura está "
      "parada?). Avisar o Carlos e falar com ela."),
+    ("AVISO_NAO_SAIU", "🎁 O aviso da indicação não saiu",
+     "A equipe marcou a indicação (ver Detalhe) e a mensagem para quem indicou não saiu. "
+     "PAROU_NO_MEIO ou TALVEZ_SAIU: conferir no WhatsApp Manager antes. Avisar a cliente "
+     "pelo WhatsApp da unidade. NÃO marcar de novo."),
+    ("AVISO_NAO_ENTREGUE", "🎁 O aviso da indicação não chegou",
+     "A Meta aceitou e depois falhou (ver Detalhe). Avisar a cliente pelo WhatsApp da unidade."),
     ("FILA_PARADA", "📭 O disparo parou antes dela",
      "O envio foi interrompido (F5, aba fechada, reboot) e ela ficou na fila sem "
      "receber. Subir a planilha de novo e disparar."),
@@ -246,7 +258,7 @@ def prever(validos):
 
 
 # ------------------------------------------------------------------ meta
-def enviar_template(telefone, nome):
+def enviar_template(telefone, nome, template=TEMPLATE_NOME):
     """-> (wamid, None) | (None, (codigo, mensagem, talvez_saiu))
     talvez_saiu=True quando NAO da para afirmar que a Meta nao entregou
     (timeout, 5xx, 2xx sem wamid). E a armadilha do BIA-02."""
@@ -260,7 +272,7 @@ def enviar_template(telefone, nome):
         "to": telefone,
         "type": "template",
         "template": {
-            "name": TEMPLATE_NOME,
+            "name": template,
             "language": {"code": TEMPLATE_LANG},
             "components": [{"type": "body",
                             "parameters": [{"type": "text", "text": (nome or "cliente")[:60]}]}],
@@ -707,9 +719,311 @@ def _render(unidade):
             st.rerun()
 
 
+# ------------------------------------------------------------------ FID-10: indicacoes
+ROTULO_STATUS = {"NOVA": "🆕 Nova", "FECHOU": "✅ Fechou", "NAO_FECHOU": "❌ Não fechou"}
+MOTIVO_RECUSA = {
+    "ja_fechou": "Essa indicação já está como FECHOU — não muda mais.",
+    "indicacao_nao_existe": "Essa indicação não existe mais. Recarregue a página.",
+    "decisao_invalida": "Decisão inválida.",
+}
+
+
+def _em_lotes(tabela, colunas, coluna, valores):
+    linhas = []
+    for i in range(0, len(valores), 100):
+        linhas += (_sb().table(tabela).select(colunas).in_(coluna, valores[i:i + 100])
+                     .order("id").execute().data) or []
+    return sorted(linhas, key=lambda x: x["id"])
+
+
+def _ler_indicacoes(unidade):
+    """-> (indicacoes, participantes, selos, avisos, areas). SO LE."""
+    sb = _sb()
+    ind = (sb.table("fid_indicacoes")
+             .select("id,indicante,nome,telefone,tem_whatsapp,ja_participante,status,"
+                     "decidido_por,decidido_em,criado_em")
+             .eq("unidade", unidade).order("criado_em", desc=True).limit(5000)
+             .execute().data) or []
+    part = (sb.table("fid_participantes").select("telefone,nome,status,enviado_em")
+              .eq("unidade", unidade).limit(5000).execute().data) or []
+    # 🔴 filtrado NO BANCO, em lotes de 100 (como o prever): o PostgREST do Supabase
+    # corta em 1000 linhas por padrao, e ler tudo para filtrar aqui perderia linhas.
+    selos = _em_lotes("fid_selos", "id,telefone,cartao,posicao,indicacao_id,area,"
+                      "escolhido_em,agendado_em", "telefone", sorted(p["telefone"] for p in part))
+    avisos = _em_lotes("fid_avisos", "id,indicacao_id,tipo,wamid,erro_codigo,reservado_em",
+                       "indicacao_id", sorted(i["id"] for i in ind))
+    areas = {a["codigo"]: a["titulo"]
+             for a in (sb.table("fid_areas").select("codigo,titulo").execute().data or [])}
+    return ind, part, selos, avisos, areas
+
+
+def _confirmar_aviso(aviso_id, wamid):
+    """fid_confirmar_aviso e idempotente com o MESMO wamid: repetir e seguro."""
+    erro = None
+    for tentativa in range(3):
+        try:
+            d = _sb().rpc("fid_confirmar_aviso",
+                          {"p_aviso": aviso_id, "p_wamid": wamid}).execute().data
+            if isinstance(d, dict) and d.get("ok"):
+                return True, None
+            return False, f"o banco recusou: {d}"
+        except Exception as e:
+            erro = str(e)[:300]
+            time.sleep(1.5 * (tentativa + 1))
+    return False, erro
+
+
+def _decidir(ind_id, decisao):
+    """Decide no banco (selo + carimbo do aviso, 1 transacao) -> manda o template ->
+    confirma. -> (tipo_de_mensagem, texto). O banco e o juiz: decidir de novo a mesma
+    coisa devolve mudou=false e NAO manda nada."""
+    try:
+        r = _sb().rpc("fid_decidir_indicacao", {"p_id": ind_id, "p_decisao": decisao,
+                                                "p_por": "painel"}).execute().data
+    except Exception as e:
+        return "error", (f"❌ O banco não respondeu ({str(e)[:150]}). **Recarregue a página "
+                         f"antes de tentar de novo**: se a indicação aparecer marcada, o aviso "
+                         f"não saiu e vai para o Relatório.")
+    if not (isinstance(r, dict) and r.get("ok")):
+        motivo = r.get("motivo") if isinstance(r, dict) else None
+        return "error", "❌ " + MOTIVO_RECUSA.get(motivo, f"O banco recusou: {r}")
+    if not r.get("mudou"):
+        return "info", "Nada mudou: a indicação já estava assim."
+
+    quem = r["indicante"]
+    tpl = TEMPLATE_FECHOU if decisao == "FECHOU" else TEMPLATE_NAO_FECHOU
+    wamid, err = enviar_template(quem["telefone"], quem["nome"], tpl)
+    selo = r.get("selo") or {}
+    o_que = (f"selo {selo.get('posicao')}/10 para **{quem['nome']}**" if decisao == "FECHOU"
+             else f"aviso para **{quem['nome']}**")
+    if wamid:
+        ok, msg = _confirmar_aviso(r["aviso_id"], wamid)
+        if ok:
+            return "success", (f"✅ **{r['indicada']}**: {ROTULO_STATUS[decisao]} · {o_que} · "
+                               f"mensagem enviada.")
+        return "error", (f"🔴 A mensagem SAIU para {quem['nome']}, mas o banco não gravou "
+                         f"({msg}). **NÃO marque de novo.** Correção (repetir é seguro): "
+                         f"`select fid_confirmar_aviso({r['aviso_id']}, '{wamid}');`")
+    codigo, mensagem, talvez = err
+    cod = ("TALVEZ_SAIU:" if talvez else "NAO_SAIU:") + codigo
+    try:
+        _sb().rpc("fid_registrar_erro_aviso", {"p_aviso": r["aviso_id"], "p_codigo": cod,
+                                               "p_mensagem": mensagem}).execute()
+    except Exception as e2:
+        mensagem += f" [e o erro NÃO foi gravado no banco: {str(e2)[:150]}]"
+    return "error", (f"⚠️ **{r['indicada']}** ficou {ROTULO_STATUS[decisao]} ({o_que}), mas a "
+                     f"mensagem **não saiu** ({cod}: {mensagem[:200]}). Está no Relatório. "
+                     f"Avisar a cliente pelo WhatsApp da unidade.")
+
+
+def _render_indicacoes(unidade):
+    # mesma regra do _render: TODA chave prefixada pela unidade
+    k = f"fid_ind_{unidade}_"
+    rotulo = UNIDADE_ROTULO[unidade]
+    st.markdown(f"## 🎁 Indicações — {rotulo}")
+    st.caption(f"Cartão Fidelidade · {VERSAO_ABA}")
+
+    aviso = st.session_state.pop(k + "msg", None)
+    if aviso:
+        getattr(st, aviso[0])(aviso[1])
+
+    try:
+        cfg, manut = _estado(unidade)
+    except Exception as e:
+        st.error(f"⚠️ Não consegui ler a configuração do FID: {e}")
+        return
+    pode = bool(cfg and cfg.get("ativo") and not manut)
+    if not pode:
+        st.warning("🔴 FID desligado ou em manutenção — dá para ver tudo, mas marcar "
+                   "FECHOU / NÃO FECHOU (que manda mensagem) fica bloqueado.")
+
+    try:
+        ind, part, selos, avisos, areas = _ler_indicacoes(unidade)
+    except Exception as e:
+        st.error(f"⚠️ Não consegui ler as indicações: {e}")
+        return
+
+    nomes = {p["telefone"]: p["nome"] for p in part}
+    indicantes = {i["indicante"] for i in ind}
+    novas = [i for i in ind if i["status"] == "NOVA"]
+    a_agendar = [x for x in selos if x.get("area") and not x.get("agendado_em")]
+    esperando = [x for x in selos if not x.get("area")]
+    participantes = [p for p in part if p["status"] == "ENVIADO" or p["telefone"] in indicantes]
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("👥 Participantes", len(participantes))
+    m2.metric("🆕 Indicações a tratar", len(novas))
+    m3.metric("🎁 Sessões a agendar", len(a_agendar))
+
+    link = st.column_config.LinkColumn("WhatsApp", display_text="abrir")
+
+    # ---- indicacoes novas
+    st.markdown("### 🆕 Indicações a tratar")
+    if novas:
+        st.dataframe(pd.DataFrame([{
+            "Indicada": i["nome"],
+            "Telefone": "+" + i["telefone"],
+            "WhatsApp": f"https://wa.me/{i['telefone']}",
+            "Tem WhatsApp?": "sim" if i.get("tem_whatsapp") else "não (ligar)",
+            "Quem indicou": nomes.get(i["indicante"], i["indicante"]),
+            "Recebida": _hora_sp(i.get("criado_em")),
+            "Obs.": "⚠️ já está no programa" if i.get("ja_participante") else "",
+        } for i in novas]), use_container_width=True, hide_index=True,
+            column_config={"WhatsApp": link})
+    else:
+        st.success("Nenhuma indicação nova.")
+
+    # ---- decidir (NOVA, ou NAO_FECHOU que depois fechou - decisao B de 24/09)
+    st.markdown("### ✍️ Marcar se fechou")
+    decidiveis = sorted([i for i in ind if i["status"] in ("NOVA", "NAO_FECHOU")],
+                        key=lambda i: (i["status"] != "NOVA", str(i.get("criado_em"))))
+    if not decidiveis:
+        st.caption("Nada para marcar.")
+    else:
+        op = {i["id"]: (f"{i['nome']} · +{i['telefone']} — indicada por "
+                        f"{nomes.get(i['indicante'], i['indicante'])} · {ROTULO_STATUS[i['status']]}")
+              for i in decidiveis}
+        # a escolhida anterior pode ter saido da lista (foi marcada): volta pra 1a
+        if st.session_state.get(k + "sel") not in op:
+            st.session_state.pop(k + "sel", None)
+        sel = st.selectbox("Indicação", list(op), format_func=op.get, key=k + "sel")
+        atual = next(i for i in decidiveis if i["id"] == sel)
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("✅ Fechou plano", disabled=not pode, use_container_width=True,
+                         key=k + "btn_fechou"):
+                st.session_state[k + "conf"] = (sel, "FECHOU")
+                st.rerun()
+        with c2:
+            if st.button("❌ Não fechou", disabled=(not pode or atual["status"] == "NAO_FECHOU"),
+                         use_container_width=True, key=k + "btn_nao"):
+                st.session_state[k + "conf"] = (sel, "NAO_FECHOU")
+                st.rerun()
+
+        conf = st.session_state.get(k + "conf")
+        if conf and conf[0] == sel and pode:
+            quem = nomes.get(atual["indicante"], atual["indicante"])
+            if conf[1] == "FECHOU":
+                st.warning(f"⚠️ Confirmar: **{atual['nome']}** FECHOU plano? **{quem}** ganha "
+                           f"1 selo e recebe a mensagem para escolher a área. **Não dá para "
+                           f"desfazer.**")
+            else:
+                st.warning(f"⚠️ Confirmar: **{atual['nome']}** NÃO fechou? **{quem}** recebe a "
+                           f"mensagem de que a indicação não fechou. Se fechar depois, é só "
+                           f"marcar FECHOU aqui.")
+            s1, s2 = st.columns(2)
+            with s1:
+                if st.button("✅ Sim, confirmar", type="primary", use_container_width=True,
+                             key=k + "btn_sim"):
+                    if st.session_state.get(k + "em_andamento"):
+                        st.warning("⚠️ Já está enviando. Aguarde.")
+                    else:
+                        st.session_state[k + "em_andamento"] = True
+                        try:
+                            st.session_state[k + "msg"] = _decidir(conf[0], conf[1])
+                        finally:
+                            st.session_state[k + "em_andamento"] = False
+                            st.session_state.pop(k + "conf", None)
+                        st.rerun()
+            with s2:
+                if st.button("Cancelar", use_container_width=True, key=k + "btn_cancela"):
+                    st.session_state.pop(k + "conf", None)
+                    st.rerun()
+
+    # ---- sessoes do premio
+    st.markdown("### 🎁 Sessões a agendar")
+    if a_agendar:
+        st.dataframe(pd.DataFrame([{
+            "Cliente": nomes.get(x["telefone"], x["telefone"]),
+            "Telefone": "+" + x["telefone"],
+            "WhatsApp": f"https://wa.me/{x['telefone']}",
+            "Sessão de": areas.get(x["area"], x["area"]),
+            "Selo": f"{x['posicao']}/10" + (f" (cartão {x['cartao']})" if x["cartao"] > 1 else ""),
+            "Escolhida": _hora_sp(x.get("escolhido_em")),
+        } for x in a_agendar]), use_container_width=True, hide_index=True,
+            column_config={"WhatsApp": link})
+        op_s = {x["id"]: f"{nomes.get(x['telefone'], x['telefone'])} — "
+                         f"{areas.get(x['area'], x['area'])} (selo {x['posicao']}/10)"
+                for x in a_agendar}
+        if st.session_state.get(k + "sel_s") not in op_s:
+            st.session_state.pop(k + "sel_s", None)
+        sel_s = st.selectbox("Sessão", list(op_s), format_func=op_s.get, key=k + "sel_s")
+        if st.button("📅 Marcar como agendada", key=k + "btn_agendar"):
+            try:
+                r = _sb().rpc("fid_marcar_agendado", {"p_selo": sel_s, "p_por": "painel"}).execute().data
+            except Exception as e:
+                r = {"ok": False, "erro": str(e)[:200]}
+            st.session_state[k + "msg"] = (("success", "✅ Marcada como agendada.")
+                                           if isinstance(r, dict) and r.get("ok")
+                                           else ("error", f"❌ Não marquei: {r}"))
+            st.rerun()
+    else:
+        st.info("Nenhuma sessão esperando agendamento.")
+    if esperando:
+        st.caption(f"⏳ {len(esperando)} selo(s) esperando a cliente escolher a área.")
+
+    # ---- participantes
+    st.markdown("### 👥 Participantes")
+    if participantes:
+        linhas = []
+        for p in participantes:
+            meus = [x for x in selos if x["telefone"] == p["telefone"]]
+            cartao = max([x["cartao"] for x in meus], default=1)
+            minhas = [i for i in ind if i["indicante"] == p["telefone"]]
+            linhas.append({
+                "Cliente": p["nome"],
+                "Telefone": "+" + p["telefone"],
+                "Selos": f"{sum(1 for x in meus if x['cartao'] == cartao)}/10",
+                "Cartão": cartao,
+                "Indicou": len(minhas),
+                "Fecharam": sum(1 for i in minhas if i["status"] == "FECHOU"),
+                "Não fecharam": sum(1 for i in minhas if i["status"] == "NAO_FECHOU"),
+                "Novas": sum(1 for i in minhas if i["status"] == "NOVA"),
+                "Boas-vindas": _hora_sp(p.get("enviado_em")),
+            })
+        df = pd.DataFrame(linhas).sort_values(["Indicou", "Cliente"], ascending=[False, True])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Ninguém no programa ainda.")
+
+    # ---- historico
+    if ind:
+        ultimo = {}
+        for a in avisos:                      # ordenado por id: o ultimo vence
+            ultimo[a["indicacao_id"]] = a
+        def _aviso(i):
+            a = ultimo.get(i["id"])
+            if not a:
+                return "—"
+            if a.get("wamid"):
+                return "✅ enviado"
+            if a.get("erro_codigo"):
+                return "❌ " + a["erro_codigo"]
+            return "⏳ sem confirmação"
+        with st.expander(f"📜 Todas as indicações ({len(ind)})"):
+            st.dataframe(pd.DataFrame([{
+                "Indicada": i["nome"],
+                "Telefone": "+" + i["telefone"],
+                "Quem indicou": nomes.get(i["indicante"], i["indicante"]),
+                "Status": ROTULO_STATUS.get(i["status"], i["status"]),
+                "Recebida": _hora_sp(i.get("criado_em")),
+                "Marcada": _hora_sp(i.get("decidido_em")),
+                "Aviso": _aviso(i),
+            } for i in ind]), use_container_width=True, hide_index=True)
+
+
+def _render_unidade(unidade):
+    """FID-10: sub-abas. "Disparo" e o _render de sempre, sem mudanca."""
+    t_disp, t_ind = st.tabs(["📤 Disparo", "🎁 Indicações"])
+    with t_disp:
+        _render(unidade)
+    with t_ind:
+        _render_indicacoes(unidade)
+
+
 def render_aba_fid_mogi():
-    _render("MOGI")
+    _render_unidade("MOGI")
 
 
 def render_aba_fid_suzano():
-    _render("SUZANO")
+    _render_unidade("SUZANO")
