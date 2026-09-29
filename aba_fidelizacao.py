@@ -26,6 +26,9 @@ FID-09 v2 (29/09/2026) - o que e SEGURO reenviar, o robo conserta SOZINHO (pergu
   WhatsApp Manager") e "resolvido" (so esconde). Quem decide se pode e o banco.
 FID-09 v2.2 (29/09/2026) - Relatorio ganha CARTAO_NAO_ENTREGUE (a imagem do cartao saiu e
   a Meta falhou depois; o robo manda em texto sozinho).
+FID-12 v1 (29/09/2026) - Carlos: a tela de Indicacoes "ficou misturada, carregada". Vira
+  FILA: em cima so o que tem para fazer, cada linha com o seu botao (sem caixa de
+  selecao); secao vazia some; clientes e historico recolhidos embaixo. SO A TELA.
 
 Fluxo:
   1. Le fid_config da unidade (ativo, telefone_alerta) + modo_manutencao
@@ -67,7 +70,7 @@ META_API         = "v23.0"                                 # a mesma da webhook-
 HORA_INICIO      = 8                                       # espelha o default do Pos
 HORA_FIM         = 19
 DIAS_REINSCRICAO = 60                                      # espelho do fid_criar_lote
-VERSAO_ABA       = "FID-09 v2"
+VERSAO_ABA       = "FID-12 v1"
 TEMPLATE_FECHOU     = "maislaser_fid_indicacao_fechou_v1"      # Ativo · Servicos (29/09)
 TEMPLATE_NAO_FECHOU = "maislaser_fid_indicacao_nao_fechou_v1"  # Ativo · Servicos (29/09)
 
@@ -1003,6 +1006,22 @@ def _decidir(ind_id, decisao):
                      f"Avisar a cliente pelo WhatsApp da unidade.")
 
 
+def _fone(t):
+    """So para MOSTRAR: 5511988887766 -> +55 11 98888-7766. O resto fica como veio."""
+    t = str(t or "")
+    if t.startswith("55") and len(t) in (12, 13):
+        return f"+55 {t[2:4]} {t[4:-4]}-{t[-4:]}"
+    return "+" + t
+
+
+def _md(v):
+    """Nome que veio do contato do WhatsApp: escapa o que o markdown entenderia."""
+    s = str(v if v is not None else "")
+    for c in "\\`*_[]<>#|~":
+        s = s.replace(c, "\\" + c)
+    return s
+
+
 def _render_indicacoes(unidade):
     # mesma regra do _render: TODA chave prefixada pela unidade
     k = f"fid_ind_{unidade}_"
@@ -1032,148 +1051,139 @@ def _render_indicacoes(unidade):
 
     nomes = {p["telefone"]: p["nome"] for p in part}
     indicantes = {i["indicante"] for i in ind}
-    novas = [i for i in ind if i["status"] == "NOVA"]
+    # a mais antiga primeiro: a fila anda por ordem de chegada
+    novas = sorted([i for i in ind if i["status"] == "NOVA"], key=lambda i: str(i.get("criado_em")))
+    nao_fecharam = sorted([i for i in ind if i["status"] == "NAO_FECHOU"],
+                          key=lambda i: str(i.get("criado_em")))
     a_agendar = [x for x in selos if x.get("area") and not x.get("agendado_em")]
     esperando = [x for x in selos if not x.get("area")]
     participantes = [p for p in part if p["status"] == "ENVIADO" or p["telefone"] in indicantes]
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("👥 Participantes", len(participantes))
-    m2.metric("🆕 Indicações a tratar", len(novas))
-    m3.metric("🎁 Sessões a agendar", len(a_agendar))
+    conf = st.session_state.get(k + "conf")          # (id da indicacao, "FECHOU"|"NAO_FECHOU")
+    if conf and not pode:
+        st.session_state.pop(k + "conf", None)
+        conf = None
 
-    link = st.column_config.LinkColumn("WhatsApp", display_text="abrir")
-
-    # ---- indicacoes novas
-    st.markdown("### 🆕 Indicações a tratar")
-    if novas:
-        st.dataframe(pd.DataFrame([{
-            "Indicada": i["nome"],
-            "Telefone": "+" + i["telefone"],
-            "WhatsApp": f"https://wa.me/{i['telefone']}",
-            "Tem WhatsApp?": "sim" if i.get("tem_whatsapp") else "não (ligar)",
-            "Quem indicou": nomes.get(i["indicante"], i["indicante"]),
-            "Recebida": _hora_sp(i.get("criado_em")),
-            "Obs.": "⚠️ já está no programa" if i.get("ja_participante") else "",
-        } for i in novas]), use_container_width=True, hide_index=True,
-            column_config={"WhatsApp": link})
-    else:
-        st.success("Nenhuma indicação nova.")
-
-    # ---- decidir (NOVA, ou NAO_FECHOU que depois fechou - decisao B de 24/09)
-    st.markdown("### ✍️ Marcar se fechou")
-    decidiveis = sorted([i for i in ind if i["status"] in ("NOVA", "NAO_FECHOU")],
-                        key=lambda i: (i["status"] != "NOVA", str(i.get("criado_em"))))
-    if not decidiveis:
-        st.caption("Nada para marcar.")
-    else:
-        op = {i["id"]: (f"{i['nome']} · +{i['telefone']} — indicada por "
-                        f"{nomes.get(i['indicante'], i['indicante'])} · {ROTULO_STATUS[i['status']]}")
-              for i in decidiveis}
-        # a escolhida anterior pode ter saido da lista (foi marcada): volta pra 1a
-        if st.session_state.get(k + "sel") not in op:
-            st.session_state.pop(k + "sel", None)
-        sel = st.selectbox("Indicação", list(op), format_func=op.get, key=k + "sel")
-        atual = next(i for i in decidiveis if i["id"] == sel)
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("✅ Fechou plano", disabled=not pode, use_container_width=True,
-                         key=k + "btn_fechou"):
-                st.session_state[k + "conf"] = (sel, "FECHOU")
-                st.rerun()
-        with c2:
-            if st.button("❌ Não fechou", disabled=(not pode or atual["status"] == "NAO_FECHOU"),
-                         use_container_width=True, key=k + "btn_nao"):
-                st.session_state[k + "conf"] = (sel, "NAO_FECHOU")
-                st.rerun()
-
-        conf = st.session_state.get(k + "conf")
-        if conf and conf[0] == sel and pode:
-            quem = nomes.get(atual["indicante"], atual["indicante"])
-            if conf[1] == "FECHOU":
-                st.warning(f"⚠️ Confirmar: **{atual['nome']}** FECHOU plano? **{quem}** ganha "
-                           f"1 selo e recebe a mensagem para escolher a área. **Não dá para "
-                           f"desfazer.**")
-            else:
-                st.warning(f"⚠️ Confirmar: **{atual['nome']}** NÃO fechou? **{quem}** recebe a "
-                           f"mensagem de que a indicação não fechou. Se fechar depois, é só "
-                           f"marcar FECHOU aqui.")
-            s1, s2 = st.columns(2)
-            with s1:
-                if st.button("✅ Sim, confirmar", type="primary", use_container_width=True,
-                             key=k + "btn_sim"):
-                    if st.session_state.get(k + "em_andamento"):
-                        st.warning("⚠️ Já está enviando. Aguarde.")
-                    else:
-                        st.session_state[k + "em_andamento"] = True
-                        try:
-                            st.session_state[k + "msg"] = _decidir(conf[0], conf[1])
-                        finally:
-                            st.session_state[k + "em_andamento"] = False
-                            st.session_state.pop(k + "conf", None)
-                        st.rerun()
-            with s2:
-                if st.button("Cancelar", use_container_width=True, key=k + "btn_cancela"):
-                    st.session_state.pop(k + "conf", None)
+    def _confirmacao(i):
+        """Caixa de confirmacao DENTRO da linha da indicacao escolhida."""
+        quem = _md(nomes.get(i["indicante"], i["indicante"]))
+        if conf[1] == "FECHOU":
+            st.warning(f"⚠️ Confirmar: **{_md(i['nome'])}** FECHOU plano? **{quem}** ganha "
+                       f"1 selo e recebe a mensagem para escolher a área. **Não dá para "
+                       f"desfazer.**")
+        else:
+            st.warning(f"⚠️ Confirmar: **{_md(i['nome'])}** NÃO fechou? **{quem}** recebe a "
+                       f"mensagem de que a indicação não fechou. Se fechar depois, é só "
+                       f"marcar FECHOU aqui.")
+        s1, s2, _ = st.columns([1, 1, 2])
+        with s1:
+            if st.button("✅ Sim, confirmar", type="primary", use_container_width=True,
+                         key=k + f"btn_sim_{i['id']}"):
+                if st.session_state.get(k + "em_andamento"):
+                    st.warning("⚠️ Já está enviando. Aguarde.")
+                else:
+                    st.session_state[k + "em_andamento"] = True
+                    try:
+                        st.session_state[k + "msg"] = _decidir(conf[0], conf[1])
+                    finally:
+                        st.session_state[k + "em_andamento"] = False
+                        st.session_state.pop(k + "conf", None)
                     st.rerun()
+        with s2:
+            if st.button("Cancelar", use_container_width=True, key=k + f"btn_cancela_{i['id']}"):
+                st.session_state.pop(k + "conf", None)
+                st.rerun()
 
-    # ---- sessoes do premio
-    st.markdown("### 🎁 Sessões a agendar")
-    if a_agendar:
-        st.dataframe(pd.DataFrame([{
-            "Cliente": nomes.get(x["telefone"], x["telefone"]),
-            "Telefone": "+" + x["telefone"],
-            "WhatsApp": f"https://wa.me/{x['telefone']}",
-            "Sessão de": areas.get(x["area"], x["area"]),
-            "Selo": f"{x['posicao']}/10" + (f" (cartão {x['cartao']})" if x["cartao"] > 1 else ""),
-            "Escolhida": _hora_sp(x.get("escolhido_em")),
-        } for x in a_agendar]), use_container_width=True, hide_index=True,
-            column_config={"WhatsApp": link})
-        op_s = {x["id"]: f"{nomes.get(x['telefone'], x['telefone'])} — "
-                         f"{areas.get(x['area'], x['area'])} (selo {x['posicao']}/10)"
-                for x in a_agendar}
-        if st.session_state.get(k + "sel_s") not in op_s:
-            st.session_state.pop(k + "sel_s", None)
-        sel_s = st.selectbox("Sessão", list(op_s), format_func=op_s.get, key=k + "sel_s")
-        if st.button("📅 Marcar como agendada", key=k + "btn_agendar"):
-            try:
-                r = _sb().rpc("fid_marcar_agendado", {"p_selo": sel_s, "p_por": "painel"}).execute().data
-            except Exception as e:
-                r = {"ok": False, "erro": str(e)[:200]}
-            st.session_state[k + "msg"] = (("success", "✅ Marcada como agendada.")
-                                           if isinstance(r, dict) and r.get("ok")
-                                           else ("error", f"❌ Não marquei: {r}"))
-            st.rerun()
-    else:
-        st.info("Nenhuma sessão esperando agendamento.")
+    def _linha_indicacao(i, com_nao_fechou):
+        with st.container(border=True):
+            st.markdown(f"{'🆕' if i['status'] == 'NOVA' else '❌'} **{_md(i['nome'])}** · "
+                        f"{_fone(i['telefone'])} · [abrir WhatsApp](https://wa.me/{i['telefone']})")
+            obs = [f"indicada por {_md(nomes.get(i['indicante'], i['indicante']))}",
+                   f"recebida {_hora_sp(i.get('criado_em'))}"]
+            if i["status"] == "NAO_FECHOU":
+                obs.append(f"marcada Não fechou {_hora_sp(i.get('decidido_em'))}")
+            if not i.get("tem_whatsapp"):
+                obs.append("⚠️ sem WhatsApp — ligar")
+            if i.get("ja_participante"):
+                obs.append("⚠️ já está no programa")
+            st.caption(" · ".join(obs))
+            c1, c2, _ = st.columns([1, 1, 2])
+            with c1:
+                if st.button("✅ Fechou", disabled=not pode, use_container_width=True,
+                             key=k + f"btn_fechou_{i['id']}"):
+                    st.session_state[k + "conf"] = (i["id"], "FECHOU")
+                    st.rerun()
+            if com_nao_fechou:
+                with c2:
+                    if st.button("❌ Não fechou", disabled=not pode, use_container_width=True,
+                                 key=k + f"btn_nao_{i['id']}"):
+                        st.session_state[k + "conf"] = (i["id"], "NAO_FECHOU")
+                        st.rerun()
+            if conf and conf[0] == i["id"]:
+                _confirmacao(i)
+
+    # ---- PARA FAZER: indicacoes novas + sessoes do premio
+    n_fazer = len(novas) + len(a_agendar)
+    st.markdown(f"### 📋 Para fazer ({n_fazer})")
+    if not n_fazer:
+        st.success("✅ Nada para fazer agora.")
+
+    for i in novas:
+        _linha_indicacao(i, com_nao_fechou=True)
+
+    for x in a_agendar:
+        with st.container(border=True):
+            cartao = f" · cartão {x['cartao']}" if x["cartao"] > 1 else ""
+            st.markdown(f"📅 **{_md(nomes.get(x['telefone'], x['telefone']))}** quer sessão de "
+                        f"**{_md(areas.get(x['area'], x['area']))}** (selo {x['posicao']}/10{cartao})")
+            st.caption(f"{_fone(x['telefone'])} · [abrir WhatsApp](https://wa.me/{x['telefone']}) · "
+                       f"escolheu {_hora_sp(x.get('escolhido_em'))}")
+            if st.button("📅 Já agendei", key=k + f"btn_agendar_{x['id']}"):
+                try:
+                    r = _sb().rpc("fid_marcar_agendado", {"p_selo": x["id"], "p_por": "painel"}).execute().data
+                except Exception as e:
+                    r = {"ok": False, "erro": str(e)[:200]}
+                st.session_state[k + "msg"] = (("success", "✅ Marcada como agendada.")
+                                               if isinstance(r, dict) and r.get("ok")
+                                               else ("error", f"❌ Não marquei: {r}"))
+                st.rerun()
+
     if esperando:
         st.caption(f"⏳ {len(esperando)} selo(s) esperando a cliente escolher a área.")
 
-    # ---- participantes
-    st.markdown("### 👥 Participantes")
-    if participantes:
-        linhas = []
-        for p in participantes:
-            meus = [x for x in selos if x["telefone"] == p["telefone"]]
-            cartao = max([x["cartao"] for x in meus], default=1)
-            minhas = [i for i in ind if i["indicante"] == p["telefone"]]
-            linhas.append({
-                "Cliente": p["nome"],
-                "Telefone": "+" + p["telefone"],
-                "Selos": f"{sum(1 for x in meus if x['cartao'] == cartao)}/10",
-                "Cartão": cartao,
-                "Indicou": len(minhas),
-                "Fecharam": sum(1 for i in minhas if i["status"] == "FECHOU"),
-                "Não fecharam": sum(1 for i in minhas if i["status"] == "NAO_FECHOU"),
-                "Novas": sum(1 for i in minhas if i["status"] == "NOVA"),
-                "Boas-vindas": _hora_sp(p.get("enviado_em")),
-            })
-        df = pd.DataFrame(linhas).sort_values(["Indicou", "Cliente"], ascending=[False, True])
-        st.dataframe(df, use_container_width=True, hide_index=True)
-    else:
-        st.info("Ninguém no programa ainda.")
+    # ---- NAO FECHOU que pode fechar depois (decisao B de 24/09): fora da fila, mas a mao
+    if nao_fecharam:
+        aberto = bool(conf and conf[0] in {i["id"] for i in nao_fecharam})
+        with st.expander(f"↩️ Não fecharam ({len(nao_fecharam)}) — se fechar depois, marque aqui",
+                         expanded=aberto):
+            for i in nao_fecharam:
+                _linha_indicacao(i, com_nao_fechou=False)
 
-    # ---- historico
+    # ---- participantes (mesma tabela de antes, recolhida)
+    with st.expander(f"👥 Clientes no programa ({len(participantes)})"):
+        if participantes:
+            linhas = []
+            for p in participantes:
+                meus = [x for x in selos if x["telefone"] == p["telefone"]]
+                cartao = max([x["cartao"] for x in meus], default=1)
+                minhas = [i for i in ind if i["indicante"] == p["telefone"]]
+                linhas.append({
+                    "Cliente": p["nome"],
+                    "Telefone": "+" + p["telefone"],
+                    "Selos": f"{sum(1 for x in meus if x['cartao'] == cartao)}/10",
+                    "Cartão": cartao,
+                    "Indicou": len(minhas),
+                    "Fecharam": sum(1 for i in minhas if i["status"] == "FECHOU"),
+                    "Não fecharam": sum(1 for i in minhas if i["status"] == "NAO_FECHOU"),
+                    "Novas": sum(1 for i in minhas if i["status"] == "NOVA"),
+                    "Boas-vindas": _hora_sp(p.get("enviado_em")),
+                })
+            df = pd.DataFrame(linhas).sort_values(["Indicou", "Cliente"], ascending=[False, True])
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        else:
+            st.info("Ninguém no programa ainda.")
+
+    # ---- historico (igual ao de antes)
     if ind:
         ultimo = {}
         for a in avisos:                      # ordenado por id: o ultimo vence
@@ -1187,7 +1197,7 @@ def _render_indicacoes(unidade):
             if a.get("erro_codigo"):
                 return "❌ " + a["erro_codigo"]
             return "⏳ sem confirmação"
-        with st.expander(f"📜 Todas as indicações ({len(ind)})"):
+        with st.expander(f"📜 Histórico de indicações ({len(ind)})"):
             st.dataframe(pd.DataFrame([{
                 "Indicada": i["nome"],
                 "Telefone": "+" + i["telefone"],
