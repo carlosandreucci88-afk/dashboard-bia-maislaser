@@ -19,6 +19,13 @@ FID-10 v1 (29/09/2026) - cada aba de unidade ganha 2 sub-abas: "Disparo" (a tela
   ganha AVISO_NAO_SAIU e AVISO_NAO_ENTREGUE.
 FID-11 v1 (29/09/2026) - Relatorio ganha CARTAO_EM_TEXTO (a imagem do cartao falhou e o
   robo mandou o texto no lugar). Nada mais muda.
+FID-09 v2 (29/09/2026) - o que e SEGURO reenviar, o robo conserta SOZINHO (pergunta,
+  anexo, alerta, boas-vindas da FILA — webhook ?conserto=1) e aparece no Relatorio como
+  "Consertado sozinho". Botao ("🛠️ Resolver um erro") so para o que PODE ter saido ou
+  erro que se repete: disparar boas-vindas / reenviar aviso (pagos, com "conferi no
+  WhatsApp Manager") e "resolvido" (so esconde). Quem decide se pode e o banco.
+FID-09 v2.2 (29/09/2026) - Relatorio ganha CARTAO_NAO_ENTREGUE (a imagem do cartao saiu e
+  a Meta falhou depois; o robo manda em texto sozinho).
 
 Fluxo:
   1. Le fid_config da unidade (ativo, telefone_alerta) + modo_manutencao
@@ -60,7 +67,7 @@ META_API         = "v23.0"                                 # a mesma da webhook-
 HORA_INICIO      = 8                                       # espelha o default do Pos
 HORA_FIM         = 19
 DIAS_REINSCRICAO = 60                                      # espelho do fid_criar_lote
-VERSAO_ABA       = "FID-11 v1"
+VERSAO_ABA       = "FID-09 v2"
 TEMPLATE_FECHOU     = "maislaser_fid_indicacao_fechou_v1"      # Ativo · Servicos (29/09)
 TEMPLATE_NAO_FECHOU = "maislaser_fid_indicacao_nao_fechou_v1"  # Ativo · Servicos (29/09)
 
@@ -110,6 +117,13 @@ PENDENCIAS = [
     ("CARTAO_EM_TEXTO", "🖼️ Cartão saiu em texto",
      "A imagem do cartão não saiu e o robô mandou o texto no lugar — a cliente recebeu a "
      "informação. Se aparecer mais de uma vez, avisar o Carlos (ver Detalhe: etapa e erro)."),
+    ("CARTAO_NAO_ENTREGUE", "🖼️ O cartão não chegou",
+     "A Meta aceitou a imagem do cartão e depois falhou: a cliente não recebeu nada. O robô "
+     "manda o mesmo conteúdo em texto sozinho (1 vez, com a janela de 24 h aberta). Se "
+     "continuar aqui, avisar a cliente pelo WhatsApp da unidade."),
+    ("CONSERTADO_SOZINHO", "🔧 Consertado sozinho",
+     "O robô reenviou sozinho (ver Detalhe: o que e qual tentativa). Nada a fazer — é só "
+     "registro. Se o erro original continuar na lista, as 2 tentativas não bastaram."),
     ("RELOGIO_RELIGADO", "🔧 Consertado sozinho",
      "A pergunta tinha ficado sem programar e a varredura religou. Nada a fazer — é só registro."),
 ]
@@ -475,8 +489,8 @@ def _linhas_erros(itens, com_unidade):
 
 def render_aba_fid_relatorio():
     """FID-05 v2: aba Relatorio do FID - erros de envio + historico dos disparos.
-    SO LE. Nenhum botao de reenvio (Carlos, 29/09). Falhar uma leitura nao
-    derruba a outra."""
+    Falhar uma leitura nao derruba a outra. FID-09: os botoes ficam no bloco
+    "Resolver um erro", abaixo da tabela (_resolver)."""
     k = "fid_rel_"
     st.markdown("## 📋 Relatório — Fidelização")
     c1, c2 = st.columns(2)
@@ -517,7 +531,7 @@ def render_aba_fid_relatorio():
     for f in falhas:
         st.warning(f"⚠️ Não consegui ler {f}")
 
-    reais = [i for i in erros if i.get("tipo") != "RELOGIO_RELIGADO"]
+    reais = [i for i in erros if i.get("tipo") not in ("RELOGIO_RELIGADO", "CONSERTADO_SOZINHO")]
     m1, m2, m3 = st.columns(3)
     m1.metric("📤 Disparos", len(lotes))
     m2.metric("👥 Clientes nos disparos", sum(int(l.get("linhas_validas") or 0) for l in lotes))
@@ -528,7 +542,9 @@ def render_aba_fid_relatorio():
         st.dataframe(pd.DataFrame(_linhas_erros(erros, len(unidades) > 1)),
                      use_container_width=True, hide_index=True)
         st.caption("\"Consertado sozinho\" é só registro. Um erro sai da lista quando a "
-                   "situação da cliente muda ou quando passa do período escolhido.")
+                   "situação da cliente muda, quando é marcado como resolvido, ou quando "
+                   "passa do período escolhido.")
+        _resolver(erros)
     else:
         st.success("Nenhum erro de envio no período.")
 
@@ -546,6 +562,172 @@ def render_aba_fid_relatorio():
         } for l in lotes]), use_container_width=True, hide_index=True)
     else:
         st.info("Nenhum disparo no período.")
+
+
+# ------------------------------------------------------------------ FID-09: resolver
+ROTULO_ACAO = {
+    "boas_vindas": "🔁 Disparar as boas-vindas de novo (template pago)",
+    "aviso":       "🔁 Reenviar o aviso da indicação (template pago)",
+    "resolvido":   "✅ Marcar como resolvido",
+}
+# FID-09 v2: pergunta, anexo, alerta e FILA o robo conserta sozinho (ate 2 vezes).
+# Botao so para o que PODE ter saido ou erro que se repete. Todos ganham "resolvido".
+ACOES = {
+    "ERRO_NO_DISPARO": ["boas_vindas"],
+    "RESERVADO_PRESO": ["boas_vindas"], "TEMPLATE_NAO_ENTREGUE": ["boas_vindas"],
+    "AVISO_NAO_SAIU": ["aviso"], "AVISO_NAO_ENTREGUE": ["aviso"],
+}
+PAGAS = {"boas_vindas", "aviso"}
+MOTIVO_BANCO = {
+    "confirme_no_manager": "pode ter saído. Confira no WhatsApp Manager e marque a caixa "
+                           "\"conferi que NÃO chegou\".",
+    "disparo_em_andamento": "tem um disparo em andamento para ela (menos de 30 min). Espere.",
+    "aviso_em_andamento": "tem um aviso sendo enviado agora (menos de 10 min). Espere.",
+    "ja_respondeu": "ela já recebeu e tocou nas boas-vindas.",
+    "nao_falhou": "a Meta não registrou falha nas boas-vindas dela.",
+    "aviso_nao_falhou": "a Meta não registrou falha nesse aviso.",
+    "sem_participante": "a cliente não está mais no programa.",
+    "indicacao_sem_decisao": "a indicação não está marcada.",
+}
+
+
+def _rpc(nome, args):
+    try:
+        d = _sb().rpc(nome, args).execute().data
+    except Exception as e:
+        return {"ok": False, "motivo": "banco: " + str(e)[:200]}
+    return d if isinstance(d, dict) else {"ok": False, "motivo": f"banco devolveu {d}"}
+
+
+def _recusa(d):
+    m = d.get("motivo") if isinstance(d, dict) else d
+    return "❌ Não fiz: " + MOTIVO_BANCO.get(m, str(m))
+
+
+def _acao_boas_vindas(item, conferido):
+    tel = item["telefone"]
+    d = _rpc("fid_reenfileirar", {"p_telefone": tel, "p_por": "painel", "p_conferido": bool(conferido)})
+    if not d.get("ok"):
+        return "error", _recusa(d)
+    # o mesmo caminho do disparo: carimba -> manda -> confirma (BIA-02)
+    res = _rpc("fid_reservar_participante", {"p_telefone": tel})
+    if not res.get("ok"):
+        return "error", f"❌ Voltou para a fila, mas não consegui reservar: {res}. Tente de novo."
+    wamid, err = enviar_template(tel, d.get("nome"))
+    if wamid:
+        ok, msg = confirmar(tel, wamid)
+        if ok:
+            return "success", "✅ Boas-vindas enviadas de novo."
+        return "error", (f"🔴 SAIU, mas o banco não gravou ({msg}). **NÃO dispare de novo.** "
+                         f"Correção: `select fid_confirmar_envio('{tel}', '{wamid}');`")
+    codigo, mensagem, talvez = err
+    cod = ("TALVEZ_SAIU:" if talvez else "NAO_SAIU:") + codigo
+    _rpc("fid_registrar_erro", {"p_telefone": tel, "p_codigo": cod, "p_mensagem": mensagem})
+    return "error", f"❌ Não saiu ({cod}: {mensagem[:200]}). Continua no Relatório."
+
+
+def _acao_aviso(item, conferido):
+    ind = (item.get("detalhe") or {}).get("indicacao")
+    if not ind:
+        return "error", "❌ Este erro não traz a indicação (Relatório antigo). Recarregue a página."
+    d = _rpc("fid_reenviar_aviso", {"p_indicacao": int(ind), "p_por": "painel",
+                                    "p_conferido": bool(conferido)})
+    if not d.get("ok"):
+        return "error", _recusa(d)
+    quem = d["indicante"]
+    tpl = TEMPLATE_FECHOU if d.get("tipo") == "FECHOU" else TEMPLATE_NAO_FECHOU
+    wamid, err = enviar_template(quem["telefone"], quem["nome"], tpl)
+    if wamid:
+        ok, msg = _confirmar_aviso(d["aviso_id"], wamid)
+        if ok:
+            return "success", f"✅ Aviso reenviado para {quem['nome']}."
+        return "error", (f"🔴 SAIU, mas o banco não gravou ({msg}). **NÃO reenvie.** Correção: "
+                         f"`select fid_confirmar_aviso({d['aviso_id']}, '{wamid}');`")
+    codigo, mensagem, talvez = err
+    cod = ("TALVEZ_SAIU:" if talvez else "NAO_SAIU:") + codigo
+    _rpc("fid_registrar_erro_aviso", {"p_aviso": d["aviso_id"], "p_codigo": cod, "p_mensagem": mensagem})
+    return "error", f"❌ Não saiu ({cod}: {mensagem[:200]}). Continua no Relatório."
+
+
+def _resolver(itens):
+    """FID-09: o bloco de botoes. Um erro por vez: escolhe, ve o que da para fazer,
+    confirma. Quem diz se PODE e o banco; aqui so pergunta e mostra."""
+    k = "fid_rel_res_"
+    st.markdown("### 🛠️ Resolver um erro")
+    msg = st.session_state.pop(k + "msg", None)
+    if msg:
+        getattr(st, msg[0])(msg[1])
+
+    textos = {t: r for t, r, _ in PENDENCIAS}
+    chave = lambda i: f"{i.get('tipo')}|{i.get('telefone')}|{i.get('desde')}"
+    op = {chave(i): i for i in itens}
+    if st.session_state.get(k + "sel") not in op:
+        st.session_state.pop(k + "sel", None)
+    sel = st.selectbox("Erro", list(op), key=k + "sel",
+                       format_func=lambda c: (f"{textos.get(op[c]['tipo'], op[c]['tipo'])} · "
+                                              f"{op[c].get('nome')} · +{op[c].get('telefone')} · "
+                                              f"{_hora_sp(op[c].get('desde'))}"))
+    item = op[sel]
+    acoes = ACOES.get(item.get("tipo"), []) + ["resolvido"]
+
+    try:
+        cfg, manut = _estado(item.get("unidade"))
+    except Exception:
+        cfg, manut = None, True
+    hora = datetime.now(TZ_SP).hour
+    pode_enviar = bool(cfg and cfg.get("ativo") and not manut and HORA_INICIO <= hora < HORA_FIM)
+    if not pode_enviar and len(acoes) > 1:
+        st.caption(f"Reenvio bloqueado agora (FID desligado, manutenção, ou fora de "
+                   f"{HORA_INICIO}h–{HORA_FIM}h). \"Resolvido\" continua valendo.")
+
+    cols = st.columns(len(acoes))
+    for c, a in zip(cols, acoes):
+        with c:
+            if st.button(ROTULO_ACAO[a], key=k + "btn_" + a, use_container_width=True,
+                         disabled=(a != "resolvido" and not pode_enviar)):
+                st.session_state[k + "conf"] = (sel, a)
+                st.rerun()
+
+    conf = st.session_state.get(k + "conf")
+    if not conf or conf[0] != sel:
+        return
+    acao = conf[1]
+    conferido, obs = False, None
+    if acao in PAGAS:
+        st.warning(f"⚠️ {ROTULO_ACAO[acao]} para **{item.get('nome')}** — é template **pago**. "
+                   f"Se a mensagem anterior PODE ter saído, confira no WhatsApp Manager antes.")
+        conferido = st.checkbox("Conferi no WhatsApp Manager que a mensagem anterior NÃO chegou",
+                                key=k + "conferi")
+    elif acao == "resolvido":
+        obs = st.text_input("O que foi feito (opcional)", key=k + "obs")
+    s1, s2 = st.columns(2)
+    with s1:
+        if st.button("✅ Confirmar", type="primary", use_container_width=True, key=k + "btn_sim"):
+            if st.session_state.get(k + "em_andamento"):
+                st.warning("⚠️ Já está enviando. Aguarde.")
+                return
+            st.session_state[k + "em_andamento"] = True
+            try:
+                if acao == "boas_vindas":
+                    r = _acao_boas_vindas(item, conferido)
+                elif acao == "aviso":
+                    r = _acao_aviso(item, conferido)
+                else:
+                    d = _rpc("fid_marcar_resolvido", {"p_tipo": item["tipo"], "p_telefone": item["telefone"],
+                                                      "p_desde": item["desde"], "p_por": "painel",
+                                                      "p_obs": obs or None})
+                    r = (("success", "✅ Marcado como resolvido — saiu da lista.") if d.get("ok")
+                         else ("error", _recusa(d)))
+            finally:
+                st.session_state[k + "em_andamento"] = False
+                st.session_state.pop(k + "conf", None)
+                st.session_state.pop(k + "conferi", None)
+            st.session_state[k + "msg"] = r
+            st.rerun()
+    with s2:
+        if st.button("Cancelar", use_container_width=True, key=k + "btn_nao"):
+            st.session_state.pop(k + "conf", None)
+            st.rerun()
 
 
 def _alerta_editar(unidade, alerta, k):
