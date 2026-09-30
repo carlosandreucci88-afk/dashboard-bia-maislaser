@@ -37,6 +37,12 @@ FID-14 v1 (30/09/2026) - porta aberta: quem escreve para o robo pode ENTRAR no p
   coluna Boas-vindas, e a previa do disparo mostra que ela ENTRA (espelho do fid_criar_lote).
 FID-14 v1.1 (30/09/2026) - a previa tambem acha quem entrou pelo WhatsApp com o numero em
   outro formato (sem o 9), pela mesma chave do banco (_chave_tel = espelho do fid_chave_telefone).
+FID-13 v1 (30/09/2026) - historico da conversa em PDF. Em "Clientes no programa", tocar
+  numa cliente mostra o botao "Baixar historico (PDF)": prova do termo (arquivo com
+  sha256, entregue/lida pela Meta, o "Pode enviar" dela), a conversa inteira e os
+  registros. O banco (fid_historico) registra cada geracao no fid_log. Requer fpdf2.
+  v1.1 (gate): o alerta da recepcao sai do historico de quem o recebe e entra no da
+  cliente; botao "Gerar de novo" (o PDF fica guardado enquanto a cliente esta escolhida).
 
 Fluxo:
   1. Le fid_config da unidade (ativo, telefone_alerta) + modo_manutencao
@@ -78,7 +84,7 @@ META_API         = "v23.0"                                 # a mesma da webhook-
 HORA_INICIO      = 8                                       # espelha o default do Pos
 HORA_FIM         = 19
 DIAS_REINSCRICAO = 60                                      # espelho do fid_criar_lote
-VERSAO_ABA       = "FID-14 v1.1"
+VERSAO_ABA       = "FID-13 v1.1"
 TEMPLATE_FECHOU     = "maislaser_fid_indicacao_fechou_v1"      # Ativo · Servicos (29/09)
 TEMPLATE_NAO_FECHOU = "maislaser_fid_indicacao_nao_fechou_v1"  # Ativo · Servicos (29/09)
 
@@ -1237,7 +1243,15 @@ def _render_indicacoes(unidade):
                                     else _hora_sp(p.get("enviado_em"))),
                 })
             df = pd.DataFrame(linhas).sort_values(["Indicou", "Cliente"], ascending=[False, True])
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            df = df.reset_index(drop=True)
+            st.caption("📄 Toque numa cliente para baixar o histórico da conversa em PDF.")
+            ev = st.dataframe(df, use_container_width=True, hide_index=True,
+                              on_select="rerun", selection_mode="single-row",
+                              key=f"fid_cli_{unidade}")
+            sel = list(ev.selection.rows) if ev is not None else []
+            if sel and 0 <= sel[0] < len(df):
+                _botao_historico(unidade, str(df.iloc[sel[0]]["Telefone"]).lstrip("+"),
+                                 str(df.iloc[sel[0]]["Cliente"]))
         else:
             st.info("Ninguém no programa ainda.")
 
@@ -1265,6 +1279,243 @@ def _render_indicacoes(unidade):
                 "Marcada": _hora_sp(i.get("decidido_em")),
                 "Aviso": _aviso(i),
             } for i in ind]), use_container_width=True, hide_index=True)
+
+
+# ------------------------------------------------------------------ FID-13: historico em PDF
+# Monta o PDF a partir do fid_historico (SO LE; a geracao fica no fid_log do banco).
+# fpdf2 2.7.9 (requirements.txt), fonte padrao Helvetica em windows-1252: acentos do
+# portugues saem; emoji NAO existe nessa fonte e sai como [emoji: nome] - o texto
+# original, com o emoji, esta no banco (fid_conversa e o corpo cru da Meta).
+import unicodedata as _ud
+
+_ROT_STATUS = {"sent": "enviada", "delivered": "entregue", "read": "lida", "failed": "FALHOU"}
+
+
+def _txt_pdf(s):
+    s = "" if s is None else str(s)
+    out = []
+    for ch in s:
+        if ch in "️‍":           # seletor de variacao / juntor de emoji
+            continue
+        try:
+            ch.encode("cp1252")
+            out.append(ch)
+        except UnicodeEncodeError:
+            out.append("[emoji: " + _ud.name(ch, "U+%04X" % ord(ch)).lower() + "]")
+    return "".join(out)
+
+
+def _dt_sp(iso, com_seg=True):
+    if not iso:
+        return "—"
+    try:
+        d = pd.to_datetime(iso, utc=True).tz_convert(TZ_SP)
+        return d.strftime("%d/%m/%Y %H:%M:%S" if com_seg else "%d/%m/%Y %H:%M")
+    except Exception:
+        return str(iso)
+
+
+def _texto_msg(c):
+    """Texto legivel de uma linha de fid_conversa (entrada = objeto da Meta; saida = payload)."""
+    if c.get("direcao") == "ENTRADA":
+        m = c.get("conteudo") or {}
+        t = m.get("type")
+        if t == "text":
+            return (m.get("text") or {}).get("body", "")
+        if t == "button":
+            return "[tocou no botão] " + str((m.get("button") or {}).get("text", ""))
+        if t == "interactive":
+            it = m.get("interactive") or {}
+            r = it.get("button_reply") or it.get("list_reply") or {}
+            return "[tocou no botão] " + str(r.get("title", ""))
+        if t == "contacts":
+            cs = []
+            for x in m.get("contacts") or []:
+                nome = (x.get("name") or {}).get("formatted_name", "")
+                tels = ", ".join(str(p.get("wa_id") or p.get("phone") or "") for p in x.get("phones") or [])
+                cs.append((nome + " " + tels).strip())
+            return "[contato] " + "; ".join(cs)
+        if t in ("image", "video", "audio", "document", "sticker"):
+            md = m.get(t) or {}
+            extra = " ".join(str(md.get(k)) for k in ("filename", "caption") if md.get(k))
+            return "[" + {"image": "imagem", "video": "vídeo", "audio": "áudio",
+                          "document": "documento", "sticker": "figurinha"}[t] + "] " + extra
+        if t == "location":
+            lo = m.get("location") or {}
+            return "[localização] " + str(lo.get("latitude", "")) + ", " + str(lo.get("longitude", ""))
+        if t == "reaction":
+            return "[reação] " + str((m.get("reaction") or {}).get("emoji", ""))
+        return "[" + str(t) + "]"
+    p = (c.get("conteudo") or {}).get("payload") or {}
+    t = p.get("type")
+    if t == "text":
+        return (p.get("text") or {}).get("body", "")
+    if t == "document":
+        d = p.get("document") or {}
+        return "[documento] " + str(d.get("filename", "")) + " — " + str(d.get("caption", ""))
+    if t == "image":
+        d = p.get("image") or {}
+        return "[imagem] " + str(d.get("caption", ""))
+    if t == "interactive":
+        it = p.get("interactive") or {}
+        corpo = (it.get("body") or {}).get("text", "")
+        bts = [(b.get("reply") or {}).get("title", "") for b in (it.get("action") or {}).get("buttons") or []]
+        if bts:
+            return corpo + "\n[botões: " + " | ".join(bts) + "]"
+        if (it.get("action") or {}).get("sections"):
+            return corpo + "\n[lista: " + str((it.get("action") or {}).get("button", "")) + "]"
+        return corpo
+    if t == "template":
+        return "[modelo aprovado pela Meta: " + str((p.get("template") or {}).get("name", "")) + "]"
+    return "[" + str(t) + "]"
+
+
+def _pdf_historico(d):
+    from fpdf import FPDF
+    p = d.get("participante") or {}
+    conv = d.get("conversa") or []
+    st_por = {}
+    for s in d.get("status") or []:
+        st_por.setdefault(s.get("wamid"), []).append(s)
+    doc_por_wamid = {c.get("wamid"): (c.get("conteudo") or {}).get("documento")
+                     for c in conv if c.get("direcao") == "SAIDA" and c.get("wamid")}
+
+    def linha_status(w):
+        ss = st_por.get(w) or []
+        if not ss:
+            return "sem confirmação da Meta registrada"
+        partes = []
+        for s in ss:
+            txt = _ROT_STATUS.get(s.get("status"), s.get("status")) + " " + _dt_sp(s.get("ocorrido_em"))
+            if s.get("status") == "failed" and s.get("erros"):
+                txt += " (" + str(s.get("erros"))[:200] + ")"
+            partes.append(txt)
+        return "Meta: " + " · ".join(partes)
+
+    pdf = FPDF(format="A4")
+    pdf.core_fonts_encoding = "windows-1252"
+    pdf.set_auto_page_break(True, margin=15)
+    pdf.set_margins(15, 15, 15)
+    pdf.add_page()
+    L = pdf.w - 30
+
+    def titulo(t, tam=13):
+        pdf.ln(2)
+        pdf.set_font("Helvetica", "B", tam)
+        pdf.multi_cell(L, 7, _txt_pdf(t), align="L", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 9)
+
+    def par(t, negrito=False, tam=9, h=4.6):
+        pdf.set_font("Helvetica", "B" if negrito else "", tam)
+        pdf.multi_cell(L, h, _txt_pdf(t), align="L", new_x="LMARGIN", new_y="NEXT")
+
+    titulo("Histórico da conversa — Cartão Fidelidade Maislaser", 15)
+    par("Cliente: " + str(p.get("nome") or "—") + "   ·   Telefone: +" + str(p.get("telefone") or d.get("telefone_pedido") or "")
+        + "   ·   Unidade: " + str(p.get("unidade") or "—"))
+    par("Origem: " + str(p.get("origem") or "—") + "   ·   Status: " + str(p.get("status") or "—")
+        + "   ·   Ciclo: " + str(p.get("ciclo") or "—"))
+    par("Gerado em " + _dt_sp(d.get("gerado_em")) + " (horário de Brasília), pelo painel. "
+        "Horários \"Meta\" são os informados pela própria Meta (WhatsApp).", tam=8)
+
+    # ---- 1. o termo
+    titulo("1. Prova do envio do termo de consentimento")
+    termos = [a for a in d.get("anexos") or [] if a.get("tipo") == "termo"]
+    resp = [l for l in d.get("log") or [] if l.get("evento") == "RESPOSTA"]
+    for l in resp:
+        par("Pedido da cliente: tocou em \"" + str((l.get("detalhe") or {}).get("botao", "")) + "\" em "
+            + _dt_sp(l.get("criado_em")) + " (mensagem " + str((l.get("detalhe") or {}).get("wamid", "")) + ")")
+    if not termos:
+        par("Nenhum envio de termo registrado para este número.")
+    for a in termos:
+        par("Termo enviado em " + _dt_sp(a.get("enviado_em")) + " (ciclo " + str(a.get("ciclo")) + ")", negrito=True)
+        par("Mensagem (wamid): " + str(a.get("wamid")))
+        par(linha_status(a.get("wamid")))
+        dv = doc_por_wamid.get(a.get("wamid"))
+        if dv and dv.get("sha256"):
+            par("Arquivo enviado: " + str(dv.get("url_copia")) + "  (" + str(dv.get("bytes")) + " bytes)")
+            par("SHA-256 do arquivo: " + str(dv.get("sha256")))
+        elif dv:
+            par("Arquivo enviado pelo link original " + str(dv.get("url_origem")) + " — versão NÃO registrada ("
+                + str(dv.get("erro") or "") + ")")
+        else:
+            par("Envio anterior ao registro de versões (FID-13): o conteúdo exato do arquivo não foi registrado.")
+        pdf.ln(1)
+
+    # ---- 2. linha do tempo
+    titulo("2. Linha do tempo da conversa")
+    itens = []
+    for c in conv:
+        quem = "CLIENTE" if c.get("direcao") == "ENTRADA" else "ROBÔ"
+        if (c.get("conteudo") or {}).get("alerta_sobre"):
+            quem = "ROBÔ para a RECEPÇÃO (+" + str(c.get("telefone")) + "): aviso de que ela pediu ajuda"
+        itens.append((c.get("ocorrido_em") or "", quem,
+                      _texto_msg(c), c.get("wamid") if c.get("direcao") == "SAIDA" else None, c.get("erro")))
+    ja = {c.get("wamid") for c in conv}
+    for l in d.get("log") or []:
+        w = (l.get("detalhe") or {}).get("wamid")
+        if l.get("evento") == "ENVIADO" and w and w not in ja:
+            itens.append((l.get("criado_em") or "", "PAINEL", "[modelo de boas-vindas aprovado pela Meta]", w, None))
+    for av in d.get("avisos") or []:
+        if av.get("wamid") and av.get("wamid") not in ja:
+            itens.append((av.get("enviado_em") or av.get("reservado_em") or "", "PAINEL",
+                          "[modelo de aviso: " + str(av.get("tipo")) + "]", av.get("wamid"), None))
+    itens.sort(key=lambda x: pd.to_datetime(x[0], utc=True).value if x[0] else 0)
+    if not itens:
+        par("Nenhuma mensagem registrada. (O texto das conversas é guardado desde o FID-13, 30/09/2026.)")
+    for quando, quem, txt, w, erro in itens:
+        par(_dt_sp(quando) + "   " + quem, negrito=True, tam=8, h=4.2)
+        par(txt)
+        if erro:
+            par("NÃO SAIU: " + str(erro), tam=8)
+        elif w:
+            par(linha_status(w), tam=8)
+        pdf.ln(0.8)
+
+    # ---- 3. registros do sistema
+    titulo("3. Registros do sistema (fid_log)")
+    for l in d.get("log") or []:
+        det = l.get("detalhe")
+        par(_dt_sp(l.get("criado_em")) + "  " + str(l.get("evento")) + ("  " + json.dumps(det, ensure_ascii=False)[:220] if det else ""), tam=7.5, h=3.8)
+
+    # ---- 4. integridade
+    titulo("4. Integridade")
+    par("Cada mensagem recebida guarda o corpo ORIGINAL enviado pela Meta e a assinatura x-hub-signature-256 "
+        "(HMAC-SHA256 do corpo com o App Secret do aplicativo), conferida na chegada. Quem tem o App Secret "
+        "pode reconferir a assinatura sobre o corpo guardado.", tam=8)
+    for e in d.get("eventos") or []:
+        par("Evento da Meta " + str(e.get("id")) + " · recebido " + _dt_sp(e.get("recebido_em")) + " · SHA-256 do corpo "
+            + str(e.get("sha256")), tam=7.5, h=3.8)
+    for dc in d.get("documentos") or []:
+        par("Documento " + str(dc.get("url_copia")) + " · SHA-256 " + str(dc.get("sha256")) + " · origem "
+            + str(dc.get("url_origem")) + " · registrado " + _dt_sp(dc.get("criado_em")), tam=7.5, h=3.8)
+    par("Emojis aparecem como [emoji: nome]: a fonte do PDF não tem desenho para eles; o texto original está no banco.", tam=7.5)
+    return bytes(pdf.output())
+
+
+def _botao_historico(unidade, tel, nome):
+    """Gera o PDF UMA vez por cliente escolhida (fica na sessao) e mostra o botao de baixar."""
+    ck = f"fid_pdf_{unidade}"
+    c1, c2 = st.columns([3, 1])
+    with c2:
+        if st.button("🔄 Gerar de novo", key=f"fid_pdfnovo_{unidade}",
+                     help="Refaz o PDF com as mensagens que chegaram depois"):
+            st.session_state.pop(ck, None)
+    atual = st.session_state.get(ck)
+    if not atual or atual[0] != tel:
+        try:
+            d = _sb().rpc("fid_historico", {"p_telefone": tel, "p_por": "painel"}).execute().data
+            atual = (tel, _pdf_historico(d), None, datetime.now(TZ_SP).strftime('%Y%m%d-%H%M'))
+        except Exception as e:
+            atual = (tel, None, str(e)[:300], "")
+        st.session_state[ck] = atual
+    _, pdf, erro, quando = atual
+    with c1:
+        if pdf:
+            st.download_button(f"📄 Baixar histórico de {nome} (PDF)", data=pdf,
+                               file_name=f"historico-fid-{tel}-{quando}.pdf",
+                               mime="application/pdf", key=f"fid_pdfbt_{unidade}")
+        else:
+            st.error(f"❌ Não consegui gerar o histórico: {erro}")
 
 
 def _render_unidade(unidade):
