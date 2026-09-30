@@ -32,6 +32,11 @@ FID-12 v1 (29/09/2026) - Carlos: a tela de Indicacoes "ficou misturada, carregad
 FID-12 v1.2 (29/09/2026) - Carlos: "nao precisa do resolvido, ja foi consertado sozinho".
   No Relatorio, o que e SO registro (Consertado sozinho) sai da tabela de erros e do
   "Resolver um erro" e fica recolhido embaixo. A tabela e o botao sao so de erro de verdade.
+FID-14 v1 (30/09/2026) - porta aberta: quem escreve para o robo pode ENTRAR no programa
+  (origem WHATSAPP, sem boas-vindas). Aqui: a lista de clientes mostra "📲 WhatsApp" na
+  coluna Boas-vindas, e a previa do disparo mostra que ela ENTRA (espelho do fid_criar_lote).
+FID-14 v1.1 (30/09/2026) - a previa tambem acha quem entrou pelo WhatsApp com o numero em
+  outro formato (sem o 9), pela mesma chave do banco (_chave_tel = espelho do fid_chave_telefone).
 
 Fluxo:
   1. Le fid_config da unidade (ativo, telefone_alerta) + modo_manutencao
@@ -73,7 +78,7 @@ META_API         = "v23.0"                                 # a mesma da webhook-
 HORA_INICIO      = 8                                       # espelha o default do Pos
 HORA_FIM         = 19
 DIAS_REINSCRICAO = 60                                      # espelho do fid_criar_lote
-VERSAO_ABA       = "FID-12 v1.2"
+VERSAO_ABA       = "FID-14 v1.1"
 TEMPLATE_FECHOU     = "maislaser_fid_indicacao_fechou_v1"      # Ativo · Servicos (29/09)
 TEMPLATE_NAO_FECHOU = "maislaser_fid_indicacao_nao_fechou_v1"  # Ativo · Servicos (29/09)
 
@@ -255,6 +260,8 @@ def _prever(atual):
         return "pula", "em envio agora"
     if s == "ERRO":
         return "pula", "erro no envio anterior — reenvio é decisão caso a caso"
+    if s == "ENVIADO" and atual.get("origem") == "WHATSAPP" and not atual.get("wamid"):
+        return "entra", "entrou pelo WhatsApp — agora recebe as boas-vindas"
     if s == "ENVIADO" and not atual.get("respondeu_em"):
         return "pula", "ainda não respondeu as boas-vindas anteriores"
     if s == "ENVIADO":
@@ -266,15 +273,56 @@ def _prever(atual):
     return "pula", f"estado desconhecido ({s})"
 
 
+def _chave_tel(p):
+    """ESPELHO do fid_chave_telefone (FID-10). Mesmo numero em formatos diferentes -> mesma chave."""
+    p = p or ""
+    d = re.sub(r"[^0-9]", "", p)
+    if re.match(r"^\s*\+", p):
+        d2 = d
+    elif re.fullmatch(r"0055[1-9]{2}[0-9]{8,9}", d):
+        d2 = d[2:]
+    elif re.fullmatch(r"0[0-9]{2}[1-9]{2}[0-9]{8,9}", d):
+        d2 = "55" + d[3:]
+    elif re.fullmatch(r"0[1-9]{2}[0-9]{8,9}", d):
+        d2 = "55" + d[1:]
+    elif len(d) in (10, 11):
+        d2 = "55" + d
+    else:
+        d2 = d
+    if re.fullmatch(r"55[0-9]{2}[6-9][0-9]{7}", d2):
+        return d2[:4] + "9" + d2[4:]
+    return d2
+
+
 def prever(validos):
     tels = [v["telefone"] for v in validos]
     atuais = {}
     for i in range(0, len(tels), 100):
         r = (_sb().table("fid_participantes")
-               .select("telefone,status,respondeu_em,enviado_em,criado_em,ciclo")
+               .select("telefone,status,respondeu_em,enviado_em,criado_em,ciclo,origem,wamid")
                .in_("telefone", tels[i:i + 100]).execute())
         for a in (r.data or []):
             atuais[a["telefone"]] = a
+    # FID-14 v1.1: quem entrou pelo WhatsApp pode estar gravado em outro formato (sem o 9).
+    # O fid_criar_lote acha pela chave (so origem WHATSAPP, o 1o por telefone): aqui igual.
+    faltam = [t for t in tels if t not in atuais]
+    if faltam:
+        wpp, ultimo = {}, None
+        while True:
+            q = (_sb().table("fid_participantes")
+                   .select("telefone,status,respondeu_em,enviado_em,criado_em,ciclo,origem,wamid")
+                   .eq("origem", "WHATSAPP"))
+            if ultimo is not None:
+                q = q.gt("telefone", ultimo)
+            dados = q.order("telefone").limit(1000).execute().data or []
+            if not dados:
+                break
+            for a in dados:
+                wpp.setdefault(_chave_tel(a["telefone"]), a)
+            ultimo = dados[-1]["telefone"]
+        for t in faltam:
+            if _chave_tel(t) in wpp:
+                atuais[t] = wpp[_chave_tel(t)]
     linhas = []
     for v in validos:
         acao, motivo = _prever(atuais.get(v["telefone"]))
@@ -942,7 +990,7 @@ def _ler_indicacoes(unidade):
                      "decidido_por,decidido_em,criado_em")
              .eq("unidade", unidade).order("criado_em", desc=True).limit(5000)
              .execute().data) or []
-    part = (sb.table("fid_participantes").select("telefone,nome,status,enviado_em")
+    part = (sb.table("fid_participantes").select("telefone,nome,status,enviado_em,origem,criado_em")
               .eq("unidade", unidade).limit(5000).execute().data) or []
     # 🔴 filtrado NO BANCO, em lotes de 100 (como o prever): o PostgREST do Supabase
     # corta em 1000 linhas por padrao, e ler tudo para filtrar aqui perderia linhas.
@@ -1184,7 +1232,9 @@ def _render_indicacoes(unidade):
                     "Fecharam": sum(1 for i in minhas if i["status"] == "FECHOU"),
                     "Não fecharam": sum(1 for i in minhas if i["status"] == "NAO_FECHOU"),
                     "Novas": sum(1 for i in minhas if i["status"] == "NOVA"),
-                    "Boas-vindas": _hora_sp(p.get("enviado_em")),
+                    "Boas-vindas": (f"📲 WhatsApp {_hora_sp(p.get('criado_em'))}"
+                                    if p.get("origem") == "WHATSAPP" and not p.get("enviado_em")
+                                    else _hora_sp(p.get("enviado_em"))),
                 })
             df = pd.DataFrame(linhas).sort_values(["Indicou", "Cliente"], ascending=[False, True])
             st.dataframe(df, use_container_width=True, hide_index=True)
