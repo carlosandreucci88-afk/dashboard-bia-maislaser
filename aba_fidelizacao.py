@@ -51,6 +51,9 @@ FID-21 v1 (05/10/2026) - Carlos: na fila de Indicacoes "um quadradinho para tica
   em cima da fila, "Fechou (N)" / "Nao fechou (N)" com a MESMA confirmacao e o MESMO
   _decidir de uma por uma, em sequencia (1 s entre as mensagens, como o disparo). O banco
   continua sendo o juiz de cada uma. Os botoes de cada linha continuam iguais.
+FID-22 v1 (05/10/2026) - Carlos: "um campo de busca no nao fecharam para quando quiserem
+  achar rapido por nome ou telefone". Filtra SO o que aparece dentro de "Nao fecharam";
+  nome sem acento e sem maiuscula, telefone so pelos digitos. SO TELA.
 
 Fluxo:
   1. Le fid_config da unidade (ativo, telefone_alerta) + modo_manutencao
@@ -92,7 +95,7 @@ META_API         = "v23.0"                                 # a mesma da webhook-
 HORA_INICIO      = 8                                       # espelha o default do Pos
 HORA_FIM         = 19
 DIAS_REINSCRICAO = 60                                      # espelho do fid_criar_lote
-VERSAO_ABA       = "FID-21 v1"
+VERSAO_ABA       = "FID-22 v1"
 TEMPLATE_FECHOU     = "maislaser_fid_indicacao_fechou_v1"      # Ativo · Servicos (29/09)
 TEMPLATE_NAO_FECHOU = "maislaser_fid_indicacao_nao_fechou_v1"  # Ativo · Servicos (29/09)
 
@@ -1181,6 +1184,25 @@ def _fone(t):
     return "+" + t
 
 
+def _busca_norm(v):
+    """FID-22: minusculas e sem acento, para a busca do 'Nao fecharam'."""
+    import unicodedata
+    s = unicodedata.normalize("NFD", str(v if v is not None else "").lower())
+    return "".join(c for c in s if unicodedata.category(c) != "Mn").strip()
+
+
+def _busca_bate(i, termo):
+    """FID-22: o termo bate com o nome da indicada OU com o telefone dela (so digitos;
+    a partir de 3 digitos, para '11' nao trazer todo mundo)."""
+    t = _busca_norm(termo)
+    if not t:
+        return True
+    if t in _busca_norm(i.get("nome")):
+        return True
+    dig = "".join(c for c in t if c.isdigit())
+    return len(dig) >= 3 and dig in "".join(c for c in str(i.get("telefone") or "") if c.isdigit())
+
+
 def _md(v):
     """Nome que veio do contato do WhatsApp: escapa o que o markdown entenderia."""
     s = str(v if v is not None else "")
@@ -1404,10 +1426,18 @@ def _render_indicacoes(unidade):
 
     # ---- NAO FECHOU que pode fechar depois (decisao B de 24/09): fora da fila, mas a mao
     if nao_fecharam:
-        aberto = bool(conf and conf[0] in {i["id"] for i in nao_fecharam})
+        termo_nf = str(st.session_state.get(k + "busca_nf") or "")          # FID-22
+        aberto = bool(conf and conf[0] in {i["id"] for i in nao_fecharam}) or bool(termo_nf.strip())
         with st.expander(f"↩️ Não fecharam ({len(nao_fecharam)}) — se fechar depois, marque aqui",
                          expanded=aberto):
-            for i in nao_fecharam:
+            termo_nf = st.text_input("🔎 Buscar por nome ou telefone", key=k + "busca_nf",
+                                     placeholder="ex.: Ana  ou  99919")
+            achadas = [i for i in nao_fecharam if _busca_bate(i, termo_nf)]
+            if termo_nf.strip():
+                st.caption(f"{len(achadas)} de {len(nao_fecharam)}")
+                if not achadas:
+                    st.info("Nenhuma indicação com esse nome ou telefone.")
+            for i in achadas:
                 _linha_indicacao(i, com_nao_fechou=False)
 
     # ---- participantes (mesma tabela de antes, recolhida)
