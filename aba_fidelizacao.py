@@ -43,6 +43,9 @@ FID-13 v1 (30/09/2026) - historico da conversa em PDF. Em "Clientes no programa"
   registros. O banco (fid_historico) registra cada geracao no fid_log. Requer fpdf2.
   v1.1 (gate): o alerta da recepcao sai do historico de quem o recebe e entra no da
   cliente; botao "Gerar de novo" (o PDF fica guardado enquanto a cliente esta escolhida).
+FID-20 v1 (05/10/2026) - Carlos: no Relatorio, "quantas pessoas receberam, % de leitura,
+  quantas clicaram no Pode enviar e quantas enviaram contato". Cada disparo ganha essas
+  colunas e o periodo ganha os totais (_funil_lotes). SO LE. Nada mais muda.
 
 Fluxo:
   1. Le fid_config da unidade (ativo, telefone_alerta) + modo_manutencao
@@ -547,6 +550,69 @@ def _linhas_erros(itens, com_unidade):
     return linhas
 
 
+# ------------------------------------------------------------------ FID-20: funil do disparo
+def _ler_partes(tabela, colunas, coluna, valores, ordem, filtro=None):
+    """SO LE. 'coluna in valores' em grupos de 100 e paginas de 1.000 (o teto de linhas
+    do PostgREST do Supabase): sem isso um periodo grande vinha cortado sem aviso."""
+    linhas = []
+    valores = sorted(set(v for v in valores if v not in (None, "")))
+    for i in range(0, len(valores), 100):
+        ini = 0
+        while True:
+            q = _sb().table(tabela).select(colunas).in_(coluna, valores[i:i + 100])
+            if filtro:
+                q = filtro(q)
+            pag = (q.order(ordem).range(ini, ini + 999).execute().data) or []
+            linhas += pag
+            if len(pag) < 1000:
+                break
+            ini += 1000
+    return linhas
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _funil_lotes(ids):
+    """FID-20: por lote -> receberam / leram / tocaram / mandaram contato / contatos. SO LE.
+    Conta quem esta no lote HOJE (fid_participantes.lote_id): quem foi disparado de novo
+    conta no lote novo. Receberam = a Meta entregou o template (delivered/read) OU ela tocou.
+    Leram = read OU tocou (quem desliga a confirmacao de leitura so aparece se tocar: piso).
+    Tocaram = respondeu_em (o "Pode enviar" do template, do lembrete ou o botao novo).
+    Contato = mandou >= 1 indicacao (fid_indicacoes.indicante = telefone dela)."""
+    part = _ler_partes("fid_participantes", "telefone,lote_id,wamid,respondeu_em",
+                       "lote_id", list(ids), "telefone")
+    sts = _ler_partes("fid_status", "id,wamid,status", "wamid",
+                      [p.get("wamid") for p in part], "id",
+                      lambda q: q.in_("status", ["delivered", "read"]))
+    entregue = set(s.get("wamid") for s in sts)
+    lido = set(s.get("wamid") for s in sts if s.get("status") == "read")
+    ind = _ler_partes("fid_indicacoes", "id,indicante", "indicante",
+                      [p.get("telefone") for p in part], "id")
+    n_ind = {}
+    for i in ind:
+        n_ind[i.get("indicante")] = n_ind.get(i.get("indicante"), 0) + 1
+    f = {}
+    for p in part:
+        x = f.setdefault(p.get("lote_id"), {"receberam": 0, "leram": 0, "tocaram": 0,
+                                             "contato": 0, "contatos": 0})
+        w = p.get("wamid")
+        tocou = bool(p.get("respondeu_em"))
+        if tocou or (w and w in entregue):
+            x["receberam"] += 1
+        if tocou or (w and w in lido):
+            x["leram"] += 1
+        if tocou:
+            x["tocaram"] += 1
+        k = n_ind.get(p.get("telefone"), 0)
+        if k:
+            x["contato"] += 1
+            x["contatos"] += k
+    return f
+
+
+def _pct(n, base):
+    return (str(int(round(100.0 * n / base))) + "%") if base else "—"
+
+
 def render_aba_fid_relatorio():
     """FID-05 v2: aba Relatorio do FID - erros de envio + historico dos disparos.
     Falhar uma leitura nao derruba a outra. FID-09: os botoes ficam no bloco
@@ -588,6 +654,13 @@ def render_aba_fid_relatorio():
     except Exception as e:
         falhas.append(f"disparos: {str(e)[:150]}")
 
+    funil = {}
+    if lotes:
+        try:
+            funil = _funil_lotes(tuple(sorted(int(l["id"]) for l in lotes)))
+        except Exception as e:
+            falhas.append(f"o funil dos disparos: {str(e)[:150]}")
+
     for f in falhas:
         st.warning(f"⚠️ Não consegui ler {f}")
 
@@ -596,6 +669,17 @@ def render_aba_fid_relatorio():
     m1.metric("📤 Disparos", len(lotes))
     m2.metric("👥 Clientes nos disparos", sum(int(l.get("linhas_validas") or 0) for l in lotes))
     m3.metric("❌ Erros de envio", len(reais))
+    if funil:
+        tot = dict((c, sum(v[c] for v in funil.values()))
+                   for c in ("receberam", "leram", "tocaram", "contato", "contatos"))
+        rec = tot["receberam"]
+        n1, n2, n3, n4 = st.columns(4)
+        n1.metric("📬 Receberam", rec)
+        n2.metric("👀 Leram", _pct(tot["leram"], rec),
+                  help="Leitura confirmada pelo WhatsApp ou tocou no botão. Quem desliga a "
+                       "confirmação de leitura só conta se tocar — o número real é igual ou maior.")
+        n3.metric("👆 Tocaram \"Pode enviar\"", str(tot["tocaram"]) + " (" + _pct(tot["tocaram"], rec) + ")")
+        n4.metric("📇 Mandaram contato", str(tot["contato"]) + " (" + str(tot["contatos"]) + " contatos)")
 
     st.markdown("### ❌ Erros de envio")
     if reais:
@@ -622,9 +706,25 @@ def render_aba_fid_relatorio():
             "Linhas": l.get("linhas_lidas"),
             "Entraram": l.get("linhas_validas"),
             "Pularam": l.get("linhas_puladas"),
+            "Receberam": str(funil[l["id"]]["receberam"]) if l.get("id") in funil else "—",
+            "Leram": _pct(funil[l["id"]]["leram"], funil[l["id"]]["receberam"]) if l.get("id") in funil else "—",
+            "Tocaram \"Pode enviar\"": (str(funil[l["id"]]["tocaram"]) + " (" +
+                                        _pct(funil[l["id"]]["tocaram"], funil[l["id"]]["receberam"]) + ")")
+                                       if l.get("id") in funil else "—",
+            "Mandaram contato": (str(funil[l["id"]]["contato"]) +
+                                 (" (" + str(funil[l["id"]]["contatos"]) + " contatos)"
+                                  if funil[l["id"]]["contatos"] else ""))
+                                if l.get("id") in funil else "—",
             "Alerta do lote": ("+" + l["telefone_alerta"]) if l.get("telefone_alerta") else "—",
             "Lote": l.get("id"),
         } for l in lotes]), use_container_width=True, hide_index=True)
+        if funil:
+            st.caption("Receberam: a Meta entregou as boas-vindas (ou ela tocou). Leram: leitura "
+                       "confirmada pelo WhatsApp ou tocou — é um piso, quem desliga a confirmação só "
+                       "conta se tocar. Tocaram: o \"Pode enviar\" do template, do lembrete ou o "
+                       "botão novo. Mandaram contato: ao menos 1 indicação (entre parênteses, "
+                       "quantos contatos). Conta quem está no lote hoje: quem foi disparado de "
+                       "novo conta no lote novo. Atualiza a cada 1 minuto.")
     else:
         st.info("Nenhum disparo no período.")
 
