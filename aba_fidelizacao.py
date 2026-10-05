@@ -46,6 +46,11 @@ FID-13 v1 (30/09/2026) - historico da conversa em PDF. Em "Clientes no programa"
 FID-20 v1 (05/10/2026) - Carlos: no Relatorio, "quantas pessoas receberam, % de leitura,
   quantas clicaram no Pode enviar e quantas enviaram contato". Cada disparo ganha essas
   colunas e o periodo ganha os totais (_funil_lotes). SO LE. Nada mais muda.
+FID-21 v1 (05/10/2026) - Carlos: na fila de Indicacoes "um quadradinho para ticar varios ao
+  mesmo tempo" e marcar FECHOU / NAO FECHOU em lote. Cada indicacao nova ganha uma caixa;
+  em cima da fila, "Fechou (N)" / "Nao fechou (N)" com a MESMA confirmacao e o MESMO
+  _decidir de uma por uma, em sequencia (1 s entre as mensagens, como o disparo). O banco
+  continua sendo o juiz de cada uma. Os botoes de cada linha continuam iguais.
 
 Fluxo:
   1. Le fid_config da unidade (ativo, telefone_alerta) + modo_manutencao
@@ -87,7 +92,7 @@ META_API         = "v23.0"                                 # a mesma da webhook-
 HORA_INICIO      = 8                                       # espelha o default do Pos
 HORA_FIM         = 19
 DIAS_REINSCRICAO = 60                                      # espelho do fid_criar_lote
-VERSAO_ABA       = "FID-13 v1.1"
+VERSAO_ABA       = "FID-21 v1"
 TEMPLATE_FECHOU     = "maislaser_fid_indicacao_fechou_v1"      # Ativo · Servicos (29/09)
 TEMPLATE_NAO_FECHOU = "maislaser_fid_indicacao_nao_fechou_v1"  # Ativo · Servicos (29/09)
 
@@ -1194,6 +1199,8 @@ def _render_indicacoes(unidade):
     aviso = st.session_state.pop(k + "msg", None)
     if aviso:
         getattr(st, aviso[0])(aviso[1])
+    for tipo_msg, texto_msg in st.session_state.pop(k + "msg_lote", []):   # FID-21
+        getattr(st, tipo_msg)(texto_msg)
 
     try:
         cfg, manut = _estado(unidade)
@@ -1258,6 +1265,8 @@ def _render_indicacoes(unidade):
 
     def _linha_indicacao(i, com_nao_fechou):
         with st.container(border=True):
+            if i["status"] == "NOVA" and pode:   # FID-21: a caixa para marcar em lote
+                st.checkbox("Selecionar", key=k + f"sel_{i['id']}")
             st.markdown(f"{'🆕' if i['status'] == 'NOVA' else '❌'} **{_md(i['nome'])}** · "
                         f"{_fone(i['telefone'])} · [abrir WhatsApp](https://wa.me/{i['telefone']})")
             obs = [f"indicada por {_md(nomes.get(i['indicante'], i['indicante']))}",
@@ -1274,12 +1283,14 @@ def _render_indicacoes(unidade):
                 if st.button("✅ Fechou", disabled=not pode, use_container_width=True,
                              key=k + f"btn_fechou_{i['id']}"):
                     st.session_state[k + "conf"] = (i["id"], "FECHOU")
+                    st.session_state.pop(k + "conf_lote", None)      # FID-21: uma confirmacao por vez
                     st.rerun()
             if com_nao_fechou:
                 with c2:
                     if st.button("❌ Não fechou", disabled=not pode, use_container_width=True,
                                  key=k + f"btn_nao_{i['id']}"):
                         st.session_state[k + "conf"] = (i["id"], "NAO_FECHOU")
+                        st.session_state.pop(k + "conf_lote", None)  # FID-21
                         st.rerun()
             if conf and conf[0] == i["id"]:
                 _confirmacao(i)
@@ -1289,6 +1300,84 @@ def _render_indicacoes(unidade):
     st.markdown(f"### 📋 Para fazer ({n_fazer})")
     if not n_fazer:
         st.success("✅ Nada para fazer agora.")
+
+    # ---- FID-21: marcar em lote (so as novas). Fica ACIMA das caixas: assim "Selecionar
+    # todas"/"Limpar" e o fim do lote mexem nas caixas antes de elas existirem nesta rodada.
+    if novas and pode:
+        ids_novas = [i["id"] for i in novas]
+        escolhidas = [i for i in novas if st.session_state.get(k + f"sel_{i['id']}")]
+        lote_conf = st.session_state.get(k + "conf_lote")      # ("FECHOU"|"NAO_FECHOU", [ids])
+        with st.container(border=True):
+            st.markdown(f"☑️ **Marcar várias de uma vez** — selecionadas: **{len(escolhidas)}** "
+                        f"de {len(novas)}")
+            b1, b2, b3, b4 = st.columns(4)
+            with b1:
+                if st.button("☑️ Selecionar todas", use_container_width=True, key=k + "lote_todas"):
+                    for x in ids_novas:
+                        st.session_state[k + f"sel_{x}"] = True
+                    st.session_state.pop(k + "conf_lote", None)
+                    st.rerun()
+            with b2:
+                if st.button("⬜ Limpar", use_container_width=True, key=k + "lote_limpar"):
+                    for x in ids_novas:
+                        st.session_state[k + f"sel_{x}"] = False
+                    st.session_state.pop(k + "conf_lote", None)
+                    st.rerun()
+            with b3:
+                if st.button(f"✅ Fechou ({len(escolhidas)})", disabled=not escolhidas,
+                             use_container_width=True, key=k + "lote_fechou"):
+                    st.session_state[k + "conf_lote"] = ("FECHOU", [i["id"] for i in escolhidas])
+                    st.session_state.pop(k + "conf", None)
+                    st.rerun()
+            with b4:
+                if st.button(f"❌ Não fechou ({len(escolhidas)})", disabled=not escolhidas,
+                             use_container_width=True, key=k + "lote_nao"):
+                    st.session_state[k + "conf_lote"] = ("NAO_FECHOU", [i["id"] for i in escolhidas])
+                    st.session_state.pop(k + "conf", None)
+                    st.rerun()
+            if lote_conf:
+                # so as que AINDA estao novas; o banco decide de novo cada uma
+                alvo = [i for i in novas if i["id"] in set(lote_conf[1])]
+                por_quem = {}
+                for i in alvo:
+                    q = nomes.get(i["indicante"], i["indicante"])
+                    por_quem[q] = por_quem.get(q, 0) + 1
+                quem_txt = ", ".join(f"**{_md(q)}** recebe {n}" for q, n in
+                                     sorted(por_quem.items(), key=lambda x: -x[1]))
+                lista = ", ".join(_md(i["nome"]) for i in alvo)
+                if lote_conf[0] == "FECHOU":
+                    st.warning(f"⚠️ Confirmar: **{len(alvo)}** indicações FECHARAM plano? Cada uma "
+                               f"dá 1 selo e manda 1 mensagem (template pago) para quem indicou — "
+                               f"{quem_txt}. **Não dá para desfazer.**\n\n{lista}")
+                else:
+                    st.warning(f"⚠️ Confirmar: **{len(alvo)}** indicações NÃO fecharam? Cada uma "
+                               f"manda 1 mensagem (template pago) para quem indicou — {quem_txt}. "
+                               f"Se alguma fechar depois, é só marcar FECHOU nela.\n\n{lista}")
+                s1, s2, _ = st.columns([1, 1, 2])
+                with s1:
+                    if st.button(f"✅ Sim, confirmar as {len(alvo)}", type="primary",
+                                 disabled=not alvo, use_container_width=True, key=k + "lote_sim"):
+                        if st.session_state.get(k + "em_andamento"):
+                            st.warning("⚠️ Já está enviando. Aguarde.")
+                        else:
+                            st.session_state[k + "em_andamento"] = True
+                            res = []
+                            try:
+                                with st.spinner(f"Marcando {len(alvo)} e mandando as mensagens..."):
+                                    for n_i, i in enumerate(alvo):
+                                        if n_i:
+                                            time.sleep(1)            # 1 s entre envios (Pos, 13/07)
+                                        res.append(_decidir(i["id"], lote_conf[0]))
+                                        st.session_state[k + f"sel_{i['id']}"] = False
+                            finally:
+                                st.session_state[k + "em_andamento"] = False
+                                st.session_state.pop(k + "conf_lote", None)
+                                st.session_state[k + "msg_lote"] = res
+                            st.rerun()
+                with s2:
+                    if st.button("Cancelar", use_container_width=True, key=k + "lote_cancela"):
+                        st.session_state.pop(k + "conf_lote", None)
+                        st.rerun()
 
     for i in novas:
         _linha_indicacao(i, com_nao_fechou=True)
