@@ -1770,14 +1770,51 @@ def _executar_set_modo(tel, modo, nome):
     st.rerun()
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def _contatos_cliente_supabase(camp_id):
+    """
+    IEG-01 (06/10/2026): os contatos de UMA campanha, direto do Supabase.
+
+    Antes isto vinha do endpoint `contatos_cliente` do Apps Script, que faz
+    `getDataRange().getValues()` na aba Indicações inteira (20.209 linhas em
+    06/10, 886 campanhas) para filtrar 20 — e estourava o timeout de 20 s.
+
+    Devolve a lista de dicionários, no mesmo formato que o Apps Script devolvia
+    em `linhas` (as mesmas chaves nome_indicado / telefone_indicado).
+
+    NAO devolve {'_erro': ...}: em caso de falha, LEVANTA. E de proposito —
+    `st.cache_data` guardaria o erro por 30 s e o "Tente atualizar" nao
+    tentaria nada. Quem chama trata a excecao.
+    """
+    sb = _get_supabase_zapi()
+    cols = ("campanha_id,telefone_cliente,nome_cliente,unidade,funcionaria,"
+            "telefone_indicado,nome_indicado,status,motivo,data,arquivada_em")
+    resp = (sb.table("indicacoes")
+              .select(cols)
+              .eq("campanha_id", camp_id)
+              .order("id")
+              .limit(2000)
+              .execute())
+    return resp.data or []
+
+
 def _render_lista_contatos(camp_id, nome):
     """Bloco expansível com os 20 contatos da campanha."""
+    contatos_lista = None
     with st.spinner(f"Carregando contatos da {nome}..."):
-        contatos_data = _zapi_get("contatos_cliente", campanha_id=camp_id)
-    if _mostrar_erro_e_parar(contatos_data, "(carregando contatos)"):
-        return
+        try:
+            contatos_lista = _contatos_cliente_supabase(camp_id)
+        except Exception as e:
+            st.warning(f"⚠️ Não consegui ler os contatos no banco ({str(e)[:120]}). "
+                       "Tentando pelo Apps Script…")
+            contatos_lista = None
+        # sincronia atrasada ou falha do banco: cai no caminho antigo
+        if not contatos_lista:
+            contatos_data = _zapi_get("contatos_cliente", campanha_id=camp_id)
+            if _mostrar_erro_e_parar(contatos_data, "(carregando contatos)"):
+                return
+            contatos_lista = contatos_data.get("linhas", [])
 
-    contatos_lista = contatos_data.get("linhas", [])
     if not contatos_lista:
         st.info("Nenhum contato encontrado nessa campanha (estranho).")
         return
