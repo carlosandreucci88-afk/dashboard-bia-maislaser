@@ -3052,13 +3052,28 @@ def tela_zapi_clientes_programa():
 
     if st.session_state.get('cliprog_mostrar_contatos') == camp_id and camp_id:
         st.markdown(f"#### 📞 Contatos enviados por {nome_cli}")
+        contatos, erro_contatos = None, None
         with st.spinner("Buscando contatos..."):
-            contatos_data = _zapi_get("contatos_cliente", campanha_id=camp_id)
+            # IEG-02 (06/10/2026): o mesmo caminho do "Ver os 20 contatos" (IEG-01).
+            # Antes isto ia direto ao Apps Script, que le a aba Indicações inteira
+            # (20.209 linhas em 06/10) e estourava os 20 s.
+            try:
+                contatos = _contatos_cliente_supabase(camp_id)
+            except Exception as e:
+                st.warning(f"⚠️ Não consegui ler os contatos no banco ({str(e)[:120]}). "
+                           "Tentando pelo Apps Script…")
+                contatos = None
+            if not contatos:          # vazio (sincronia atrasada) ou falha: reserva
+                d = _zapi_get("contatos_cliente", campanha_id=camp_id)
+                if isinstance(d, dict) and d.get("_erro"):
+                    erro_contatos = d["_erro"]
+                else:
+                    contatos = d.get("linhas", []) if isinstance(d, dict) else []
 
-        if isinstance(contatos_data, dict) and contatos_data.get("_erro"):
-            st.error(contatos_data["_erro"])
+        if erro_contatos:
+            st.error(erro_contatos)
         else:
-            contatos = contatos_data.get("linhas", []) if isinstance(contatos_data, dict) else []
+            contatos = contatos or []
             if contatos:
                 df_c = pd.DataFrame(contatos)
                 cols_c = [c for c in ['nome_indicado', 'telefone_indicado', 'status', 'motivo'] if c in df_c.columns]
