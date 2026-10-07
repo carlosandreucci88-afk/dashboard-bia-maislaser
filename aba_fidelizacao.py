@@ -95,7 +95,7 @@ META_API         = "v23.0"                                 # a mesma da webhook-
 HORA_INICIO      = 8                                       # espelha o default do Pos
 HORA_FIM         = 19
 DIAS_REINSCRICAO = 60                                      # espelho do fid_criar_lote
-VERSAO_ABA       = "FID-22 v1"
+VERSAO_ABA       = "FID-25.1 v1"
 TEMPLATE_FECHOU     = "maislaser_fid_indicacao_fechou_v1"      # Ativo · Servicos (29/09)
 TEMPLATE_NAO_FECHOU = "maislaser_fid_indicacao_nao_fechou_v1"  # Ativo · Servicos (29/09)
 
@@ -426,51 +426,21 @@ def _executar(unidade, validos, lidas, arquivo_nome, k):
         resumo["alerta"] = lote.get("telefone_alerta")      # FID-08: o que ESTE lote herdou
         resumo["pulados_banco"] = lote.get("puladas") or []
 
-        # 2. quem ficou na FILA deste lote - relido do banco, que e quem manda
-        fila = (_sb().table("fid_participantes").select("telefone,nome")
+        # 2. 🔴 FID-25.1: A TELA NÃO MANDA MAIS.
+        # Antes, daqui para baixo o painel percorria a FILA dentro da própria
+        # tela (reservar -> template -> confirmar, 1 s cada). Um rerun do
+        # Streamlit matava o laço no meio e o resto do lote ficava em FILA sem
+        # ninguém para mandar (caso Taina/Caroline, lote 32, 06/10).
+        # Agora quem manda é o dreno do FID-25: o pg_cron (job 15 `fid-fila`,
+        # de 1 em 1 min, 8h-20h) acorda a webhook em ?fila=1, o banco reserva
+        # até 30 por rodada (fid_reservar_fila) e a webhook manda o MESMO
+        # template, com o MESMO 1 s entre envios. Fechar esta página não para
+        # mais nada.
+        # O número da fila vem do banco, que é quem manda — não da planilha.
+        fila = (_sb().table("fid_participantes").select("telefone", count="exact")
                   .eq("lote_id", lote["lote_id"]).eq("status", "FILA")
-                  .order("telefone").execute().data) or []
-        prog = st.progress(0.0)
-        txt = st.empty()
-
-        # 3. uma por uma: carimba, manda, confirma
-        for i, p in enumerate(fila):
-            tel = p["telefone"]
-            txt.text(f"Enviando {i + 1}/{len(fila)} — {p['nome']}…")
-            prog.progress((i + 1) / len(fila))
-            wamid = None
-            try:
-                res = _sb().rpc("fid_reservar_participante", {"p_telefone": tel}).execute().data
-                if not (isinstance(res, dict) and res.get("ok")):
-                    resumo["tomados_por_outro"].append({"telefone": tel, "retorno": str(res)[:200]})
-                    continue
-                wamid, err = enviar_template(tel, p["nome"])
-                if wamid:
-                    ok, msg = confirmar(tel, wamid)
-                    if ok:
-                        resumo["enviados"] += 1
-                    else:
-                        resumo["presos"].append({"telefone": tel, "wamid": wamid, "erro": msg})
-                else:
-                    codigo, mensagem, talvez = err
-                    cod = ("TALVEZ_SAIU:" if talvez else "NAO_SAIU:") + codigo
-                    try:
-                        _sb().rpc("fid_registrar_erro", {"p_telefone": tel, "p_codigo": cod,
-                                                         "p_mensagem": mensagem}).execute()
-                    except Exception as e2:
-                        mensagem += f" [e o erro NÃO foi gravado no banco: {str(e2)[:150]}]"
-                    resumo["erros"].append({"telefone": tel, "codigo": cod,
-                                            "mensagem": mensagem[:300]})
-            except Exception as e:
-                # se ja existe wamid, a mensagem SAIU - isso nao pode sumir da tela
-                item = {"telefone": tel, "erro": str(e)[:300]}
-                if wamid:
-                    item["wamid"] = wamid
-                    resumo["presos"].append(item)
-                else:
-                    resumo["falhas_inesperadas"].append(item)
-            finally:
-                time.sleep(1.0)                    # Pos, 13/07: 0,3 s era pouco
+                  .limit(1).execute())
+        resumo["na_fila"] = fila.count if fila.count is not None else len(fila.data or [])
 
         st.session_state[k + "resumo"] = resumo
         st.session_state[k + "finalizado"] = True
@@ -480,43 +450,41 @@ def _executar(unidade, validos, lidas, arquivo_nome, k):
 
 
 def _tela_resumo(k):
+    # 🔴 FID-25.1: o painel não manda mais, então não existe mais "enviados",
+    # "presos", "erros de envio" nem "tomados por outro disparo" NESTA tela —
+    # isso tudo é do robô agora e aparece no 📊 Relatório. Aqui fica só o que o
+    # fid_criar_lote devolveu: o lote, o alerta herdado, quem entrou na fila e
+    # quem o banco pulou.
     r = st.session_state.get(k + "resumo", {})
-    st.markdown("### 🎉 Disparo finalizado")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("✅ Enviados", r.get("enviados", 0))
-    c2.metric("❌ Erros", len(r.get("erros", [])))
-    c3.metric("⏭️ Pulados pelo banco", len(r.get("pulados_banco", [])))
+    na_fila = int(r.get("na_fila") or 0)
+    hora = datetime.now(TZ_SP).hour
+
+    st.markdown("### ✅ Lote criado — o robô está mandando")
+    c1, c2 = st.columns(2)
+    c1.metric("📋 Na fila", na_fila)
+    c2.metric("⏭️ Pulados pelo banco", len(r.get("pulados_banco", [])))
     st.caption(f"Lote {r.get('lote_id')} · alerta deste lote: +{r.get('alerta')} · {VERSAO_ABA}")
 
-    if r.get("presos"):
-        st.error(
-            "🔴 **A mensagem SAIU para estas clientes, mas o banco NÃO gravou.** "
-            "**NÃO redispare** — vai duplicar. Enquanto não corrigir, o clique delas "
-            "não acha a linha. A correção é a mesma função, e repetir é seguro:")
-        st.code("\n".join(f"select fid_confirmar_envio('{p['telefone']}', '{p['wamid']}');"
-                          for p in r["presos"] if p.get("wamid")), language="sql")
-        st.dataframe(pd.DataFrame(r["presos"]), use_container_width=True, hide_index=True)
-    if r.get("erros"):
-        # FID-08: o titulo dizia TALVEZ_SAIU para QUALQUER erro. Agora conta cada um.
-        talvez = sum(1 for e in r["erros"] if str(e.get("codigo", "")).startswith("TALVEZ_SAIU"))
-        nao = len(r["erros"]) - talvez
-        partes = []
-        if talvez:
-            partes.append(f"{talvez} TALVEZ_SAIU (não dá para afirmar que não chegou)")
-        if nao:
-            partes.append(f"{nao} NAO_SAIU (não chegou)")
-        with st.expander(f"❌ {len(r['erros'])} erro(s) — " + " · ".join(partes)):
-            st.dataframe(pd.DataFrame(r["erros"]), use_container_width=True, hide_index=True)
+    if na_fila:
+        if 8 <= hora < 20:
+            minutos = max(1, -(-na_fila // 30))     # 30 por rodada, 1 rodada/min
+            st.success(
+                f"**Pode fechar esta página.** O disparo não vive mais na tela: "
+                f"quem manda é o robô, direto do banco, de 1 em 1 min.\n\n"
+                f"As **{na_fila}** cliente(s) devem sair em até **~{minutos} min**. "
+                f"Acompanhe em **📊 Relatório**.")
+        else:
+            st.warning(
+                f"🌙 **Fora do horário de envio (8h às 20h).** As **{na_fila}** "
+                f"cliente(s) estão na fila e **começam a sair às 8h** — nada se "
+                f"perde, e você não precisa estar aqui.\n\n"
+                f"**Pode fechar esta página.**")
+    else:
+        st.info("Nenhuma cliente entrou na fila deste lote — veja os pulados abaixo.")
+
     if r.get("pulados_banco"):
         with st.expander(f"⏭️ {len(r['pulados_banco'])} pulada(s) pelo banco"):
             st.dataframe(pd.DataFrame(r["pulados_banco"]), use_container_width=True, hide_index=True)
-    if r.get("tomados_por_outro"):
-        with st.expander(f"↪️ {len(r['tomados_por_outro'])} já tinham saído da fila (outro disparo pegou antes)"):
-            st.dataframe(pd.DataFrame(r["tomados_por_outro"]), use_container_width=True, hide_index=True)
-    if r.get("falhas_inesperadas"):
-        st.warning("⚠️ Falhas fora do previsto — **podem ter ficado presas em RESERVADO** "
-                   "(é o que a FID-05 vai varrer). Nenhuma delas recebeu mensagem:")
-        st.dataframe(pd.DataFrame(r["falhas_inesperadas"]), use_container_width=True, hide_index=True)
 
     if st.button("🔄 Fazer novo disparo", type="primary", use_container_width=True,
                  key=k + "btn_novo"):
